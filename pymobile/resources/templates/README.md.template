@@ -11,7 +11,8 @@ pymobile run          # preview the UI tree on your machine
 ## Build
 
 ```bash
-pymobile build            # incremental build
+pymobile build --native   # real, signed, installable APK (first: pymobile setup-sdk)
+pymobile build            # fast incremental check, not installable on a device
 pymobile build --clean    # full rebuild
 pymobile build --icon assets/icon.png
 ```

@@ -21,6 +21,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
+      # The README names the current version in two examples; keep them in
+      # sync with pymobile/__init__.py (python sync_readme_version.py).
+      - run: python sync_readme_version.py --check
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
       - run: pytest

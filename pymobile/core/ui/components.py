@@ -98,7 +98,11 @@ class Label(Widget):
 
 
 class Button(Widget):
-    """A tappable button."""
+    """A tappable button.
+
+    ``on_press`` may return a value, so ``Button("Back", on_press=self.app.pop)``
+    type-checks as is — no ``lambda: self.app.pop()`` wrapper needed.
+    """
 
     type_name = "Button"
     __slots__ = ("_text", "on_press")
@@ -107,7 +111,7 @@ class Button(Widget):
         self,
         text: str = "",
         *,
-        on_press: Callable[[], None] | None = None,
+        on_press: Callable[[], object] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -741,7 +745,7 @@ class Chip(Widget):
         text: str = "",
         *,
         selected: bool = False,
-        on_press: Callable[[], None] | None = None,
+        on_press: Callable[[], object] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -982,7 +986,7 @@ class RadioButton(Widget):
         text: str = "",
         *,
         selected: bool = False,
-        on_press: Callable[[], None] | None = None,
+        on_press: Callable[[], object] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -1303,7 +1307,7 @@ class Link(Widget):
         text: str = "",
         *,
         url: str = "",
-        on_press: Callable[[], None] | None = None,
+        on_press: Callable[[], object] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -1333,7 +1337,9 @@ class Link(Widget):
             # This used to import ``pymobile.bridge``, which does not exist,
             # so every Link with a url raised ModuleNotFoundError off-device.
             screen = self.screen
-            app = screen.app if screen is not None else None
+            # _app: the public property raises once the screen is off the stack;
+            # a Link tapped on a detached tree must fall through to the bridge.
+            app = screen._app if screen is not None else None
             if app is not None:
                 app.bridge.open_url(self.url)
             else:

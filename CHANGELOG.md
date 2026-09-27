@@ -3,6 +3,46 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.8.1] — 2026-09-27
+
+### Added
+
+- **`ConfirmDialog.confirm()` / `.cancel()`** — public test helpers that do
+  exactly what the renderer does on a button tap: close the dialog, then fire
+  `on_confirm` / `on_cancel` (renamed from the private `_accept` /
+  `_decline`). On par with `ListTile.swipe()` and `Snackbar.press()`, so tests
+  drive the dialog without a bridge or event loop.
+
+### Changed
+
+- **`Screen.app` is a property, not a `None`-able attribute.** It returns the
+  running `App` and, once the screen leaves the stack (`pop()`, `replace()`,
+  `reset()`, app shutdown), raises
+  `PyMobileError("screen '<title>' is no longer on the stack",
+  hint="grab app = self.app before calling pop()")` instead of silently
+  returning `None`. `App | None` is gone from the public types: a callback
+  that may outlive the screen grabs `app = self.app` before calling `pop()`,
+  and a stale callback now fails immediately with an actionable error instead
+  of a cryptic `AttributeError` on `None` a few lines later.
+- **`on_press` accepts callbacks that return a value** (`Callable[[],
+  object]` instead of `Callable[[], None]`) on `Button`, `Chip`,
+  `RadioButton`, `Link` and `ListTile`: `Button("Back", on_press=self.app.pop)`
+  type-checks as is — no `lambda: self.app.pop()` wrapper.
+- **`pymobile init` templates** — the generated README documents
+  `pymobile build --native` (real, signed, installable APK; `pymobile
+  setup-sdk` first) and marks the plain `build` as a non-installable
+  structural check; the generated config adds `docs/**` to `exclude` so
+  documentation is never shipped into the APK; the generated `main.py` drops
+  the now-dead `if self.app is not None` guards.
+
+### Documentation
+
+- APK signature schemes corrected to `v2+v3`: the toolchain signs with the
+  v2+v3 schemes, while the docs described `v1+v2+v3` (README, two places,
+  plus the 0.1.0 changelog entry).
+- The README navigation example uses `on_press=self.app.pop` instead of
+  `on_press=lambda: self.app.pop()`.
+
 ## [0.8.0] — 2026-09-26
 
 ### Added
@@ -1007,7 +1047,7 @@ First public release.
 **APK build**
 
 - Native backend: `aapt2` → `d8` → `zipalign` → `apksigner`, producing a signed
-  (v1+v2+v3) APK that installs on a device.
+  (v2+v3) APK that installs on a device.
 - Embedded CPython 3.14 for arm64, using the official python.org builds.
 - `pymobile setup-sdk` downloads JDK 17 and the Android SDK (~800 MB). The NDK
   is not required: a prebuilt JNI bridge ships with the package.

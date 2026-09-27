@@ -310,7 +310,7 @@ class ListTile(Widget):
         *,
         subtitle: str = "",
         trailing: str = "",
-        on_press: Callable[[], None] | None = None,
+        on_press: Callable[[], object] | None = None,
         on_long_press: Callable[[], None] | None = None,
         on_swipe_left: Callable[[], None] | None = None,
         on_swipe_right: Callable[[], None] | None = None,

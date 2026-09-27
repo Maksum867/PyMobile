@@ -30,7 +30,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.8.0`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.8.1`) and read the
 > changelog before upgrading. Bug reports are genuinely welcome.
 
 ---
@@ -121,7 +121,7 @@ device. No Java, no Gradle, no Android Studio.
 
 | | |
 | --- | --- |
-| **Real APKs** | Signed with v1+v2+v3 schemes, containing `classes.dex`, `resources.arsc` and an embedded CPython 3.14 for ARM64. |
+| **Real APKs** | Signed with v2+v3 schemes, containing `classes.dex`, `resources.arsc` and an embedded CPython 3.14 for ARM64. |
 | **Native views** | Widgets become genuine `TextView`, `Button`, `EditText`, `Switch`, `ProgressBar` and `LinearLayout` instances — not a web view or a custom canvas. |
 | **Fast** | About five seconds per build. An unchanged rebuild is instant. |
 | **Small setup** | ~800 MB of tooling, downloaded automatically. The NDK is not required. |
@@ -787,7 +787,7 @@ class Settings(Screen):
     def build(self) -> Widget:
         return Column(
             Label("Second screen"),
-            Button("Back", on_press=lambda: self.app.pop()),
+            Button("Back", on_press=self.app.pop),
         )
 
     def on_mount(self):   ...   # once, when pushed onto the stack
@@ -1648,7 +1648,7 @@ lib/arm64-v8a/*.so           CPython, OpenSSL, SQLite, the JNI bridge
 assets/app/                  your code and the pymobile package
 assets/python/               standard library and CA certificates
 res/mipmap-*/icon.png        icons, five densities
-META-INF/                    signature (v1+v2+v3)
+META-INF/                    signature (v2+v3)
 ```
 
 Builds are reproducible: identical inputs produce an identical APK payload.
@@ -1787,7 +1787,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.8.0", "platform": "android",
+# {"framework_version": "0.8.1", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 

@@ -40,11 +40,34 @@ class Screen:
 
     def __init__(self, title: str | None = None) -> None:
         self.title = title or self.title or type(self).__name__
-        self.app: App | None = None
+        self._app: App | None = None
         self._root: Widget | None = None
         self._mounted = False
         self._warned_manual_render = False
         self._subscriptions: list[Subscription] = []
+
+    @property
+    def app(self) -> App:
+        """The running application this screen is attached to.
+
+        The navigator clears the link when the screen leaves the stack, so
+        a callback that outlives the screen must grab the reference first::
+
+            def leave(self):
+                app = self.app   # still valid during the current dispatch
+                app.pop()
+
+        After ``pop()`` this raises :class:`~pymobile.errors.PyMobileError`
+        instead of returning ``None`` — a stale callback reaching for the
+        application of a screen that no longer exists is a bug that used to
+        fail three lines later with a cryptic ``AttributeError`` on ``None``.
+        """
+        if self._app is None:
+            raise PyMobileError(
+                f"screen {self.title!r} is no longer on the stack",
+                hint="grab app = self.app before calling pop()",
+            )
+        return self._app
 
     # -- construction ------------------------------------------------------
     def build(self) -> Widget:
@@ -129,7 +152,7 @@ class Screen:
         application code rarely needs it. Redraws are coalesced by the app: a
         loop that updates ten labels still results in a single render.
         """
-        app = self.app
+        app = self._app
         if app is None or app.navigator.current is not self:
             return
         if app.auto_render:
@@ -162,8 +185,9 @@ class Screen:
             for node in self._root.walk():
                 node._parent = None
         self._root = None
-        if self.app is not None and self.app.navigator.current is self:
-            self.app.render()
+        app = self._app
+        if app is not None and app.navigator.current is self:
+            app.render()
 
     @overload
     def find(self, widget_id: str) -> Widget | None: ...
@@ -219,12 +243,12 @@ class Screen:
         The returned :class:`~pymobile.core.events.Subscription` can still be
         cancelled by hand for a one-shot listener.
         """
-        if self.app is None:
+        if self._app is None:
             raise PyMobileError(
                 f"{type(self).__name__}.on() needs a running app",
                 hint="Subscribe from on_mount() or later, not from __init__().",
             )
-        subscription = self.app.events.on(event, handler)
+        subscription = self._app.events.on(event, handler)
         self._subscriptions.append(subscription)
         return subscription
 
@@ -296,13 +320,13 @@ class Navigator:
                 f"screen {screen.title!r} is already on the stack",
                 hint="Create new instance: app.push(SettingsScreen())",
             )
-        screen.app = self._app
+        screen._app = self._app
         # Build the widget tree BEFORE lifecycle hooks so on_mount/on_show
         # can safely access widgets created in build() (e.g. self.label).
         try:
             screen.root  # noqa: B018 - builds and validates the tree
         except BaseException:
-            screen.app = None
+            screen._app = None
             raise
 
     def _show_new(self, screen: ScreenT) -> ScreenT:
@@ -322,7 +346,7 @@ class Navigator:
         screen._mounted = False
         screen.on_unmount()
         screen._cancel_subscriptions()
-        screen.app = None
+        screen._app = None
 
     def push(self, screen: ScreenT) -> ScreenT:
         """Show ``screen`` on top of the stack."""
@@ -356,7 +380,7 @@ class Navigator:
         # hook will run on this screen.
         screen.on_unmount()
         screen._cancel_subscriptions()
-        screen.app = None
+        screen._app = None
         current = self.current
         if current is not None:
             current.on_show()

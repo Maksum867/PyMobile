@@ -49,13 +49,11 @@ class HomeScreen(Screen):
         self.taps += 1
         self.counter.set_text(f"Taps: {self.taps}")
         # set_text() redraws the screen by itself: no render() call needed.
-        if self.app is not None:
-            self.app.vibrate(30)
+        self.app.vibrate(30)
 
     def on_notify(self) -> None:
         """Post a local notification."""
-        if self.app is not None:
-            self.app.notify("{{name}}", f"You tapped {self.taps} time(s).")
+        self.app.notify("{{name}}", f"You tapped {self.taps} time(s).")
 
 
 def main() -> None:

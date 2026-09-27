@@ -86,5 +86,4 @@ Thumbs.db
 pymobile-demo/
 PYPI_INSTRUCTIONS.md
 tools/
-.pymobile-fix-backup-20260905-193825
-.pymobile-064-backup-20260905-224856
+sync_readme_version.py

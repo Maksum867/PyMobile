@@ -36,6 +36,7 @@ exclude = [
     "**/__pycache__/**",
     "**/*.pyc",
     "tests/**",
+    "docs/**",
     ".git/**",
     ".venv/**",
     "build/**",

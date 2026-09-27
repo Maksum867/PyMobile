@@ -136,7 +136,13 @@ class ConfirmDialog(Dialog):
     """A yes/no question: two buttons, one outcome callback each.
 
     Whichever button the user taps closes the dialog first and then fires
-    ``on_confirm`` or ``on_cancel``.
+    ``on_confirm`` or ``on_cancel``. :meth:`confirm` and :meth:`cancel` do
+    exactly what the renderer does on a tap, so tests drive the dialog
+    directly::
+
+        self.ask = ConfirmDialog("Delete entry?", on_confirm=self.delete)
+        ...
+        self.ask.confirm()   # closes the dialog, then fires on_confirm
     """
 
     type_name = "Dialog"
@@ -161,8 +167,8 @@ class ConfirmDialog(Dialog):
         super().__init__(
             self._message_label,
             Row(
-                Button(cancel_text, on_press=self._decline),
-                Button(confirm_text, on_press=self._accept),
+                Button(cancel_text, on_press=self.cancel),
+                Button(confirm_text, on_press=self.confirm),
                 spacing=8,
             ),
             title=title,
@@ -177,18 +183,24 @@ class ConfirmDialog(Dialog):
     def message(self, value: str) -> None:
         self._message_label.text = value
 
-    def _accept(self) -> None:
+    def confirm(self) -> None:
+        """Simulate a tap on the confirm button: close, then fire ``on_confirm``.
+
+        The public twin of the confirm button's ``on_press`` — the same call a
+        renderer makes, so tests need no bridge or event loop.
+        """
         self.close()
         if self.on_confirm is not None:
             self.on_confirm()
 
-    def _decline(self) -> None:
+    def cancel(self) -> None:
+        """Simulate a tap on the cancel button: close, then fire ``on_cancel``."""
         self.close()
         if self.on_cancel is not None:
             self.on_cancel()
 
     def dismiss(self) -> None:
-        self._decline()
+        self.cancel()
 
 
 class BottomSheet(Dialog):
