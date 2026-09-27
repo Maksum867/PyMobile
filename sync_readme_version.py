@@ -15,6 +15,11 @@ reports) and rewrites both references::
     python sync_readme_version.py            # update README.md
     python sync_readme_version.py --check    # exit 1 when out of sync (CI)
 
+The version is parsed from the source instead of imported on purpose: the
+CI ``--check`` step runs before the package dependencies are installed, and
+importing ``pymobile`` on Python 3.10 without them fails (no ``tomllib``
+in the standard library, no ``tomli`` installed yet).
+
 Run it after bumping ``__version__`` (and the version in ``pyproject.toml``)
 so the committed README, the GitHub page and the PyPI description all show
 the same version.
@@ -34,11 +39,12 @@ DIAG = re.compile(r'"framework_version": "[\d.]+"')
 
 
 def current_version() -> str:
-    """The package's runtime version, from pymobile/__init__.py."""
-    sys.path.insert(0, str(ROOT))
-    from pymobile import __version__
-
-    return __version__
+    """The package's version, read from pymobile/__init__.py without importing it."""
+    init = (ROOT / "pymobile" / "__init__.py").read_text(encoding="utf-8")
+    match = re.search(r'^__version__ = "([^"]+)"', init, re.MULTILINE)
+    if match is None:
+        sys.exit("could not find __version__ in pymobile/__init__.py")
+    return match.group(1)
 
 
 def main() -> int:
