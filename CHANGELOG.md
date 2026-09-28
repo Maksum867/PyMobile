@@ -3,6 +3,147 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.8.2] — 2026-09-28
+
+A full-project review found twelve defects; all twelve are fixed here on top of
+the three below. Three failures that were quiet by design are now loud, and the
+two pieces of behaviour behind them are documented.
+
+### Added
+
+- **`AlertDialog.acknowledge()`** — the public twin of the OK button, on par
+  with `ConfirmDialog.confirm()`/`.cancel()`; `dismiss()` stays as an alias.
+  `confirm()`, `cancel()` and `acknowledge()` now fire their callback **once per
+  showing**: calling one twice, or `confirm()` then `cancel()`, no longer runs
+  the handler twice (on a device the button is gone after the first tap).
+  `open()` resets the outcome, so the same dialog can be shown again.
+- **`ProjectConfig.exclude_only`** and **`pymobile.core.config.DEFAULT_EXCLUDE`**
+  — the built-in exclude patterns are now visible and opt-out-able.
+- **`Validator.normalize()`** (and the `RuleSet` type alias) — expands
+  `{"email": "email"}` into `{"email": ["email"]}` without writing a Validator.
+- **`DataTable` rows** are checked in the constructor exactly as `add_row()`
+  checks them; `List.item_count` is checked on assignment as well as in the
+  constructor.
+
+### Fixed
+
+- **`exclude` no longer drops the built-in patterns.** A project with
+  `exclude = ["docs/**"]` used to ship `build/` — including the previous APK —
+  and `.git/`, `__pycache__/` and `tests/` into the package. `exclude` now
+  **adds** to the defaults; `exclude_only = true` replaces them, and the build
+  warns when `output_dir` would ship itself.
+- **`None` in a text prop renders as an empty string, not the word "None".**
+  `TextInput(None)`, `ListTile(None, subtitle=None)` printed `None` in all four
+  previews while the phone showed nothing; they go through
+  `pymobile.core.ui.contract.text_value()` now, like `Label` already did.
+- **`Switch`/`Checkbox` serialise `checked` as a real boolean.** A `"false"`
+  string (a value read back from JSON or the store) was truthy in Python and
+  `false` to the device's `optBoolean`, so the preview and the phone disagreed.
+  The constructor and the setter now parse `"false"`/`"no"`/`"off"`/`"0"` as
+  off and everything else by truthiness.
+- **A misspelled keyword argument on a built-in widget is named.** `Label(colr=…)`
+  was stored as an extension prop the renderers ignore and rendered without
+  colour, silently; `to_dict()` now logs
+  `Label has no prop 'colr': it was stored as an extension prop, which the
+  renderers ignore. Did you mean 'color'?` once per (class, prop), and a
+  misspelled callback (`Button(on_pres=…)`) raises a `TypeError` that points at
+  the argument. Extension props on a custom `type_name` are untouched.
+- **`App.run()` after `App.stop()` raises instead of half-starting.**
+  Restarting a stopped app logged "starting", ran jobs against a dead bridge and
+  left the UI frozen; it now raises
+  `PyMobileError("The application has already been stopped")` with the fix in
+  the hint ("create a new App").
+- **`HttpSecurityPolicy(allowed_hosts=["api.example.com:8443"])` matches.**
+  The port was stripped from the URL before comparing, so a policy with an
+  explicit port blocked every request to its own host. Bare hosts still match
+  any port; the default port of the scheme is used when the URL omits one; the
+  block message lists what is allowed; `allowed_hosts=[]` now raises
+  `ValueError` instead of blocking everything with the same message as a wrong
+  host.
+- **`Validator({"email": "email"})` validates instead of iterating the string.**
+  A bare string, mapping or callable rule was treated as a sequence of rules, so
+  `"email"` was checked one character at a time and every value passed. One rule
+  and a list of rules now behave the same; anything else raises
+  `ValueError("rules for 'email' must be a rule or a sequence of rules, got
+  'int'")` at construction.
+- **`toggle()` on a disabled `Switch`/`Checkbox` no longer flips it** (and no
+  longer fires `on_toggle`): the visual state said "disabled" while the value
+  changed anyway.
+- **`List.item_count` validates on assignment.** `lst.item_count = -5` was
+  accepted and the next `refresh()` emptied the list; a negative value raises
+  `ValueError`, a non-int `TypeError`, and shrinking the list drops the extra
+  rows on the next `refresh()`.
+- **`DataTable(headers, rows)` checks the row length like `add_row()` does.**
+  The constructor padded a short row (fine) but silently kept extras in one
+  place and rejected them in the other; both raise
+  `ValueError("row has 3 cells but the table has 2 column(s)…")` now, short rows
+  are padded, and `None` cells become empty strings.
+- **`Storage.increment()` keeps a numeric string, and `Storage.update()`
+  demands a default for a missing key.** `store.set("n", "5"); increment("n")`
+  returned `1` and overwrote the `5`; a numeric string is parsed now, and a
+  genuinely non-numeric value is reported with a warning. `update()` on a
+  missing key used to hand `None` to the caller's function (which then raised
+  `TypeError: unsupported operand type(s) for +: 'NoneType' and 'int'` from
+  inside their own lambda); it raises
+  `PyMobileError("Storage key 'cart' does not exist", hint="pass default=…")`
+  unless `default=` is passed — `default=None` is still valid.
+
+### Changed
+
+- **`flatten_catalogue()` and `flatten=True`** on `Translations.load()`,
+  `load_dict()`, `load_file()` and `load_dir()`. The lookup is flat — a dot is
+  part of the key — so a catalogue written as sections silently rendered bare
+  keys. Loading such a file now warns, naming the nested objects, and the
+  opt-in `flatten=True` turns `{"stats": {"balance": …}}` into `"stats.balance"`
+  without touching the default behaviour. A nested object whose keys are all
+  CLDR quantity names is still read as plural forms.
+- **`register_widget_type()` / `unregister_widget_type()` / `declared_types()` /
+  `known_types()` / `is_known()` / `unknown_types()`** in
+  `pymobile.core.ui.registry`; `register_widget_type`, `unregister_widget_type`
+  and `unknown_types` are also exported from `pymobile` itself. A custom `type_name` with no branch in
+  `ViewBuilder.java` is drawn as an empty view on the phone, and the registry
+  is what makes that visible: `unknown_types(screen.to_dict())` reports the
+  types a renderer cannot draw (a test-sized version of the check), and
+  declaring a type stops the new warnings.
+- **`Bridge.native_widgets`** — `True` on `AndroidBridge` and `JNIBridge`,
+  which hand the tree to the Java renderer; previews leave it `False`.
+
+### Fixed
+
+- **A redraw requested while a frame is being built no longer recurses.**
+  A shell that called `refresh()` from `build()` (or from a lifecycle hook
+  running during the frame) ran `build()` inside itself until the interpreter
+  raised `RecursionError`. `App.render()` is now non-re-entrant: the request is
+  recorded and one more frame is drawn when the current one finishes (at most
+  eight in a row, after which the loop is stopped and reported).
+- **A custom widget type is no longer dropped in silence.** `App` logs
+  `widget type 'BarChart' has no branch in the native renderer` once per type
+  when a frame goes to a native bridge, `BuildPipeline` warns about
+  `type_name = "…"` values nothing declares before the APK is written, and
+  `ViewBuilder.java` draws a red `[BarChart: no native renderer]` placeholder
+  and logs `no native renderer for widget type` instead of an empty view.
+- **A `refresh()` that cannot repaint anything now says so.** It used to be a
+  no-op for a screen that is not on the navigator stack (a tab embedded in
+  another screen's tree); the first one is logged with the fix — rebuild the
+  shell that owns the frame.
+
+### Documentation
+
+- README, *Configuration*: `exclude` **adds** to the built-in patterns (listed
+  in the table, with `exclude_only` and `DEFAULT_EXCLUDE`) — the old example
+  shipped `build/` into the APK.
+- README, *Languages*: new subsection **"Keys are flat — a dot is part of the
+  key"** — the flat-key rule, the shape that misses, and `flatten=True`.
+- README, *Screens and navigation*: new subsection **"Screens as tabs: one
+  shell owns the frame"** — only `navigator.current` is rendered, what
+  `refresh()`/`self.on()`/`self.app` do for a screen that is not on the stack,
+  and the shell-with-tabs pattern that works.
+- README, *Extending the framework*: the Java branch requirement is called out
+  with the failure it prevents (empty view on the phone, fine in the preview),
+  the four checks that make it visible, and the note that the prebuilt
+  `classes.dex` has to be rebuilt for a renderer change to reach a phone.
+  Also added to *Limitations*.
+
 ## [0.8.1] — 2026-09-27
 
 ### Added

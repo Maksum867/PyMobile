@@ -18,7 +18,7 @@ Build it with ``pymobile build``.
 
 from __future__ import annotations
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 __author__ = "MAKSYM KHLYSTUN"
 __license__ = "MIT"
 
@@ -35,6 +35,7 @@ from .core.config import ProjectConfig, load_config
 from .core.events import Event, EventBus
 from .core.i18n import (
     device_language,
+    flatten_catalogue,
     format_currency,
     format_date,
     format_datetime,
@@ -102,6 +103,11 @@ from .core.ui import (
     TimePicker,
     Widget,
 )
+from .core.ui.registry import (
+    register_widget_type,
+    unknown_types,
+    unregister_widget_type,
+)
 from .core.validation import ValidationError, Validator
 from .errors import (
     BridgeError,
@@ -146,6 +152,7 @@ __all__ = [
     "Response",
     # i18n
     "device_language",
+    "flatten_catalogue",
     "plural_category",
     "format_number",
     "format_percent",
@@ -155,6 +162,10 @@ __all__ = [
     "format_datetime",
     "t",
     "translations",
+    # widget registry (custom widgets)
+    "register_widget_type",
+    "unregister_widget_type",
+    "unknown_types",
     # ui
     "Widget",
     "Container",

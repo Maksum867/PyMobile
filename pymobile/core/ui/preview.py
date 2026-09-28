@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from ...log import get_logger
+from .contract import text_value
 
 __all__ = [
     "render_ascii",
@@ -392,11 +393,11 @@ def _leaf_lines(node: dict[str, Any], show_ids: bool = False) -> list[str]:
     disabled = not node.get("enabled", True)
 
     if node_type == "Label":
-        text = str(props.get("text", ""))
+        text = text_value(props.get("text", ""))
         return [text] if text else [" "]
 
     if node_type == "Button":
-        label = str(props.get("text", "")) or "button"
+        label = text_value(props.get("text", "")) or "button"
         return [f"({label})" if not disabled else f"({label}) ✗"]
 
     if node_type == "TextInput":
@@ -450,7 +451,7 @@ def _leaf_lines(node: dict[str, Any], show_ids: bool = False) -> list[str]:
         return [f"[{props.get('value', '')} ▾]"]
 
     if node_type == "Chip":
-        label = str(props.get("text", "")) or "chip"
+        label = text_value(props.get("text", "")) or "chip"
         mark = "● " if props.get("selected") else ""
         return [f"({mark}{label})" if not disabled else f"({mark}{label}) ✗"]
 
@@ -462,7 +463,9 @@ def _leaf_lines(node: dict[str, Any], show_ids: bool = False) -> list[str]:
         return [f"(-) {value} (+)"]
 
     if node_type == "SearchBar":
-        value = str(props.get("value", "")) or str(props.get("placeholder", "Search…"))
+        value = text_value(props.get("value", "")) or text_value(
+            props.get("placeholder", "Search…")
+        )
         return [f"⎡🔍 {value}⎦"]
 
     if node_type == "RadioButton":
@@ -479,7 +482,7 @@ def _leaf_lines(node: dict[str, Any], show_ids: bool = False) -> list[str]:
         return [f"[{props.get('text', '')}]"]
 
     if node_type == "Link":
-        text = str(props.get("text", "")) or "link"
+        text = text_value(props.get("text", "")) or "link"
         return [f"<{text}>"]
 
     if node_type == "DataTable":
@@ -507,9 +510,9 @@ def _leaf_lines(node: dict[str, Any], show_ids: bool = False) -> list[str]:
         return [f"[{props.get('text', '')[:2].upper()}]"]
 
     if node_type == "ListTile":
-        title = str(props.get("title", ""))
-        subtitle = str(props.get("subtitle", ""))
-        trailing = str(props.get("trailing", ""))
+        title = text_value(props.get("title", ""))
+        subtitle = text_value(props.get("subtitle", ""))
+        trailing = text_value(props.get("trailing", ""))
         base = title
         if subtitle:
             base += f" — {subtitle}"
@@ -525,7 +528,7 @@ def _leaf_lines(node: dict[str, Any], show_ids: bool = False) -> list[str]:
         return [bar, tabs, bar]
 
     if node_type == "Dialog":
-        title = str(props.get("title", ""))
+        title = text_value(props.get("title", ""))
         inner: list[str] = []
         for child in node.get("children", ()):
             inner.extend(_node_lines(child, show_ids=show_ids))

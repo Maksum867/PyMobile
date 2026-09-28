@@ -31,6 +31,10 @@ class JNIBridge(Bridge):
 
     name = "jni"
 
+    #: The tree is destined for the same Java renderer as the compiled bridge,
+    #: so an unknown widget type is reported here too.
+    native_widgets = True
+
     def __init__(self) -> None:
         self._classes: dict[str, Any] = {}
         # Java owns a Runnable only after its run() method begins. Keep a

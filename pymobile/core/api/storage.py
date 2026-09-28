@@ -33,12 +33,16 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
-from ...errors import ResourceError
+from ...errors import PyMobileError, ResourceError
 from ...log import get_logger
 
 __all__ = ["Storage", "default_storage_path"]
 
 _log = get_logger("api.storage")
+
+#: Sentinel for "the caller did not pass a default" (``None`` itself is a
+#: perfectly good default, so it cannot double as the marker).
+_UNSET: Any = object()
 
 
 DEFAULT_STORE_FILENAME = "pymobile_store.json"
@@ -347,7 +351,7 @@ class Storage:
                     self._data = snapshot
                     raise
 
-    def update(self, key: str, function: Callable[[Any], Any], default: Any = None) -> Any:
+    def update(self, key: str, function: Callable[[Any], Any], default: Any = _UNSET) -> Any:
         """Atomically replace ``key`` with ``function(current_value)``.
 
         ``store.update("cart", lambda items: [*items, new], default=[])`` is
@@ -355,10 +359,27 @@ class Storage:
         not: the read, the transformation and the persist happen under one
         lock without re-entry, so two concurrent updates cannot lose one
         another's change.
+
+        Without ``default``, a missing key is an error: the function used to
+        receive ``None`` and raise whatever it raised (``TypeError: unsupported
+        operand type(s) for +: 'NoneType' and 'int'``) from deep inside the
+        caller's own lambda. Pass ``default=None`` explicitly to keep the old
+        behaviour.
         """
         with self._lock:
             self._load()
-            current = _copy(self._data[key]) if key in self._data else _copy(default)
+            if key in self._data:
+                current = _copy(self._data[key])
+            elif default is _UNSET:
+                raise PyMobileError(
+                    f"Storage key {key!r} does not exist",
+                    hint=(
+                        "pass default=… to update a missing key, e.g. "
+                        'store.update("cart", add_item, default=[])'
+                    ),
+                )
+            else:
+                current = _copy(default)
             new_value = function(current)
             # Validate before touching memory: a non-JSON result must not end
             # up in the store and break every later write of any key.
@@ -370,11 +391,27 @@ class Storage:
     def increment(self, key: str, amount: float = 1) -> float:
         """Atomically add ``amount`` to a numeric entry and return the result.
 
-        Missing or non-numeric entries start from zero.
+        Missing entries start from zero. A value that looks like a number is
+        used as one: ``store.set("n", "5"); store.increment("n")`` is ``6``.
+        Anything else non-numeric is treated as zero *and the old value is
+        replaced* — the docstring always said "non-numeric entries start from
+        zero", but silently turning the string ``"5"`` into ``1`` lost data that
+        came back from JSON, so numeric strings are parsed first.
         """
         def bump(current: Any) -> float:
-            numeric = isinstance(current, (int, float)) and not isinstance(current, bool)
-            return (current if numeric else 0) + amount
+            if isinstance(current, bool):
+                return amount
+            if isinstance(current, (int, float)):
+                return current + amount
+            try:
+                return float(str(current).strip()) + amount
+            except (TypeError, ValueError):
+                _log.warning(
+                    "increment: %r held %r, which is not a number; counting from zero",
+                    key,
+                    current,
+                )
+                return amount
 
         return float(self.update(key, bump, default=0))
 

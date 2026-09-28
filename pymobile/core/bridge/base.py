@@ -46,6 +46,14 @@ class Bridge(ABC):
 
     name: str = "abstract"
 
+    #: Whether this bridge hands the serialised tree to the Java view layer
+    #: (``ViewBuilder.java``). It is what lets :class:`~pymobile.core.app.App`
+    #: warn about a widget type that renderer has no branch for: on the phone
+    #: such a node is drawn as an empty view, with no error anywhere, while the
+    #: desktop and browser previews print ``<BarChart>``. Previews leave this
+    #: ``False`` — they can draw whatever they are handed.
+    native_widgets: bool = False
+
     # -- lifecycle ---------------------------------------------------------
     @abstractmethod
     def is_available(self) -> bool:

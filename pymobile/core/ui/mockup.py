@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from ...log import get_logger
+from .contract import text_value
 from .preview import _SYMBOL_CANDIDATES, _as_node, _has_glyph
 
 __all__ = ["render_mockup"]
@@ -794,9 +795,9 @@ class _Layout:
         cross = (
             ""
             if kind in ("ScrollView", "SafeArea", "RadioGroup")
-            else str(props.get("cross_align") or "")
+            else text_value(props.get("cross_align") or "")
         )
-        align = str(props.get("align") or "") if kind == "Column" else ""
+        align = text_value(props.get("align") or "") if kind == "Column" else ""
         stretch = cross in ("", "stretch")
         if not fill and children:
             # WRAP_CONTENT: LinearLayout measures the children by their
@@ -916,8 +917,8 @@ class _Layout:
         pad = self._padding(style, (0, 0, 0, 0))
         cw = max(0.0, w - pad[0] - pad[2])
         spacing = float(props.get("spacing", 0) or 0)
-        cross = str(props.get("cross_align") or "")
-        align = str(props.get("align") or "")
+        cross = text_value(props.get("cross_align") or "")
+        align = text_value(props.get("align") or "")
         visible = [c for c in children if c.get("visible", True)]
         remaining = cw - spacing * max(0, len(visible) - 1)
         laid: list[_Box | None] = []
@@ -1173,7 +1174,7 @@ class _Layout:
         axis: str,
     ) -> _Box:
         p = self.p
-        text = str(props.get("text", ""))
+        text = text_value(props.get("text", ""))
         if kind == "Label":
             return self._text_box(text, 16, p["TEXT"], style, w, fill)
         if kind == "Link":
@@ -1203,7 +1204,7 @@ class _Layout:
             return self._switch(bool(props.get("checked")), w)
         if kind == "Checkbox":
             return self._checkbox(
-                bool(props.get("checked")), str(props.get("text", "")), style, w, fill
+                bool(props.get("checked")), text_value(props.get("text", "")), style, w, fill
             )
         if kind == "RadioButton":
             return self._radio(bool(props.get("selected")), text, style, w, fill)
@@ -1286,8 +1287,9 @@ class _Layout:
         self, kind: str, props: dict[str, Any], style: dict[str, Any], w: float, fill: bool
     ) -> _Box:
         p = self.p
-        value = str(props.get("value", ""))
-        placeholder = str(props.get("placeholder", "") or ("Search" if kind == "SearchBar" else ""))
+        value = text_value(props.get("value", ""))
+        default_hint = "Search" if kind == "SearchBar" else ""
+        placeholder = text_value(props.get("placeholder", "") or default_hint)
         if props.get("password") and value:
             value = "•" * len(value)
         shown, colour = (value, p["TEXT"]) if value else (placeholder, p["MUTED"])
@@ -1401,7 +1403,7 @@ class _Layout:
         box = _Box(w, 16)
         bar = _Box(w, 16, self._bar(self._fraction(props)))
         box.kids.append((0.0, 0.0, bar))
-        label = str(props.get("text", ""))
+        label = text_value(props.get("text", ""))
         if label:
             text = self._text_box(label, 13, self.p["MUTED"], style, w, False)
             box.kids.append((0.0, 16.0, text))
@@ -1455,7 +1457,7 @@ class _Layout:
     def _dropdown(self, props: dict[str, Any], style: dict[str, Any], w: float, fill: bool) -> _Box:
         p = self.p
         options = [str(o) for o in props.get("options", ()) or ()]
-        value = str(props.get("value") or (options[0] if options else ""))
+        value = text_value(props.get("value") or (options[0] if options else ""))
 
         def arrow(pt: _Painter, x: float, y: float, b: _Box) -> None:
             ax, cy = x + b.w - 20, y + b.h / 2 + 2
@@ -1469,7 +1471,13 @@ class _Layout:
         minus = self._button("\u2212", {}, 88, False)  # the minus sign the device shows
         plus = self._button("+", {}, 88, False)
         value = self._text_box(
-            str(props.get("value", 0)), 18, self.p["TEXT"], {}, 200, False, pad=(12, 0, 12, 0)
+            text_value(props.get("value", 0)),
+            18,
+            self.p["TEXT"],
+            {},
+            200,
+            False,
+            pad=(12, 0, 12, 0),
         )
         used = minus.w + value.w + plus.w
         box = _Box(w if fill else used, 48)
@@ -1484,7 +1492,7 @@ class _Layout:
     def _segmented(self, props: dict[str, Any], w: float, fill: bool) -> _Box:
         p = self.p
         options = [str(o) for o in props.get("options", ()) or ()]
-        selected = str(props.get("value", ""))
+        selected = text_value(props.get("value", ""))
         box = _Box(0, 48)
         x = 0.0
         for option in options:
@@ -1509,7 +1517,7 @@ class _Layout:
     def _bottom_nav(self, props: dict[str, Any], w: float) -> _Box:
         p = self.p
         options = [str(o) for o in props.get("options", ()) or ()]
-        selected = str(props.get("value", ""))
+        selected = text_value(props.get("value", ""))
         box = _Box(w, 48)
         if not options:
             return box
@@ -1566,13 +1574,13 @@ class _Layout:
         p = self.p
         pad = self._padding(style, (12, 10, 12, 10))
         inner = max(1.0, w - pad[0] - pad[2])
-        trailing = str(props.get("trailing", "") or "")
+        trailing = text_value(props.get("trailing", "") or "")
         trailing_box = (
             self._text_box(trailing, 18, p["MUTED"], {}, inner / 2, False) if trailing else None
         )
         text_w = inner - (trailing_box.w if trailing_box else 0)
-        title = self._text_box(str(props.get("title", "")), 16, p["TEXT"], {}, text_w, True)
-        subtitle_text = str(props.get("subtitle", "") or "")
+        title = self._text_box(text_value(props.get("title", "")), 16, p["TEXT"], {}, text_w, True)
+        subtitle_text = text_value(props.get("subtitle", "") or "")
         subtitle = (
             self._text_box(subtitle_text, 13, p["MUTED"], {}, text_w, True)
             if subtitle_text
@@ -1593,7 +1601,7 @@ class _Layout:
 
     def _image(self, props: dict[str, Any], style: dict[str, Any], w: float, fill: bool) -> _Box:
         p = self.p
-        source = str(props.get("source", "") or "")
+        source = text_value(props.get("source", "") or "")
         picture = self._load_image(source)
         cover = props.get("fit") == "cover"
         if picture is not None:
@@ -1695,7 +1703,7 @@ class _Layout:
         sheet = bool(props.get("sheet"))
         box_w = sw if sheet else round(sw * 0.88)
         inner_w = box_w - 32
-        title = str(props.get("title", "") or "")
+        title = text_value(props.get("title", "") or "")
         column = {"type": "Column", "children": node.get("children", []), "props": {}}
         content = self.layout(column, inner_w, fill=True)
         head = (

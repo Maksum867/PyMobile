@@ -259,7 +259,27 @@ def boolean(value: Any) -> str | None:
 # Validator
 # --------------------------------------------------------------------------
 RuleSpec = ValidatorFn | str | Mapping[str, Any]
-FieldRules = Mapping[str, Sequence[RuleSpec]] | Sequence[tuple[str, Sequence[RuleSpec]]]
+#: One rule or several: `"email"`, `["required", "email"]`, a callable, or a
+#: one-key mapping such as `{"between": [1, 120]}`.
+RuleSet = RuleSpec | Sequence[RuleSpec]
+FieldRules = Mapping[str, RuleSet] | Sequence[tuple[str, RuleSet]]
+
+
+def _as_rule_sequence(field: str, rules: RuleSet) -> Sequence[RuleSpec]:
+    """Wrap a single rule in a list; keep a sequence as it is.
+
+    Strings and mappings are sequences too, which is exactly how a bare
+    ``"email"`` turned into the rules ``"e"``, ``"m"``, ``"a"``, ``"i"``,
+    ``"l"``; a callable used to raise ``TypeError: not iterable``.
+    """
+    if isinstance(rules, (str, bytes, Mapping)) or callable(rules):
+        return [rules]
+    if not isinstance(rules, Sequence):
+        raise ValueError(
+            f"rules for {field!r} must be a rule or a sequence of rules, "
+            f"got {type(rules).__name__!r}"
+        )
+    return rules
 
 
 class Validator:
@@ -288,8 +308,22 @@ class Validator:
     __slots__ = ("_fields",)
 
     def __init__(self, fields: FieldRules = ()) -> None:
+        self._fields = [
+            (name, [self._resolve(rule) for rule in rules])
+            for name, rules in self.normalize(fields).items()
+        ]
+
+    @staticmethod
+    def normalize(fields: FieldRules = ()) -> dict[str, list[RuleSpec]]:
+        """Expand the accepted rule shapes into ``{field: [rule, …]}``.
+
+        A single rule needs no list — ``Validator({"email": "email"})`` and
+        ``Validator({"age": {"between": [1, 120]}})`` mean the same as their
+        one-element list forms. Without this, a bare string was iterated
+        character by character and failed with ``unknown validation rule: 'e'``.
+        """
         entries = fields.items() if isinstance(fields, Mapping) else fields
-        self._fields = [(name, [self._resolve(rule) for rule in rules]) for name, rules in entries]
+        return {name: list(_as_rule_sequence(name, rules)) for name, rules in entries}
 
     @staticmethod
     def _resolve(rule: RuleSpec) -> ValidatorFn:

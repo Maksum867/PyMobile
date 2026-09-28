@@ -20,7 +20,8 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from types import MappingProxyType
+from typing import Any, ClassVar
 
 from ...errors import NetworkError
 from ...log import get_logger
@@ -51,22 +52,49 @@ class HttpSecurityPolicy:
     require_https: bool = False
     allowed_hosts: frozenset[str] | None = None
 
+    #: Ports used when a URL does not state one, by scheme.
+    _DEFAULT_PORTS: ClassVar[Mapping[str, int]] = MappingProxyType({"http": 80, "https": 443})
+
     def __post_init__(self) -> None:
         # Hosts are compared case-insensitively; accept any iterable, so
         # allowed_hosts=["API.example.com"] works as written.
         if self.allowed_hosts is not None:
             if isinstance(self.allowed_hosts, str):
                 raise TypeError("allowed_hosts must be a collection of host names, not a str")
-            hosts = frozenset(h.strip().casefold() for h in self.allowed_hosts)
+            hosts = frozenset(h.strip().casefold() for h in self.allowed_hosts if h.strip())
+            empty = not hosts
             object.__setattr__(self, "allowed_hosts", hosts)
+            if empty:
+                raise ValueError(
+                    "allowed_hosts must not be empty; pass host names such as "
+                    "['api.example.com'] or leave it as None to allow every host"
+                )
 
     def validate(self, url: str) -> None:
         parsed = urllib.parse.urlparse(url)
         host = (parsed.hostname or "").casefold()
         if self.require_https and parsed.scheme != "https":
             raise NetworkError("Insecure HTTP is blocked by the security policy")
-        if self.allowed_hosts is not None and host not in self.allowed_hosts:
-            raise NetworkError(f"Host {host!r} is blocked by the security policy")
+        if self.allowed_hosts is None:
+            return
+        if host in self.allowed_hosts:
+            return
+        # An entry may name a port ("api.example.com:8443"). The port used to be
+        # compared as part of the string against a hostname that never carries
+        # one, so such an entry blocked the very host it allowed.
+        port = parsed.port
+        if port is None:
+            port = self._DEFAULT_PORTS.get(parsed.scheme, 0)
+        candidates = {f"{host}:{port}", f"[{host}]:{port}"}
+        if candidates & self.allowed_hosts:
+            return
+        raise NetworkError(
+            f"Host {host!r} is blocked by the security policy",
+            hint=(
+                "allowed_hosts accepts a bare host or host:port; currently allowed: "
+                + ", ".join(sorted(self.allowed_hosts))
+            ),
+        )
 
 
 #: Request headers that carry credentials and must not follow a redirect to

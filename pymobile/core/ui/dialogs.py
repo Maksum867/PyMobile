@@ -37,7 +37,7 @@ class Dialog(Container):
     """
 
     type_name = "Dialog"
-    __slots__ = ("_title", "sheet")
+    __slots__ = ("_title", "sheet", "_resolved")
 
     def __init__(
         self, *children: Widget, title: str = "", sheet: bool = False, **kwargs: Any
@@ -49,6 +49,11 @@ class Dialog(Container):
         super().__init__(*children, **kwargs)
         self._title = title
         self.sheet = sheet
+        #: Whether the current appearance already produced an outcome. The
+        #: helpers (confirm/cancel/acknowledge) check it, so the same call
+        #: twice fires the callback once — on a device the button is gone
+        #: after the first tap.
+        self._resolved = False
 
     @property
     def title(self) -> str:
@@ -68,6 +73,7 @@ class Dialog(Container):
 
     def open(self) -> None:
         """Show the dialog (``visible = True``)."""
+        self._resolved = False
         self.visible = True
 
     def close(self) -> None:
@@ -110,7 +116,7 @@ class AlertDialog(Dialog):
         self.button_text = button_text
         super().__init__(
             self._message_label,
-            Button(button_text, on_press=self._acknowledge),
+            Button(button_text, on_press=self.acknowledge),
             title=title,
             **kwargs,
         )
@@ -123,13 +129,22 @@ class AlertDialog(Dialog):
     def message(self, value: str) -> None:
         self._message_label.text = value
 
-    def _acknowledge(self) -> None:
+    def acknowledge(self) -> None:
+        """Close the dialog, then fire ``on_acknowledge`` (once per showing).
+
+        The public twin of the button's ``on_press``, next to
+        ``ConfirmDialog.confirm()``; :meth:`dismiss` does the same thing and
+        stays for the renderers.
+        """
+        if self._resolved:
+            return
+        self._resolved = True
         self.close()
         if self.on_acknowledge is not None:
             self.on_acknowledge()
 
     def dismiss(self) -> None:
-        self._acknowledge()
+        self.acknowledge()
 
 
 class ConfirmDialog(Dialog):
@@ -187,14 +202,22 @@ class ConfirmDialog(Dialog):
         """Simulate a tap on the confirm button: close, then fire ``on_confirm``.
 
         The public twin of the confirm button's ``on_press`` — the same call a
-        renderer makes, so tests need no bridge or event loop.
+        renderer makes, so tests need no bridge or event loop. Called twice
+        before the dialog is opened again, it fires once: on a device the button
+        no longer exists after the first tap.
         """
+        if self._resolved:
+            return
+        self._resolved = True
         self.close()
         if self.on_confirm is not None:
             self.on_confirm()
 
     def cancel(self) -> None:
         """Simulate a tap on the cancel button: close, then fire ``on_cancel``."""
+        if self._resolved:
+            return
+        self._resolved = True
         self.close()
         if self.on_cancel is not None:
             self.on_cancel()

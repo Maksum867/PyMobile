@@ -34,12 +34,18 @@ from .net.http import HttpClient
 from .platform import current_platform
 from .plugins import plugins as _plugin_registry
 from .scheduler import Scheduler, TimerHandle
+from .ui.registry import unknown_types
 from .ui.screen import Navigator, Screen, ScreenT
 from .ui.snackbar import DEFAULT_ACTION_DURATION, DEFAULT_DURATION, SNACKBAR_ID, Snackbar
 from .ui.theme import Theme
 
 #: Event kind the device bridge uses to wake the event loop for UI calls.
 WAKE_EVENT = "__wake__"
+
+#: How many frames in a row may be requested while a frame is being built.
+#: A handful is normal (a widget updated inside build()); a long run means a
+#: feedback loop, and the loop is stopped and reported instead of spinning.
+_MAX_DEFERRED_FRAMES = 8
 
 __all__ = ["App"]
 
@@ -228,6 +234,12 @@ class App:
         self._render_scheduled = False
         self._render_depth = 0
         self._render_lock = threading.RLock()
+        #: True while a frame is being serialised; a re-entrant render() request
+        #: is deferred instead of recursing into build() (see render()).
+        self._rendering = False
+        self._warned_render_loop = False
+        #: Widget types already reported as having no native renderer.
+        self._warned_unknown_types: set[str] = set()
         #: Serialises everything that touches widget state outside the device
         #: UI thread: event handlers, dispatched callbacks and rendering.
         self._ui_lock = threading.RLock()
@@ -313,6 +325,18 @@ class App:
         which keeps previews and tests non-blocking.
         """
         global _current
+        if self._ever_started and not self._running:
+            # stop() shuts the dispatcher, the job manager and the event
+            # subscriptions down for good. Running again used to work just
+            # enough to look alive: navigation and timers fine, the first
+            # run_job() raising "JobManager has been shut down".
+            raise PyMobileError(
+                "The application has already been stopped",
+                hint=(
+                    "stop() releases the job manager, the dispatcher and every event "
+                    "subscription; create a new App if the application should run again."
+                ),
+            )
         configure(self._log_level, log_file=self._log_file)
         _log.info("starting %s on %s (bridge=%s)", self.name, self.platform, self.bridge.name)
         self._running = True
@@ -542,9 +566,43 @@ class App:
         Calling this by hand is no longer required — widgets schedule their own
         redraws — but it stays available for the rare case that needs a frame
         pushed out right now.
+
+        Rendering is not re-entrant. ``render()`` reached *while a frame is
+        being built* — a shell that rebuilds itself from ``build()``, or from a
+        lifecycle hook running during that frame — records the request and
+        returns ``None``; the frame that is already in flight is drawn again
+        when it finishes. Without that, ``build()`` ran inside itself until the
+        interpreter raised ``RecursionError``.
         """
         with self._ui_lock:
-            return self._render_locked()
+            if self._rendering:
+                with self._render_lock:
+                    self._render_scheduled = True
+                _log.debug("render() re-entered while a frame was being built; deferring")
+                return None
+            self._rendering = True
+            try:
+                tree = self._render_locked()
+                for _ in range(_MAX_DEFERRED_FRAMES):
+                    with self._render_lock:
+                        if not self._render_scheduled:
+                            break
+                    tree = self._render_locked()
+                else:
+                    # Something redraws on every frame: stop, rather than spin.
+                    with self._render_lock:
+                        self._render_scheduled = False
+                    if not self._warned_render_loop:
+                        self._warned_render_loop = True
+                        _log.warning(
+                            "widgets changed on every frame %d times in a row; stopping "
+                            "the redraw loop — a callback probably rebuilds the tree "
+                            "during build()",
+                            _MAX_DEFERRED_FRAMES,
+                        )
+                return tree
+            finally:
+                self._rendering = False
 
     def _render_locked(self) -> dict[str, Any] | None:
         # Drain updates queued by background work before serialising the tree.
@@ -563,6 +621,7 @@ class App:
             bar = self._snackbar
             if bar is not None and bar.visible:
                 tree["snackbar"] = bar.to_dict()
+            self._check_widget_types(tree)
             payload = tree
             if getattr(self.bridge, "accepts_theme", False):
                 # The device renderer paints its own defaults (text, surfaces,
@@ -571,6 +630,31 @@ class App:
             self.bridge.render(payload)
         self.events.emit("app:render", source=screen.title, tree=tree)
         return tree
+
+    def _check_widget_types(self, tree: dict[str, Any]) -> None:
+        """Warn once about widget types the native renderer cannot draw.
+
+        ``ViewBuilder.java`` has one branch per built-in type; a custom
+        ``type_name`` without one becomes an *empty view* on the phone — no
+        exception, no placeholder — while the desktop previews print
+        ``<BarChart>`` and look fine. The walk runs only for bridges that feed
+        that renderer, so a preview never sees the warning, and each type is
+        reported once per app rather than once per frame.
+        """
+        if not getattr(self.bridge, "native_widgets", False):
+            return
+        for name in sorted(unknown_types(tree, renderer="android")):
+            if name in self._warned_unknown_types:
+                continue
+            self._warned_unknown_types.add(name)
+            _log.warning(
+                "widget type %r has no branch in the native renderer (ViewBuilder.java): "
+                "on the phone it draws as an empty view, silently. Add the case there and "
+                "declare it with register_widget_type(%r) so this warning stops — or "
+                "compose the widget from existing ones (Row/Column/ProgressBar).",
+                name,
+                name,
+            )
 
     def schedule_render(self) -> None:
         """Request a redraw of the visible screen, coalescing repeats.

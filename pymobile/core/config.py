@@ -22,7 +22,13 @@ except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10 only
 
 from ..errors import ConfigError
 
-__all__ = ["ProjectConfig", "load_config", "CONFIG_FILENAME", "RUNTIME_MIN_SDK"]
+__all__ = [
+    "ProjectConfig",
+    "load_config",
+    "CONFIG_FILENAME",
+    "RUNTIME_MIN_SDK",
+    "DEFAULT_EXCLUDE",
+]
 
 CONFIG_FILENAME = "pymobile.toml"
 
@@ -36,6 +42,25 @@ _ABI_CHOICES = ("arm64-v8a", "x86_64")  # only ABIs the packaged runtime ships
 #: imports ``preadv``, ``pwritev`` and ``lockf``, which older bionic lacks, so
 #: on Android 5-6 the app died at launch. An APK never declares less than this.
 RUNTIME_MIN_SDK = 24
+
+#: Patterns that are always excluded from the APK. ``exclude`` in
+#: ``pymobile.toml`` **adds** to these instead of replacing them: a project
+#: that lists one pattern of its own used to lose ``build/**`` and ship the
+#: previous APK (or anything else sitting in the output directory) inside the
+#: new one.
+DEFAULT_EXCLUDE: tuple[str, ...] = (
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "**/*.pyo",
+    "**/tests/**",
+    "tests/**",
+    "**/test_*.py",
+    ".git/**",
+    ".venv/**",
+    "venv/**",
+    "build/**",
+    "dist/**",
+)
 
 
 @dataclass(slots=True)
@@ -73,21 +98,11 @@ class ProjectConfig:
     minimal_stdlib: bool = False
     #: Leave OpenSSL, ssl.py and the CA bundle out — ~4 MB, no HTTPS.
     no_ssl: bool = False
-    exclude: list[str] = field(
-        default_factory=lambda: [
-            "**/__pycache__/**",
-            "**/*.pyc",
-            "**/*.pyo",
-            "**/tests/**",
-            "tests/**",
-            "**/test_*.py",
-            ".git/**",
-            ".venv/**",
-            "venv/**",
-            "build/**",
-            "dist/**",
-        ]
-    )
+    exclude: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDE))
+    #: Replace :data:`DEFAULT_EXCLUDE` instead of adding to it. Only for
+    #: projects that know exactly what they are doing — most users want the
+    #: defaults (``build/**``, ``.git/**``, tests …) kept.
+    exclude_only: bool = False
 
     #: Directory the config was loaded from; all relative paths resolve here.
     root: Path = field(default_factory=Path.cwd)
@@ -100,7 +115,21 @@ class ProjectConfig:
     # -- validation --------------------------------------------------------
     def __post_init__(self) -> None:
         self.root = Path(self.root).resolve()
+        self.normalise_exclude()
         self.validate()
+
+    def normalise_exclude(self) -> None:
+        """Merge ``exclude`` with :data:`DEFAULT_EXCLUDE` (unless ``exclude_only``).
+
+        Both construction paths go through here — the TOML loader and a direct
+        ``ProjectConfig(...)`` — so an application cannot end up shipping its
+        own output directory by listing a pattern of its own.
+        """
+        patterns = [str(pattern) for pattern in self.exclude]
+        if self.exclude_only:
+            self.exclude = patterns
+            return
+        self.exclude = [*DEFAULT_EXCLUDE, *(p for p in patterns if p not in DEFAULT_EXCLUDE)]
 
     def validate(self) -> None:
         """Raise :class:`ConfigError` if any field is invalid."""

@@ -14,6 +14,7 @@ coalesced.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -24,6 +25,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, overload
 from ...errors import PyMobileError, WidgetNotFoundError, WidgetTypeError
 from ...log import get_logger
 from .contract import SerializedValue, WidgetNode, WidgetProps
+from .registry import widget_types
 from .style import Style
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -50,6 +52,10 @@ def _error_node(widget_id: str, type_name: str, exc: BaseException) -> WidgetNod
 
 #: Fallback counter, used when no screen scope is active.
 _ids = count(1)
+
+#: ``(widget class, prop name)`` pairs already reported as unknown props, so a
+#: typo is mentioned once instead of on every frame.
+_warned_stray_props: set[tuple[str, str]] = set()
 
 #: Per-screen counters, so ids do not shift when an unrelated screen changes.
 #: A ContextVar keeps concurrent builds (threads, tests) from sharing state.
@@ -329,7 +335,17 @@ class Widget:
         """
         if not name or not name.isidentifier() or name.startswith("_"):
             raise ValueError("widget extension prop names must be public identifiers")
-        serialised = _serialise_value(value)
+        try:
+            serialised = _serialise_value(value)
+        except TypeError as error:
+            # The usual cause is a misspelled argument (`Button("b",
+            # on_pres=…)`): the key is not a widget prop, so it is stored as an
+            # extension prop, and a function is not one.
+            raise TypeError(
+                f"{error}. {name!r} is not a prop of {type(self).__name__}: extra keyword "
+                "arguments become extension props and must be JSON-like — check the "
+                "spelling of the argument name."
+            ) from error
         if self._props.get(name) != serialised:
             self._props[name] = serialised
             if invalidate:
@@ -357,6 +373,7 @@ class Widget:
         except Exception as exc:
             _log.exception("widget %s (%s) failed to serialise", self.id, self.type_name)
             return _error_node(self.id, self.type_name, exc)
+        self._warn_stray_props(props)
         node: WidgetNode = {
             "type": self.type_name,
             "id": self.id,
@@ -380,6 +397,38 @@ class Widget:
         if children:
             node["children"] = children
         return node
+
+    def _warn_stray_props(self, rendered: Mapping[str, object]) -> None:
+        """Name keyword arguments this built-in widget does not have.
+
+        Extra keywords are stored as *extension props* for custom renderers, so
+        they are accepted silently — but on a built-in widget they are almost
+        always a typo: ``Label("hi", colr="red")`` rendered a black label and
+        said nothing, because the renderer had no idea what ``colr`` was. Custom
+        widget types are exempt: extension props are their mechanism.
+        """
+        if not self._props or self.type_name not in widget_types():
+            return
+        native = set(rendered) - set(self._props)
+        try:
+            parameters = set(inspect.signature(type(self).__init__).parameters)
+        except (TypeError, ValueError):  # pragma: no cover - builtins / C classes
+            parameters = set()
+        candidates = sorted(native | parameters)
+        for name in sorted(self._props):
+            marker = (type(self).__name__, name)
+            if marker in _warned_stray_props:
+                continue
+            _warned_stray_props.add(marker)
+            close = get_close_matches(name, candidates, n=1, cutoff=0.7)
+            hint = f" Did you mean {close[0]!r}?" if close else ""
+            _log.warning(
+                "%s has no prop %r: it was stored as an extension prop, which the "
+                "renderers ignore.%s",
+                type(self).__name__,
+                name,
+                hint,
+            )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<{type(self).__name__} id={self.id!r}>"

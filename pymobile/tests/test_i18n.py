@@ -340,3 +340,117 @@ class TestLanguageSwitchingRedraws:
         shared.use("uk")
         assert len(bridge.calls_named("render")) == before
         shared.clear()
+
+
+class TestFlatKeys:
+    """A dot is part of the key: lookups never descend into nested JSON."""
+
+    def _catalogue(self) -> Translations:
+        return Translations(default_language="en")
+
+    def test_nested_catalogue_is_reported_at_load_time(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Silence is the bug: the screen renders bare keys, nothing raises."""
+        from pymobile.logging import configure
+
+        configure("warning")
+        capsys.readouterr()
+        catalogue = self._catalogue()
+        catalogue.load({"stats": {"balance": "Баланс", "income": "Дохід"}}, language="uk")
+        err = capsys.readouterr().err
+        assert "nested objects" in err
+        assert "'stats'" in err
+        assert "flatten=True" in err
+
+    def test_the_same_catalogue_is_reported_once(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from pymobile.logging import configure
+
+        configure("warning")
+        capsys.readouterr()
+        catalogue = self._catalogue()
+        catalogue.load({"stats": {"balance": "Баланс"}}, language="uk")
+        catalogue.load({"stats": {"balance": "Баланс"}}, language="uk")
+        assert capsys.readouterr().err.count("nested objects") == 1
+
+    def test_plural_forms_are_not_mistaken_for_a_namespace(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from pymobile.logging import configure
+
+        configure("warning")
+        capsys.readouterr()
+        catalogue = Translations(default_language="uk")
+        catalogue.load({"items": {"one": "1", "few": "3", "many": "5"}}, language="uk")
+        assert "nested objects" not in capsys.readouterr().err
+        catalogue.use("uk")
+        assert catalogue.get("items", count=3) == "3"
+
+    def test_a_dotted_miss_says_the_dot_is_part_of_the_key(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from pymobile.logging import configure
+
+        configure("warning")
+        capsys.readouterr()
+        catalogue = self._catalogue()
+        catalogue.load({"stats": {"balance": "Баланс"}}, language="en")
+        assert catalogue.get("stats.balance") == "stats.balance"
+        err = capsys.readouterr().err
+        assert "missing translation" in err
+        assert "a dot is part of the key" in err
+
+    def test_flatten_makes_dotted_lookups_work(self) -> None:
+        catalogue = self._catalogue()
+        catalogue.load({"stats": {"balance": "Баланс"}}, language="uk", flatten=True)
+        catalogue.use("uk")
+        assert catalogue.get("stats.balance") == "Баланс"
+
+    def test_flatten_keeps_nested_plural_forms(self) -> None:
+        from pymobile.core.i18n import flatten_catalogue
+
+        flat = flatten_catalogue(
+            {
+                "items": {"one": "1", "other": "{count}"},
+                "stats": {"balance": "Баланс"},
+            }
+        )
+        assert flat == {"items": {"one": "1", "other": "{count}"}, "stats.balance": "Баланс"}
+
+    def test_flatten_reaches_deep_sections_and_plural_forms(self) -> None:
+        from pymobile.core.i18n import flatten_catalogue
+
+        assert flatten_catalogue({"a": {"b": {"c": "d"}}}) == {"a.b.c": "d"}
+        assert flatten_catalogue({"a": {"b": {"one": "1", "other": "n"}}}) == {
+            "a.b": {"one": "1", "other": "n"}
+        }
+
+    def test_nested_file_loads_flat_with_flatten(self, tmp_path: Path) -> None:
+        path = tmp_path / "uk.json"
+        path.write_text('{"stats": {"balance": "Баланс"}}', encoding="utf-8")
+        catalogue = self._catalogue()
+        assert catalogue.load_file(path, flatten=True) == "uk"
+        catalogue.use("uk")
+        assert catalogue.get("stats.balance") == "Баланс"
+
+    def test_nested_file_without_flatten_keeps_the_old_behaviour(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from pymobile.logging import configure
+
+        configure("warning")
+        capsys.readouterr()
+        path = tmp_path / "uk.json"
+        path.write_text('{"stats": {"balance": "Баланс"}}', encoding="utf-8")
+        catalogue = self._catalogue()
+        catalogue.load_file(path)
+        catalogue.use("uk")
+        assert catalogue.get("stats.balance") == "stats.balance"
+        assert "nested objects" in capsys.readouterr().err
+
+    def test_flatten_is_exported_from_the_package(self) -> None:
+        import pymobile
+
+        assert pymobile.flatten_catalogue({"a": {"b": "c"}}) == {"a.b": "c"}

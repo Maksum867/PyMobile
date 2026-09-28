@@ -22,6 +22,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from ...log import get_logger
+from .contract import text_value
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import tkinter as tk
@@ -249,7 +250,7 @@ class GuiPreview:
             if kind in ("Button", "TextInput", "Switch"):
                 widget.configure(state=state)
             if kind in ("Label", "Button"):
-                widget.configure(text=str(props.get("text", "")))
+                widget.configure(text=text_value(props.get("text", "")))
             elif kind == "ProgressBar":
                 if not props.get("indeterminate"):
                     widget.configure(value=float(props.get("value", 0)))
@@ -261,7 +262,7 @@ class GuiPreview:
                 widget.configure(text="on" if checked else "off")
             elif kind == "TextInput":
                 variable = self._variables.get(node["id"])
-                value = str(props.get("value", ""))
+                value = text_value(props.get("value", ""))
                 # Never write into the field being typed in: it would move the
                 # caret to the end after every keystroke.
                 focused = self.root.focus_get() is widget
@@ -345,7 +346,7 @@ class GuiPreview:
         if kind == "Label":
             label = tk.Label(
                 parent,
-                text=str(props.get("text", "")),
+                text=text_value(props.get("text", "")),
                 bg=background,
                 fg=self._colour(style.get("color"), _PALETTE["text"]),
                 font=self._font(style),
@@ -360,7 +361,7 @@ class GuiPreview:
         if kind == "Button":
             button = tk.Button(
                 parent,
-                text=str(props.get("text", "")),
+                text=text_value(props.get("text", "")),
                 font=self._font(style),
                 state="normal" if enabled else "disabled",
                 command=lambda: self._dispatch(widget_id, "press", ""),
@@ -370,7 +371,7 @@ class GuiPreview:
             return
 
         if kind == "TextInput":
-            variable = tk.StringVar(value=str(props.get("value", "")))
+            variable = tk.StringVar(value=text_value(props.get("value", "")))
             entry = tk.Entry(
                 parent,
                 textvariable=variable,
@@ -482,7 +483,8 @@ class GuiPreview:
 
         if kind == "Dropdown":
             options = [str(o) for o in (props.get("options") or [])]
-            variable = tk.StringVar(value=str(props.get("value", options[0] if options else "")))
+            fallback = options[0] if options else ""
+            variable = tk.StringVar(value=text_value(props.get("value", fallback)))
             menu = tk.OptionMenu(
                 parent,
                 variable,
@@ -497,7 +499,7 @@ class GuiPreview:
         if kind in ("Chip", "Badge"):
             tk.Label(
                 parent,
-                text=str(props.get("text", "")),
+                text=text_value(props.get("text", "")),
                 bg=background,
                 fg=self._colour(style.get("color"), _PALETTE["text"]),
                 anchor="w",
@@ -512,7 +514,7 @@ class GuiPreview:
                 text="-",
                 command=lambda: self._dispatch(widget_id, "decrement", ""),
             ).pack(side="left")
-            tk.Label(frame, text=str(props.get("value", 0)), bg=background).pack(
+            tk.Label(frame, text=text_value(props.get("value", 0)), bg=background).pack(
                 side="left", padx=8
             )
             tk.Button(
@@ -523,7 +525,7 @@ class GuiPreview:
             return
 
         if kind == "SearchBar":
-            variable = tk.StringVar(value=str(props.get("value", "")))
+            variable = tk.StringVar(value=text_value(props.get("value", "")))
             entry = tk.Entry(parent, textvariable=variable)
             entry.pack(fill="x", pady=pad)
             variable.trace_add(
@@ -535,8 +537,8 @@ class GuiPreview:
         if kind == "RadioButton":
             tk.Radiobutton(
                 parent,
-                text=str(props.get("text", "")),
-                value=str(props.get("text", "")),
+                text=text_value(props.get("text", "")),
+                value=text_value(props.get("text", "")),
                 bg=background,
                 command=lambda: self._dispatch(widget_id, "press", ""),
             ).pack(anchor="w")
@@ -551,7 +553,7 @@ class GuiPreview:
         if kind == "SegmentedButtons":
             frame = tk.Frame(parent, bg=background)
             frame.pack(fill="x", pady=pad)
-            selected = str(props.get("value", ""))
+            selected = text_value(props.get("value", ""))
             for option in props.get("options") or []:
                 tk.Button(
                     frame,
@@ -562,7 +564,8 @@ class GuiPreview:
             return
 
         if kind == "ProgressText":
-            tk.Label(parent, text=str(props.get("text", "")), bg=background, anchor="w").pack(
+            label_text = text_value(props.get("text", ""))
+            tk.Label(parent, text=label_text, bg=background, anchor="w").pack(
                 fill="x", pady=pad
             )
             return
@@ -570,7 +573,7 @@ class GuiPreview:
         if kind == "Link":
             tk.Button(
                 parent,
-                text=str(props.get("text", "")),
+                text=text_value(props.get("text", "")),
                 fg="#3F51B5",
                 relief="flat",
                 command=lambda: self._dispatch(widget_id, "press", ""),
@@ -598,7 +601,7 @@ class GuiPreview:
         if kind == "Avatar":
             tk.Label(
                 parent,
-                text=str(props.get("text", "?")),
+                text=text_value(props.get("text", "?")),
                 bg=self._colour(props.get("background"), "#3F51B5"),
                 fg=self._colour(props.get("color"), "#FFFFFF"),
                 width=4,
@@ -621,7 +624,7 @@ class GuiPreview:
                     ).pack(fill="x", pady=pad)
                 self._build_children(frame, node, background)
                 if props.get("has_more"):
-                    loaded = str(props.get("loaded", len(node.get("children", ()))))
+                    loaded = text_value(props.get("loaded", len(node.get("children", ()))))
                     tk.Button(
                         frame,
                         text=f"Load more ({loaded} of {props.get('item_count', '?')})",
@@ -643,7 +646,7 @@ class GuiPreview:
                         ).pack(side="right")
             tile = tk.Button(
                 holder,
-                text=str(props.get("title", "")),
+                text=text_value(props.get("title", "")),
                 command=lambda: self._dispatch(widget_id, "press", ""),
                 anchor="w",
             )
@@ -674,7 +677,7 @@ class GuiPreview:
 
         if kind == "Dialog":
             box = tk.LabelFrame(
-                parent, text=str(props.get("title", "")), bg=background, padx=8, pady=8
+                parent, text=text_value(props.get("title", "")), bg=background, padx=8, pady=8
             )
             box.pack(fill="x", pady=pad, side="bottom" if props.get("sheet") else "top")
             self._build_children(box, node, background)
@@ -682,7 +685,7 @@ class GuiPreview:
 
         if kind in ("DatePicker", "TimePicker"):
             entry = tk.Entry(parent, width=14)
-            entry.insert(0, str(props.get("value", "")))
+            entry.insert(0, text_value(props.get("value", "")))
             entry.bind(
                 "<Return>",
                 lambda _event, entry=entry: self._dispatch(widget_id, "change", entry.get()),

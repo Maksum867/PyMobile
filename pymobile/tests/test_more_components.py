@@ -185,7 +185,7 @@ def test_data_table_empty_headers():
 
 
 def test_data_table_values_stringified():
-    table = DataTable(["n"], [[1, 2.5, True]])
+    table = DataTable(["n", "m", "k"], [[1, 2.5, True]])
     assert table.rows[0] == ["1", "2.5", "True"]
 
 

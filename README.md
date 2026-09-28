@@ -30,7 +30,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.8.1`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.8.2`) and read the
 > changelog before upgrading. Bug reports are genuinely welcome.
 
 ---
@@ -842,6 +842,82 @@ labels = self.root.find_all(Label)     # list[Label]
 `WidgetNotFoundError` (a `LookupError`) with a *did you mean* hint. Both raise
 `WidgetTypeError` (a `TypeError`) when the widget is of another class.
 
+### Screens as tabs: one shell owns the frame
+
+**Only the screen the navigator shows is rendered.** `app.render()` — and every
+automatic redraw behind it — serialises `navigator.current` and nothing else.
+That single fact explains most of the surprises a tabbed app runs into:
+
+| Call | On a screen the navigator owns | On a screen built *inside* another screen (a tab) |
+| --- | --- | --- |
+| `self.refresh()` | rebuilds the tree; the frame is drawn when that screen is current | rebuilds the tree; nothing displays it — logged once, with a pointer here |
+| `self.on("event", …)` | works (the screen has a running app) | `PyMobileError` — see below |
+| `self.app` | works | `PyMobileError` — a screen that was never pushed has no app |
+
+Such a nested `Screen` is a *data holder*: `on_mount`/`on_show` never run for
+it, `self.on()` cannot subscribe (a `PyMobileError` tells you so — subscribe
+from `on_mount()` of a screen that actually gets pushed, or use a plain object),
+and a `refresh()` on it repaints nothing. A screen stacked *below* the current
+one is different: it keeps its rebuilt tree and shows it the next time it
+becomes current, which is exactly what a language change relies on.
+
+The pattern that works: a shell screen owns the frame, and the tabs are plain
+objects that hold data and build widgets.
+
+```python
+class Shell(Screen):
+    """The only screen that renders: BottomNavigation + the active tab."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Tabs are created out here, not in build(): refresh() runs build()
+        # again, and a tab recreated there would forget the data it holds.
+        self.tabs = [HomeTab(self), StatsTab(self)]
+        self.active = self.tabs[0]
+
+    def build(self) -> Widget:
+        return Column(
+            self.active.build(),                  # rebuilt by refresh(), below
+            BottomNavigation(
+                ["Home", "Stats"],
+                value=self.active.title,
+                on_select=self.show_tab,
+            ),
+        )
+
+    def show_tab(self, name: str) -> None:
+        self.active = next(tab for tab in self.tabs if tab.title == name)
+        self.notify_data_changed()
+
+    def notify_data_changed(self) -> None:
+        """The single render point: every tab calls this, never self.refresh()."""
+        self.refresh()
+
+
+class HomeTab:
+    """Data and widgets — not a Screen, so it cannot render by accident."""
+
+    title = "Home"
+
+    def __init__(self, shell: Shell) -> None:
+        self.shell = shell
+        self.items: list[str] = []
+
+    def build(self) -> Widget:
+        return Column(Label(f"{len(self.items)} items"), Button("Reload", on_press=self.reload))
+
+    def reload(self) -> None:
+        self.items = fetch_items()
+        self.shell.notify_data_changed()          # the shell repaints
+```
+
+Two traps the pattern avoids: calling `self.refresh()` on a tab and waiting for
+a frame that never comes, and *rebuilding during a frame* — a `refresh()` from
+inside `build()` used to recurse until `RecursionError`. The framework now
+defers a redraw requested while a frame is being built (and reports a tree that
+redraws on every frame instead of spinning forever); the shell above is still
+the right structure, because it keeps one place that decides what is on screen.
+
 ---
 
 ## Updating the screen
@@ -894,6 +970,10 @@ with app.batch():
 | *(nothing)* | a property changed — handled for you |
 | `self.refresh()` | the tree itself changed (rows added or removed) |
 | `app.render()` | you want a frame pushed out right now |
+
+`self.refresh()` repaints a screen the navigator owns; a screen embedded in
+another screen's tree is rebuilt by the screen that builds it — see
+[Screens as tabs](#screens-as-tabs-one-shell-owns-the-frame).
 
 ```python
 def on_data_loaded(self) -> None:
@@ -1401,6 +1481,45 @@ An explicit `zero` form is used for 0 in any language.
 then to the default language, and a missing key renders as the key itself
 (logged once) rather than raising in the middle of a screen.
 
+### Keys are flat — a dot is part of the key
+
+A catalogue is **one level** of `"key": "text"` pairs. `t("stats.balance")`
+looks for a key literally named `stats.balance`; it does not descend into
+`{"stats": {"balance": …}}`. Nothing about a miss like that is dramatic — the
+screen shows the key itself — so a catalogue written as sections looks like a
+translation bug rather than a structure problem. The framework now says so:
+loading such a file logs a warning naming the nested objects, and each missed
+dotted key is logged with a hint.
+
+```
+{ "stats": { "balance": "Баланс" } }    ✗  t("stats.balance") → "stats.balance"
+{ "stats.balance": "Баланс" }           ✓  the whole key, dot included
+```
+
+Prefixes keep flat files readable — `"auth.title"`, `"auth.error"`,
+`"stats.balance"`, … all at the top level. If you would rather keep sections in
+the source file, expand them at load time:
+
+```python
+translations.load_dir("locales", flatten=True)      # {"stats": {"balance": …}} → "stats.balance"
+```
+
+```python
+from pymobile import flatten_catalogue              # or expand one mapping yourself
+
+translations.load(flatten_catalogue({"stats": {"balance": "Баланс"}}), language="uk")
+```
+
+The one nested shape understood without `flatten=True` is a plural form map,
+whose keys are all CLDR quantity names (`zero`/`one`/`two`/`few`/`many`/`other`):
+
+```json
+{ "items": { "one": "{count} елемент", "few": "{count} елементи", "many": "{count} елементів" } }
+```
+
+Any other nested object is a namespace, so `flatten_catalogue()` turns it into
+dotted keys — name a section after its content, not after a quantity.
+
 Switching language redraws whatever is on screen — `translations.use("uk")` is
 enough, because `t()` runs inside `build()` and the screen is rebuilt for you.
 
@@ -1577,7 +1696,8 @@ abis = ["arm64-v8a"]
 output_dir = "build"
 optimize = true                 # ship bytecode instead of sources
 strip_debug = true              # -OO: drop docstrings and asserts
-exclude = ["tests/**", "**/__pycache__/**"]
+exclude = ["docs/**", "secrets/**"]   # added to the built-in defaults
+exclude_only = false                    # true = use exclude as written
 ```
 
 | Key | Default | Meaning |
@@ -1598,7 +1718,8 @@ exclude = ["tests/**", "**/__pycache__/**"]
 | `output_dir` | `build` | where the APK is written |
 | `optimize` | `false` in `ProjectConfig`; `true` in the `init` template | package `.pyc` when enabled; for `--native` only when the build runs on Python 3.14 (the device's version), otherwise sources are shipped with a warning |
 | `strip_debug` | `true` | compile with `-OO` |
-| `exclude` | see above | glob patterns to skip |
+| `exclude` | *(none)* | glob patterns to skip, **added to** the built-in list (`**/__pycache__/**`, `**/*.pyc`, `**/tests/**`, `tests/**`, `**/test_*.py`, `.git/**`, `.venv/**`, `venv/**`, `build/**`, `dist/**`) |
+| `exclude_only` | `false` | `true` = `exclude` replaces the built-in list (advanced; the build then warns if `output_dir` would ship itself) |
 
 Every value is validated **before** the build starts, and each error carries a
 fix:
@@ -1607,6 +1728,12 @@ fix:
 ✗ Invalid package name 'Bad_Package'
   hint: Use reverse-DNS with lowercase segments, e.g. com.example.myapp
 ```
+
+`exclude` **adds** to the built-in patterns: writing `exclude = ["docs/**"]`
+never drops the `build/**` rule, so the output directory (and the previous APK
+inside it) is not packaged. `exclude_only = true` turns that off and the build
+then warns when it can see that `output_dir` would ship itself. The defaults are
+exported as `pymobile.core.config.DEFAULT_EXCLUDE`.
 
 Inspect the resolved configuration with `pymobile info` or
 `pymobile info --json`.
@@ -1787,7 +1914,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.8.1", "platform": "android",
+# {"framework_version": "0.8.2", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 
@@ -2067,6 +2194,44 @@ class Slider(Widget):
                 "minimum": self.minimum, "maximum": self.maximum}
 ```
 
+> **The Java branch is not optional, and omitting it fails quietly.**
+> `ViewBuilder.java` has one `case` per built-in type; a `type_name` with no
+> branch there is drawn as an **empty view on the phone** — no exception, no
+> warning, nothing to grep for — while the desktop and browser previews print
+> `<BarChart>` and look perfectly fine. A widget that exists in the preview and
+> is missing on the device is almost always this. Four things make the gap
+> visible:
+>
+> - the renderer logs `no native renderer for widget type "BarChart"` (`adb logcat
+>   -s pymobile`) and draws a red `[BarChart: no native renderer]` placeholder
+>   where the widget should be — so a missing branch is visible on the device too;
+> - `App` logs the same warning once per unknown type on the first frame sent to
+>   a native bridge (desktop previews stay quiet);
+> - `pymobile build` warns before you install anything, scanning the project for
+>   `type_name = "…"` values the framework has no declaration for (a
+>   `register_widget_type("…")` call in the project counts as a declaration);
+> - `unknown_types(screen.to_dict())` returns the offending names, so a test can
+>   assert the tree contains nothing the renderer would drop:
+>   `assert unknown_types(Shell().to_dict()) == frozenset()`.
+>
+> Declare the type once the Java branch exists —
+> `from pymobile import register_widget_type, unknown_types` then
+> `register_widget_type("BarChart")` (add `web=True`/`gui=True` for the
+> previews, or `android=False` for a preview-only widget) — and every warning
+> above stops. Note that the packaged `classes.dex` is prebuilt: a change to
+> `ViewBuilder.java` reaches a phone only through a rebuild of that dex
+> (`PYMOBILE_BUILD_JAVA=1 pymobile build --native`, which needs the Android
+> SDK's `d8`), not through the framework source alone. The safest route for an
+> app widget stays composition: a `BarChart` made of `Row`, `ProgressBar` and
+> `Expanded` needs no Java at all.
+
+```python
+from pymobile import register_widget_type, unknown_types
+
+register_widget_type("Slider")             # case "Slider" exists in ViewBuilder.java
+assert unknown_types(screen.to_dict()) == frozenset()   # nothing the renderer drops
+```
+
 **A new Android API** — add a method to `Bridge`, implement it in
 `AndroidBridge` and `StubBridge`, wrap it in a small class under `core/api/`.
 
@@ -2089,6 +2254,12 @@ class Slider(Widget):
   not start there). A `min_sdk = 21` left in an older `pymobile.toml` still
   builds: the APK declares 24 and the build prints a warning.
 - The renderer covers the components documented here; more are being added.
+  A custom widget with a new `type_name` is not one of them until you add a
+  branch to `ViewBuilder.java` — without it the widget is simply absent on the
+  phone, so the framework warns about such types at build time, on the first
+  frame and in the device log (see [Extending the framework](#extending-the-framework)).
+- Translation catalogues are flat: `"stats.balance"` is one key, and nested
+  JSON sections need `flatten=True` (see [Languages](#languages)).
 
 ---
 

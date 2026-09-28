@@ -20,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any
 
 from ...log import get_logger
+from .contract import text_value
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..app import App
@@ -349,22 +350,22 @@ def render_html(node: dict[str, Any]) -> str:
     if kind == "Label":
         # The id is carried through so the browser inspector shows which
         # widget a node is — the same readable ids find() uses.
-        text = escape(str(props.get("text", "")))
+        text = escape(text_value(props.get("text", "")))
         return f'<div data-wid="{widget_id}" style="{css}">{text}</div>'
 
     if kind == "Button":
-        label = escape(str(props.get("text", "")))
+        label = escape(text_value(props.get("text", "")))
         return (
             f'<button class="w" data-wid="{widget_id}"{disabled} style="{css}" '
             f"onclick=\"send(this.dataset.wid,'press','')\">{label}</button>"
         )
 
     if kind == "TextInput":
-        value = escape(str(props.get("value", "")), quote=True)
-        placeholder = escape(str(props.get("placeholder", "")), quote=True)
+        value = escape(text_value(props.get("value", "")), quote=True)
+        placeholder = escape(text_value(props.get("placeholder", "")), quote=True)
         kind_attr = "password" if props.get("password") else "text"
         if props.get("multiline"):
-            body = escape(str(props.get("value", "")))
+            body = escape(text_value(props.get("value", "")))
             return (
                 f'<textarea class="w" data-wid="{widget_id}" placeholder="{placeholder}"'
                 f'{disabled} style="{css}" '
@@ -393,7 +394,7 @@ def render_html(node: dict[str, Any]) -> str:
         return f'<progress class="w" max="{maximum}" value="{value}" style="{css}"></progress>'
 
     if kind == "Image":
-        source = escape(str(props.get("source", "")), quote=True)
+        source = escape(text_value(props.get("source", "")), quote=True)
         # http(s)/data sources render directly; APK-local asset paths degrade
         # to the message on the right via the onerror fallback.
         onerror = "this.replaceWith(document.createTextNode('[image unavailable]'))"
@@ -439,7 +440,7 @@ def render_html(node: dict[str, Any]) -> str:
 
     if kind == "Dropdown":
         options = props.get("options") or []
-        selected = str(props.get("value", ""))
+        selected = text_value(props.get("value", ""))
         items = "".join(
             f'<option value="{escape(str(opt), quote=True)}"'
             f'{" selected" if str(opt) == selected else ""}>{escape(str(opt))}</option>'
@@ -451,7 +452,7 @@ def render_html(node: dict[str, Any]) -> str:
         )
 
     if kind == "Chip":
-        label = escape(str(props.get("text", "")))
+        label = escape(text_value(props.get("text", "")))
         selected = " font-weight:700;" if props.get("selected") else ""
         return (
             f'<button class="w" data-wid="{widget_id}"{disabled} '
@@ -460,9 +461,9 @@ def render_html(node: dict[str, Any]) -> str:
         )
 
     if kind == "Badge":
-        label = escape(str(props.get("text", "")))
-        bg = _css_colour(str(props.get("background", "#3F51B5")))
-        fg = _css_colour(str(props.get("color", "#FFFFFF")))
+        label = escape(text_value(props.get("text", "")))
+        bg = _css_colour(text_value(props.get("background", "#3F51B5")))
+        fg = _css_colour(text_value(props.get("color", "#FFFFFF")))
         return (
             f'<span data-wid="{widget_id}" style="display:inline-block;padding:2px 8px;'
             f'border-radius:999px;background:{bg};color:{fg};font-size:12px;{css}">'
@@ -470,7 +471,7 @@ def render_html(node: dict[str, Any]) -> str:
         )
 
     if kind == "Stepper":
-        value = escape(str(props.get("value", 0)))
+        value = escape(text_value(props.get("value", 0)))
         return (
             f'<div data-wid="{widget_id}" style="display:flex;gap:8px;align-items:center;{css}">'
             f'<button class="w" style="width:auto"{disabled} '
@@ -482,8 +483,8 @@ def render_html(node: dict[str, Any]) -> str:
         )
 
     if kind == "SearchBar":
-        value = escape(str(props.get("value", "")), quote=True)
-        placeholder = escape(str(props.get("placeholder", "")), quote=True)
+        value = escape(text_value(props.get("value", "")), quote=True)
+        placeholder = escape(text_value(props.get("placeholder", "")), quote=True)
         return (
             f'<input class="w" type="search" data-wid="{widget_id}" value="{value}" '
             f'placeholder="{placeholder}"{disabled} style="{css}" '
@@ -493,7 +494,7 @@ def render_html(node: dict[str, Any]) -> str:
 
     if kind == "RadioButton":
         checked = " checked" if props.get("selected") else ""
-        label = escape(str(props.get("text", "")))
+        label = escape(text_value(props.get("text", "")))
         return (
             f'<label style="display:flex;gap:8px;align-items:center;{css}">'
             f'<input type="radio" data-wid="{widget_id}"{checked}{disabled} '
@@ -503,7 +504,7 @@ def render_html(node: dict[str, Any]) -> str:
 
     if kind == "SegmentedButtons":
         options = props.get("options") or []
-        selected = str(props.get("value", ""))
+        selected = text_value(props.get("value", ""))
         buttons = "".join(
             f'<button class="w" data-wid="{widget_id}"{disabled} '
             f'style="{"font-weight:700;" if str(opt) == selected else ""}" '
@@ -514,7 +515,7 @@ def render_html(node: dict[str, Any]) -> str:
         return f'<div class="seg" style="{css}">{buttons}</div>'
 
     if kind == "ProgressText":
-        text = escape(str(props.get("text", "")))
+        text = escape(text_value(props.get("text", "")))
         maximum = props.get("maximum", 100) or 100
         value = props.get("value", 0)
         return (
@@ -524,8 +525,8 @@ def render_html(node: dict[str, Any]) -> str:
         )
 
     if kind == "Link":
-        label = escape(str(props.get("text", "")))
-        url = escape(str(props.get("url", "")), quote=True)
+        label = escape(text_value(props.get("text", "")))
+        url = escape(text_value(props.get("url", "")), quote=True)
         return (
             f'<a class="w" data-wid="{widget_id}" href="{url or "#"}" '
             f'style="{css}" '
@@ -544,10 +545,10 @@ def render_html(node: dict[str, Any]) -> str:
         )
 
     if kind == "Avatar":
-        text = escape(str(props.get("text", "") or "?"))
+        text = escape(text_value(props.get("text", "") or "?"))
         size = int(props.get("size", 48) or 48)
-        bg = _css_colour(str(props.get("background", "#3F51B5")))
-        fg = _css_colour(str(props.get("color", "#FFFFFF")))
+        bg = _css_colour(text_value(props.get("background", "#3F51B5")))
+        fg = _css_colour(text_value(props.get("color", "#FFFFFF")))
         return (
             f'<div class="avatar" data-wid="{widget_id}" '
             f'style="width:{size}px;height:{size}px;background:{bg};color:{fg};{css}">'
@@ -555,9 +556,9 @@ def render_html(node: dict[str, Any]) -> str:
         )
 
     if kind == "ListTile":
-        title = escape(str(props.get("title", "")))
-        subtitle = escape(str(props.get("subtitle", "")))
-        trailing = escape(str(props.get("trailing", "")))
+        title = escape(text_value(props.get("title", "")))
+        subtitle = escape(text_value(props.get("subtitle", "")))
+        trailing = escape(text_value(props.get("trailing", "")))
         # A long press has no mouse equivalent, so the browser preview maps it
         # to the context menu (right click / touch-and-hold), which is what a
         # desktop tester reaches for anyway.
@@ -579,7 +580,7 @@ def render_html(node: dict[str, Any]) -> str:
         buttons = ""
         for direction, arrow in (("right", "⟶"), ("left", "⟵")):
             if props.get(f"swipe_{direction}"):
-                colour = _css_colour(str(props.get(f"swipe_{direction}_color", "#757575")))
+                colour = _css_colour(text_value(props.get(f"swipe_{direction}_color", "#757575")))
                 buttons += (
                     f'<button class="w swipe" data-wid="{widget_id}"{disabled} '
                     f'title="swipe {direction}" style="background:{colour}" '
@@ -602,7 +603,7 @@ def render_html(node: dict[str, Any]) -> str:
         return f'<nav class="row" style="gap:0;{css}">{"".join(tabs)}</nav>'
 
     if kind == "Dialog":
-        title = escape(str(props.get("title", "")))
+        title = escape(text_value(props.get("title", "")))
         sheet = bool(props.get("sheet"))
         radius = "16px 16px 0 0" if sheet else "12px"
         margin = "24px 0 0" if sheet else "12px 0"
@@ -614,7 +615,7 @@ def render_html(node: dict[str, Any]) -> str:
         )
 
     if kind == "DatePicker":
-        value = escape(str(props.get("value", "")), quote=True)
+        value = escape(text_value(props.get("value", "")), quote=True)
         return (
             f'<input type="date" class="w" data-wid="{widget_id}"{disabled} '
             f'value="{value}" style="{css}" '
@@ -622,7 +623,7 @@ def render_html(node: dict[str, Any]) -> str:
         )
 
     if kind == "TimePicker":
-        value = escape(str(props.get("value", "")), quote=True)
+        value = escape(text_value(props.get("value", "")), quote=True)
         return (
             f'<input type="time" class="w" data-wid="{widget_id}"{disabled} '
             f'value="{value}" style="{css}" '

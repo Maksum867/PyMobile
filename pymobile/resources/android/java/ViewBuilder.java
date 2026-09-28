@@ -310,8 +310,16 @@ final class ViewBuilder {
                 view = buildTimePicker(id, props);
                 break;
             case "Label":
-            default:
                 view = buildLabel(props);
+                break;
+            default:
+                // A type without a branch above has no native renderer. This
+                // used to build an empty Label, so the widget vanished from the
+                // phone with no error to explain it (and the Python previews,
+                // which print "<BarChart>", looked fine). Draw a labelled
+                // placeholder instead and log the type, so a missing case here
+                // is visible on the device as well.
+                view = buildUnknown(type, props);
                 break;
         }
 
@@ -988,6 +996,29 @@ final class ViewBuilder {
         label.setTextColor(colorText);
         label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         return label;
+    }
+
+    /**
+     * A visible stand-in for a widget type this class has no branch for.
+     *
+     * The alternative — what used to happen — is an empty Label: the widget
+     * disappears, nothing is logged, and the bug is only visible on a phone.
+     * Keep the placeholder text short; it is diagnostic, not a fallback that
+     * applications should design around.
+     */
+    private View buildUnknown(String type, JSONObject props) {
+        android.util.Log.w("pymobile", "no native renderer for widget type \"" + type + "\"");
+        String text = props.optString("text", "");
+        TextView placeholder = new TextView(context);
+        // The widget's own text still shows, so a screen built from a custom
+        // type before its Java branch exists is not blank on the device.
+        placeholder.setText(text.isEmpty()
+                ? "[" + type + ": no native renderer]"
+                : "[" + type + ": no native renderer] " + text);
+        placeholder.setTextColor(Color.parseColor("#C62828"));
+        placeholder.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        placeholder.setPadding(dp(4), dp(4), dp(4), dp(4));
+        return placeholder;
     }
 
     private View buildButton(final String id, JSONObject props) {

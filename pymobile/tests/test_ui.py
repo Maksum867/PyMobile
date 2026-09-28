@@ -794,3 +794,145 @@ class TestOneFramePerInteraction:
             source = (root / name).read_text(encoding="utf-8")
             assert "app.handle_ui_event(" in source, name
             assert "_handle_ui_event(" not in source, name
+
+
+class TestScreensAsTabs:
+    """Only ``navigator.current`` is rendered; a tab is rebuilt by its shell.
+
+    The model is deliberate (see "Screens as tabs" in the README) — these tests
+    pin the behaviour down and the diagnostics that replaced the silence.
+    """
+
+    def test_refresh_on_a_tab_is_reported(self, capsys: pytest.CaptureFixture[str]) -> None:
+        from pymobile.logging import configure
+
+        configure("warning")
+        capsys.readouterr()
+
+        class Tab(Screen):
+            def build(self) -> Widget:
+                return Label("tab")
+
+        Tab().refresh()  # never pushed: no frame contains this tree
+        err = capsys.readouterr().err
+        assert "nothing displays it" in err
+        assert "Screens as tabs" in err
+
+    def test_the_report_is_emitted_once_per_screen(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from pymobile.logging import configure
+
+        configure("warning")
+        capsys.readouterr()
+
+        class Tab(Screen):
+            def build(self) -> Widget:
+                return Label("tab")
+
+        tab = Tab()
+        tab.refresh()
+        tab.refresh()
+        assert capsys.readouterr().err.count("nothing displays it") == 1
+
+    def test_refresh_on_a_stacked_screen_is_quiet(
+        self, bridge, capsys: pytest.CaptureFixture[str]  # type: ignore[no-untyped-def]
+    ) -> None:
+        """A hidden screen keeps its rebuilt tree for when it comes back."""
+        from pymobile.logging import configure
+
+        configure("warning")
+        app = App("Demo", bridge=bridge)
+        first = _Counter()
+        app.run(first)
+        app.push(_Home())
+        capsys.readouterr()
+        first.refresh()
+        assert "nothing displays it" not in capsys.readouterr().err
+
+    def test_a_shell_repaints_the_active_tab(self, bridge) -> None:  # type: ignore[no-untyped-def]
+        """The documented pattern: tabs hold data, the shell holds the frame."""
+
+        class Tab:
+            title = "Home"
+
+            def __init__(self, shell: Shell) -> None:
+                self.shell = shell
+                self.items: list[str] = []
+
+            def build(self) -> Widget:
+                return Column(Label(f"{len(self.items)} items"), Button("Load", on_press=self.load))
+
+            def load(self) -> None:
+                self.items = ["a", "b"]
+                self.shell.notify_data_changed()
+
+        class Shell(Screen):
+            def __init__(self) -> None:
+                super().__init__()
+                # Tabs live outside build(): a rebuild re-runs build(), and a
+                # tab recreated there would lose the data it holds.
+                self.tabs = [Tab(self)]
+
+            def build(self) -> Widget:
+                return Column(self.tabs[0].build())
+
+            def notify_data_changed(self) -> None:
+                self.refresh()
+
+        app = App("Demo", bridge=bridge)
+        shell = Shell()
+        app.run(shell)
+        bridge.reset()
+        shell.tabs[0].load()
+        assert len(bridge.calls_named("render")) == 1
+        text = shell.root.children[0].children[0].to_dict()["props"]["text"]
+        assert text == "2 items"
+
+    def test_a_refresh_inside_build_does_not_recurse(self, bridge) -> None:  # type: ignore[no-untyped-def]
+        """render() → build() → refresh() → render() used to overflow the stack."""
+
+        class SelfRefreshing(Screen):
+            def __init__(self) -> None:
+                super().__init__()
+                self.builds = 0
+
+            def build(self) -> Widget:
+                self.builds += 1
+                self.refresh()  # "data changed" from inside the frame being built
+                return Column(Label("shell"))
+
+            def on_show(self) -> None:
+                self.refresh()  # drop the tree, so the next frame rebuilds it
+
+        app = App("Demo", bridge=bridge)
+        screen = SelfRefreshing()
+        app.run(screen)  # RecursionError before render() became non-re-entrant
+        assert screen.builds <= 3
+        assert len(bridge.calls_named("render")) >= 1
+
+    def test_a_tree_that_redraws_on_every_frame_is_stopped(
+        self, bridge, capsys: pytest.CaptureFixture[str]  # type: ignore[no-untyped-def]
+    ) -> None:
+        from pymobile.logging import configure
+
+        configure("warning")
+        capsys.readouterr()
+        holder: list[App] = []
+
+        class Chatty(Widget):
+            type_name = "Label"
+
+            def props(self):  # type: ignore[no-untyped-def]
+                holder[0].render()  # asks for another frame on every serialise
+                return {"text": "x"}
+
+        class Home(Screen):
+            def build(self) -> Widget:
+                return Column(Chatty())
+
+        app = App("Demo", bridge=bridge)
+        holder.append(app)
+        app.run(Home())
+        assert "stopping the redraw loop" in capsys.readouterr().err
+        assert len(bridge.calls_named("render")) <= 16  # bounded, not endless

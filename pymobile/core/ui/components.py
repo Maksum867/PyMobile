@@ -63,6 +63,26 @@ def _alias(kwargs: dict[str, Any], alias: str, name: str, value: Any, default: A
         return kwargs.pop(alias)
     return default if value is None else value
 
+def _as_checked(value: object) -> bool:
+    """Coerce a stored/JSON value into a toggle state.
+
+    The serialised prop is always a real boolean, so the phone (``optBoolean``)
+    and the previews cannot disagree about it. A string that names a state is
+    honoured — ``"false"``, ``"no"``, ``"off"``, ``"0"`` are off — because a
+    value read back from JSON or the store is commonly a string; anything else
+    falls back to Python truthiness.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().casefold()
+        if lowered in ("false", "0", "no", "off", ""):
+            return False
+        if lowered in ("true", "1", "yes", "on"):
+            return True
+    return bool(value)
+
+
 class Label(Widget):
     """Non-interactive text.
 
@@ -174,9 +194,13 @@ class TextInput(Widget):
         super().__init__(**kwargs)
         if max_length is not None and max_length <= 0:
             raise ValueError("max_length must be positive")
+        # None means "empty field", not the four characters of str(None): the
+        # device reads the prop with optString(…, "") and showed an empty box
+        # while the previews displayed "None".
+        initial = "" if value is None else str(value)
         # The limit applies to the initial value too (README: "extra
         # characters are trimmed automatically"); it used to be kept whole.
-        self._value = value if max_length is None else value[:max_length]
+        self._value = initial if max_length is None else initial[:max_length]
         self.placeholder = placeholder
         self.multiline = multiline
         self.password = password
@@ -204,6 +228,7 @@ class TextInput(Widget):
         self._apply(value, from_ui=True)
 
     def _apply(self, value: str, *, from_ui: bool) -> None:
+        value = "" if value is None else str(value)
         typed = value
         if self.max_length is not None:
             value = value[: self.max_length]
@@ -356,11 +381,13 @@ class Switch(Widget):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self._checked = checked
+        self._checked = _as_checked(checked)
         self.on_toggle = on_toggle
 
     def toggle(self) -> bool:
-        """Flip the state and return the new value."""
+        """Flip the state and return the new value (a disabled switch is left alone)."""
+        if not self.enabled:
+            return self._checked
         self.set_checked(not self.checked)
         return self.checked
 
@@ -374,7 +401,15 @@ class Switch(Widget):
         self.set_checked(value)
 
     def set_checked(self, checked: bool) -> None:
-        """Set the state, notifying listeners only on a real change."""
+        """Set the state, notifying listeners only on a real change.
+
+        The value is normalised by :func:`_as_checked`, so the serialised prop
+        is a real boolean: a ``"false"`` string (a value read back from JSON or
+        the store) is truthy in Python but ``optBoolean`` on the device reads it
+        as *false*, so the switch looked on in the previews and off on the
+        phone. ``"false"``/``"no"``/``"off"``/``"0"`` now mean off on both.
+        """
+        checked = _as_checked(checked)
         if checked != self._checked:
             self._checked = checked
             self.invalidate()
@@ -560,7 +595,7 @@ class Checkbox(Widget):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self._checked = checked
+        self._checked = _as_checked(checked)
         self.on_toggle = on_toggle
 
     @property
@@ -573,7 +608,12 @@ class Checkbox(Widget):
         self.set_checked(value)
 
     def set_checked(self, checked: bool) -> None:
-        """Set the state, notifying listeners only on a real change."""
+        """Set the state, notifying listeners only on a real change.
+
+        Normalised like :meth:`Switch.set_checked`: the prop is always a real
+        boolean, and ``"false"`` means off.
+        """
+        checked = _as_checked(checked)
         if checked != self._checked:
             self._checked = checked
             self.invalidate()
@@ -581,7 +621,9 @@ class Checkbox(Widget):
                 self.on_toggle(checked)
 
     def toggle(self) -> bool:
-        """Flip the state and return the new value."""
+        """Flip the state and return the new value (a disabled box is left alone)."""
+        if not self.enabled:
+            return self._checked
         self.set_checked(not self._checked)
         return self._checked
 
@@ -1378,14 +1420,31 @@ class DataTable(Widget):
         if not headers:
             raise ValueError("headers must not be empty")
         self.headers = [str(h) for h in headers]
-        self.rows: list[list[str]] = [[str(cell) for cell in row] for row in rows]
+        # Both paths fit a row the same way: the constructor used to accept a
+        # row with more cells than columns while add_row rejected the very same
+        # row, so a table could be built in a state its own method refused to
+        # produce (the extra cells render outside the header).
+        self.rows: list[list[str]] = [self._fit_row(row) for row in rows]
+
+    def _fit_row(self, row: Sequence[Any]) -> list[str]:
+        """Stringify and pad a row to the column count.
+
+        Missing cells become empty strings; a row with more cells than columns
+        is a data error and raises, so a misaligned table fails where it is
+        built instead of on the phone.
+        """
+        values = ["" if cell is None else str(cell) for cell in row]
+        if len(values) > len(self.headers):
+            raise ValueError(
+                f"row has {len(values)} cells but the table has {len(self.headers)} "
+                "column(s); pass one value per header — missing ones become empty"
+            )
+        values += [""] * (len(self.headers) - len(values))
+        return values
 
     def add_row(self, row: Sequence[Any]) -> None:
         """Append a row (missing cells become empty strings)."""
-        values = [str(cell) for cell in row]
-        if len(values) > len(self.headers):
-            raise ValueError("row has more cells than the table has columns")
-        values += [""] * (len(self.headers) - len(values))
+        values = self._fit_row(row)
         self.rows.append(values)
         self.invalidate()
 

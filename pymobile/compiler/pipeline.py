@@ -205,6 +205,74 @@ class BuildPipeline:
                 "Android will deny them without showing a dialog"
             )
 
+    def _warn_unexcluded_output(self) -> None:
+        """Warn when the build output directory would be packaged into the APK.
+
+        ``exclude`` adds to the built-in patterns, so this is the case of a
+        project that turned that off (``exclude_only``) or moved ``output_dir``
+        somewhere the patterns do not cover (the default list covers ``build/``
+        and ``dist/``). Packaging the output directory means shipping the
+        previous APK — and anything else the author keeps there.
+        """
+        from .collector import _is_excluded
+
+        try:
+            relative = self.config.output_path.relative_to(self.config.source_path)
+        except ValueError:
+            return  # output lives outside the sources: nothing can leak
+        if not relative.parts:
+            return
+        # Test a file *inside* the directory: a pattern like "build/**" matches
+        # its contents, not the bare directory name that collection never sees.
+        if _is_excluded(relative / "pymobile-output-probe", self.config.exclude):
+            return
+        self.warnings.append(
+            f"the build output directory {relative.as_posix()}/ is not excluded from the "
+            f"APK; it would ship every file in it (including a previous APK). Add "
+            f'"{relative.as_posix()}/**" to exclude, or set output_dir outside the sources.'
+        )
+
+    def _check_widget_types(self, sources: SourceSet) -> None:
+        """Warn about custom widget types the native renderer cannot draw.
+
+        ``ViewBuilder.java`` has one branch per built-in widget; a class with
+        its own ``type_name`` and no branch there renders as an empty view on
+        the phone — no exception, no placeholder — while the desktop preview
+        prints ``<BarChart>`` and looks fine. The scan is best-effort (a
+        ``type_name`` built at runtime is invisible to it), and only reports a
+        type nothing has declared: ``register_widget_type("BarChart")`` in the
+        app is the way to say "the Java branch exists".
+        """
+        import re
+
+        from ..core.ui.registry import known_types
+
+        # A type is "declared" either at the text level — the project calls
+        # register_widget_type("BarChart") somewhere — or in the running
+        # process, which covers a plugin that registered it at import time.
+        type_name = re.compile(r"""type_name\s*[:=]\s*(?:str\s*=\s*)?["']([A-Za-z_][\w.]*)["']""")
+        declared = re.compile(r"""register_widget_type\(\s*["']([A-Za-z_][\w.]*)["']""")
+        found: set[str] = set()
+        for path in sources.files:
+            if path.suffix != ".py":
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            found.update(type_name.findall(text))
+            found.difference_update(declared.findall(text))
+
+        unknown = sorted(found - known_types())
+        if unknown:
+            names = ", ".join(repr(name) for name in unknown)
+            self.warnings.append(
+                f"custom widget type(s) with no renderer: {names} — on Android a node "
+                "whose type has no branch in ViewBuilder.java is drawn as an empty view, "
+                "with no error. Build the widget from existing ones, or add the Java "
+                "branch and confirm it with register_widget_type(<name>)."
+            )
+
     def _collect(self) -> SourceSet:
         """Gather the files that go into the APK."""
         return collect_sources(
@@ -317,8 +385,10 @@ class BuildPipeline:
         self._timings.clear()
 
         self._stage("validate", self._validate)
+        self._warn_unexcluded_output()
         sources: SourceSet = self._stage("collect", self._collect)
         self._check_requested_permissions(sources)
+        self._check_widget_types(sources)
 
         output_dir = self.config.output_path
         output_dir.mkdir(parents=True, exist_ok=True)

@@ -38,6 +38,11 @@ class AndroidBridge(Bridge):
     #: The device renderer draws its default colours from the app theme.
     accepts_theme = True
 
+    #: The tree goes to ``ViewBuilder.java``, which has one branch per built-in
+    #: type and drops anything else. Apps are warned about unknown types (see
+    #: ``App._check_widget_types``).
+    native_widgets = True
+
     def __init__(self) -> None:
         self._native = native_module()
         self._granted: set[str] = set()

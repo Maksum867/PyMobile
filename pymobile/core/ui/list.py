@@ -38,6 +38,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ...log import get_logger
+from .contract import text_value
 from .style import Color
 from .widget import Container, Widget, callback_name
 
@@ -58,7 +59,7 @@ class List(Container):
     type_name = "List"
     __slots__ = (
         "_builder",
-        "item_count",
+        "_item_count",
         "spacing",
         "visible_count",
         "_window",
@@ -87,10 +88,12 @@ class List(Container):
         if visible_count < 1:
             raise ValueError("visible_count must be >= 1")
         self._builder = builder
-        self.item_count = item_count
+        #: Number of rows built so far (set before item_count: its setter clamps it).
+        self._window = 0
+        self._item_count = 0
+        self.item_count = item_count          # validated by the property setter
         self.spacing = spacing
         self.visible_count = visible_count
-        #: Number of rows built so far.
         self._window = min(item_count, visible_count)
         #: Called when the user pulls the list down from its top.
         self.on_refresh = on_refresh
@@ -113,6 +116,28 @@ class List(Container):
         if self._builder is None:
             return ListTile(f"Item {index + 1}")
         return self._builder(index)
+
+    @property
+    def item_count(self) -> int:
+        """How many rows the list has in total.
+
+        Assigning to it re-checks the value and re-renders. The validation used
+        to live only in the constructor, so ``lst.item_count = -5`` was accepted
+        and the next ``refresh()`` quietly emptied the list.
+        """
+        return self._item_count
+
+    @item_count.setter
+    def item_count(self, value: int) -> None:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"item_count must be an int, got {type(value).__name__}")
+        if value < 0:
+            raise ValueError("item_count must not be negative")
+        if value != self._item_count:
+            self._item_count = value
+            # Never show more rows than exist; already built rows stay built.
+            self._window = min(self._window, value)
+            self.invalidate()
 
     @property
     def loaded(self) -> int:
@@ -294,8 +319,8 @@ class ListTile(Widget):
     type_name = "ListTile"
     __slots__ = (
         "_title",
-        "subtitle",
-        "trailing",
+        "_subtitle",
+        "_trailing",
         "on_press",
         "on_long_press",
         "on_swipe_left",
@@ -319,9 +344,12 @@ class ListTile(Widget):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self._title = title
-        self.subtitle = subtitle
-        self.trailing = trailing
+        # None is an empty row, not the text "None" (the device reads these
+        # props with optString(…, "") and stayed empty while the previews
+        # printed the word).
+        self._title = text_value(title)
+        self._subtitle = text_value(subtitle)
+        self._trailing = text_value(trailing)
         self.on_press = on_press
         self.on_long_press = on_long_press
         self.on_swipe_left = on_swipe_left
@@ -336,6 +364,7 @@ class ListTile(Widget):
 
     @title.setter
     def title(self, value: str) -> None:
+        value = text_value(value)
         if value != self._title:
             self._title = value
             self.invalidate()
@@ -343,6 +372,30 @@ class ListTile(Widget):
     def set_title(self, value: str) -> None:
         """Replace the title."""
         self.title = value
+
+    @property
+    def subtitle(self) -> str:
+        """Secondary line; assigning to it schedules a redraw."""
+        return self._subtitle
+
+    @subtitle.setter
+    def subtitle(self, value: str) -> None:
+        value = text_value(value)
+        if value != self._subtitle:
+            self._subtitle = value
+            self.invalidate()
+
+    @property
+    def trailing(self) -> str:
+        """Text at the end of the row; assigning to it schedules a redraw."""
+        return self._trailing
+
+    @trailing.setter
+    def trailing(self, value: str) -> None:
+        value = text_value(value)
+        if value != self._trailing:
+            self._trailing = value
+            self.invalidate()
 
     def press(self) -> None:
         """Simulate a tap; ignored while disabled."""

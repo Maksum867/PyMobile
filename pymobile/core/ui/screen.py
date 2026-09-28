@@ -43,7 +43,12 @@ class Screen:
         self._app: App | None = None
         self._root: Widget | None = None
         self._mounted = False
+        #: Whether this screen was ever on a navigator stack. A screen that
+        #: never was is not what app.render() serialises, which is what makes
+        #: a refresh() on it a no-op worth reporting.
+        self._ever_mounted = False
         self._warned_manual_render = False
+        self._warned_offstage_refresh = False
         self._subscriptions: list[Subscription] = []
 
     @property
@@ -179,6 +184,15 @@ class Screen:
         Use it when the *structure* changed (a list grew, a section appeared).
         Changing the text or state of an existing widget needs no call at all:
         the widget schedules its own redraw.
+
+        The frame goes out only when this screen is the one the navigator
+        shows — ``app.render()`` serialises ``navigator.current`` and nothing
+        else. A screen stacked *below* the current one keeps its rebuilt tree
+        and displays it the next time it becomes current. A screen that is not
+        on the stack at all (a tab, a panel embedded in another screen's tree)
+        has no frame of its own to repaint: the screen that builds it is the
+        one to rebuild. That first case is reported, once, instead of quietly
+        doing nothing.
         """
         if self._root is not None:
             self._root._screen = None
@@ -186,8 +200,24 @@ class Screen:
                 node._parent = None
         self._root = None
         app = self._app
-        if app is not None and app.navigator.current is self:
+        if app is None:
+            if not self._ever_mounted:
+                self._warn_offstage_refresh(
+                    f"{type(self).__name__} is not on a navigator stack, so no frame "
+                    "contains this tree. A screen embedded in another screen (tabs, "
+                    "panels) is rendered by the one that builds it: rebuild the shell "
+                    "instead — see 'Screens as tabs' in the README."
+                )
+            return
+        if app.navigator.current is self:
             app.render()
+
+    def _warn_offstage_refresh(self, message: str) -> None:
+        """Explain a refresh() that cannot repaint anything — once per screen."""
+        if self._warned_offstage_refresh:
+            return
+        self._warned_offstage_refresh = True
+        _log.warning("refresh() rebuilt the tree but nothing displays it: %s", message)
 
     @overload
     def find(self, widget_id: str) -> Widget | None: ...
@@ -334,6 +364,7 @@ class Navigator:
         self._stack.append(screen)
         if not screen._mounted:
             screen._mounted = True
+            screen._ever_mounted = True
             screen.on_mount()
         screen.on_show()
         _log.debug("show %s (depth=%d)", screen.title, self.depth)

@@ -4,9 +4,21 @@ from __future__ import annotations
 
 from typing import TypeAlias, TypedDict
 
-__all__ = ["WidgetNode", "WidgetProps", "StyleNode", "SerializedValue"]
+__all__ = ["WidgetNode", "WidgetProps", "StyleNode", "SerializedValue", "text_value"]
 
 SerializedValue: TypeAlias = str | int | float | bool | list[object] | dict[str, object] | None
+
+
+def text_value(value: object) -> str:
+    """A text prop rendered as a string: ``None`` means empty, not ``"None"``.
+
+    The device renderer reads text props with ``optString(key, "")``, so a JSON
+    ``null`` becomes an empty string there. Python-side previews used plain
+    ``str(...)`` and printed the word ``None`` instead — a field that looked
+    filled had no text on the phone. Every renderer goes through this helper,
+    and widgets coerce their own text props on the way in.
+    """
+    return "" if value is None else str(value)
 WidgetProps: TypeAlias = dict[str, SerializedValue]
 StyleNode: TypeAlias = dict[str, SerializedValue]
 

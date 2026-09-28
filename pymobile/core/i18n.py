@@ -13,6 +13,18 @@ full — and :meth:`Translations.install_gettext` hands over to it when a
 project already has a translator workflow. The built-in JSON format exists
 because a mobile app usually needs a dozen strings, not a toolchain.
 
+**Keys are flat: a dot is part of the key, not a path.** A catalogue is one
+level of ``"key": "text"`` pairs, so ``t("stats.balance")`` needs a literal
+``"stats.balance"`` entry — a JSON file with sections::
+
+    { "stats": { "balance": "Баланс" } }     # t("stats.balance") → "stats.balance"
+
+would render the key itself. The one nested shape that *is* understood is a
+plural form map (``{"one": …, "few": …, "many": …}``) — see :meth:`Translations.get`.
+Loading such a file logs a warning naming the nested paths; pass
+``flatten=True`` (or call :func:`flatten_catalogue`) when you would rather
+keep sections in the source file.
+
 ::
 
     from pymobile import t, translations
@@ -47,6 +59,7 @@ __all__ = [
     "Translations",
     "translations",
     "t",
+    "flatten_catalogue",
     "device_language",
     "normalise_language",
     "plural_category",
@@ -63,6 +76,61 @@ _log = get_logger("i18n")
 
 #: Languages where "one" covers 1 only and everything else is plural.
 _DEFAULT_PLURAL_KEYS = ("one", "other")
+
+#: CLDR quantity names. A nested object made only of these is a plural form
+#: map; any other nested object is a *namespace*, which a catalogue cannot
+#: address — see :func:`flatten_catalogue`.
+_PLURAL_FORM_KEYS = frozenset({"zero", "one", "two", "few", "many", "other"})
+
+
+def _is_plural_forms(value: object) -> bool:
+    """Whether ``value`` is a plural form map (``{"one": …, "other": …}``).
+
+    The test is deliberately narrow: **every** key must be a quantity name,
+    so ``{"balance": …}`` is a namespace while ``{"one": …, "few": …}`` is
+    not. A section that happens to be called ``one``/``many`` is therefore
+    read as plural forms — name sections after what they contain.
+    """
+    if not isinstance(value, Mapping):
+        return False
+    return bool(value) and all(str(key) in _PLURAL_FORM_KEYS for key in value)
+
+
+def flatten_catalogue(messages: Mapping[str, Any], *, separator: str = ".") -> dict[str, Any]:
+    """Flatten a nested catalogue into the one-level form lookups expect.
+
+    ::
+
+        flatten_catalogue({"stats": {"balance": "Баланс"}})
+        # {"stats.balance": "Баланс"}
+
+    Nested objects whose keys are all CLDR quantity names are kept exactly as
+    they are: they are plural forms for the key above them, not a namespace.
+    The default separator is ``"."`` because that is what ``t()`` keys look
+    like in practice — nothing special happens to the dots afterwards, the
+    result is still a flat mapping of literal keys.
+    """
+    flat: dict[str, Any] = {}
+
+    def walk(mapping: Mapping[str, Any], prefix: str) -> None:
+        for key, value in mapping.items():
+            name = f"{prefix}{separator}{key}" if prefix else str(key)
+            if not isinstance(value, Mapping) or not value or _is_plural_forms(value):
+                flat[name] = value
+            else:
+                walk(value, name)
+
+    walk(messages, "")
+    return flat
+
+
+def _nested_namespaces(messages: Mapping[str, Any]) -> list[str]:
+    """Names of top-level entries that hold a nested namespace, not plural forms."""
+    return [
+        str(key)
+        for key, value in messages.items()
+        if isinstance(value, Mapping) and value and not _is_plural_forms(value)
+    ]
 
 
 # CLDR cardinal plural rules for whole numbers, keyed by base language. The
@@ -237,9 +305,11 @@ def device_language(*, default: str = "en") -> str:
 class Translations:
     """A catalogue of message strings, one dictionary per language.
 
-    Lookup falls back from the region to the bare language and finally to the
-    default language, so ``pt-br`` quietly uses ``pt`` and an untranslated key
-    still renders as English rather than blowing up mid-screen.
+    Keys are flat — ``"stats.balance"`` is one key, not ``stats`` →
+    ``balance`` (see the module docstring). Lookup falls back from the region
+    to the bare language and finally to the default language, so ``pt-br``
+    quietly uses ``pt`` and an untranslated key still renders as English
+    rather than blowing up mid-screen.
     """
 
     def __init__(self, *, default_language: str = "en") -> None:
@@ -247,6 +317,9 @@ class Translations:
         self._catalogues: dict[str, dict[str, Any]] = {}
         self._language = self.default_language
         self._missing: set[str] = set()
+        #: Languages already told about a nested catalogue, so a reload does
+        #: not repeat the same warning on every hot reload.
+        self._warned_nested: set[str] = set()
         self._listeners: list[Callable[[str], None]] = []
 
     # -- change notification ----------------------------------------------
@@ -285,14 +358,52 @@ class Translations:
         """Every language with a loaded catalogue."""
         return tuple(sorted(self._catalogues))
 
-    def load(self, messages: Mapping[str, Any], *, language: str) -> None:
-        """Add or extend the catalogue for ``language``."""
+    def load(
+        self, messages: Mapping[str, Any], *, language: str, flatten: bool = False
+    ) -> None:
+        """Add or extend the catalogue for ``language``.
+
+        ``messages`` is a flat mapping — ``"stats.balance"`` is one key whose
+        name contains a dot. Pass ``flatten=True`` to accept a nested mapping
+        from a JSON file with sections; it is expanded with
+        :func:`flatten_catalogue` first (an unexpanded nested object is
+        warned about, because it silently makes every dotted key miss).
+        """
         tag = normalise_language(language)
         if not tag:
             raise ValueError("language must not be empty")
+        if flatten:
+            messages = flatten_catalogue(messages)
+        else:
+            self._warn_nested(tag, messages)
         self._catalogues.setdefault(tag, {}).update(messages)
 
-    def load_dict(self, catalogues: Mapping[str, Mapping[str, Any]]) -> tuple[str, ...]:
+    def _warn_nested(self, tag: str, messages: Mapping[str, Any]) -> None:
+        """Point out nested JSON once per language.
+
+        The lookup is flat, so a catalogue written as sections does not raise
+        anything — it renders bare keys on screen and the only clue is one
+        "missing translation" line per key. Say what happened, where, and what
+        to do instead, while the file is still being loaded.
+        """
+        nested = _nested_namespaces(messages)
+        if not nested or tag in self._warned_nested:
+            return
+        self._warned_nested.add(tag)
+        shown = ", ".join(repr(name) for name in nested[:3])
+        more = f" (+{len(nested) - 3} more)" if len(nested) > 3 else ""
+        _log.warning(
+            "catalogue %r stores nested objects under %s%s, but keys are flat: "
+            't("a.b") only finds a literal "a.b" entry. Flatten the file or pass '
+            "flatten=True (see flatten_catalogue) to load it as it is.",
+            tag,
+            shown,
+            more,
+        )
+
+    def load_dict(
+        self, catalogues: Mapping[str, Mapping[str, Any]], *, flatten: bool = False
+    ) -> tuple[str, ...]:
         """Load multiple language catalogues from a dict.
 
         Convenience method for in-code translations without external files::
@@ -302,7 +413,8 @@ class Translations:
                 "uk": {"greeting": "Привіт"},
             })
 
-        Returns the normalised language tags that were loaded.
+        Returns the normalised language tags that were loaded. ``flatten=True``
+        accepts nested sections, like :meth:`load`.
         """
         if not isinstance(catalogues, Mapping):
             raise TypeError(
@@ -315,14 +427,19 @@ class Translations:
                     f"messages for {lang!r} must be mapping, "
                     f"got {type(messages).__name__!r}"
                 )
-            self.load(messages, language=lang)
+            self.load(messages, language=lang, flatten=flatten)
             loaded.append(normalise_language(lang))
         return tuple(loaded)
 
-    def load_file(self, path: str | Path, *, language: str | None = None) -> str:
+    def load_file(
+        self, path: str | Path, *, language: str | None = None, flatten: bool = False
+    ) -> str:
         """Load a JSON catalogue; the language defaults to the file's stem.
 
-        ``locales/uk.json`` therefore needs no arguments at all.
+        ``locales/uk.json`` therefore needs no arguments at all. The JSON must
+        be one level of ``"key": "text"`` pairs (a plural form map is the one
+        nested shape that is understood); ``flatten=True`` expands nested
+        sections into dotted keys instead of warning about them.
         """
         file = Path(path)
         tag = normalise_language(language or file.stem)
@@ -334,13 +451,13 @@ class Translations:
             raise ValueError(f"{file} is not valid JSON: {error}") from error
         if not isinstance(data, dict):
             raise ValueError(f"{file} must contain a JSON object of messages")
-        self.load(data, language=tag)
+        self.load(data, language=tag, flatten=flatten)
         return tag
 
-    def load_dir(self, directory: str | Path) -> tuple[str, ...]:
+    def load_dir(self, directory: str | Path, *, flatten: bool = False) -> tuple[str, ...]:
         """Load every ``*.json`` catalogue in a directory."""
         root = Path(directory)
-        loaded = [self.load_file(path) for path in sorted(root.glob("*.json"))]
+        loaded = [self.load_file(path, flatten=flatten) for path in sorted(root.glob("*.json"))]
         return tuple(loaded)
 
     def use(self, language: str) -> str:
@@ -362,6 +479,7 @@ class Translations:
         """Forget every catalogue (used by tests)."""
         self._catalogues.clear()
         self._missing.clear()
+        self._warned_nested.clear()
         self._language = self.default_language
 
     # -- lookup ------------------------------------------------------------
@@ -411,7 +529,15 @@ class Translations:
         if entry is None:
             if key not in self._missing:
                 self._missing.add(key)
-                _log.warning("missing translation for %r in %r", key, self._language)
+                # A dotted key that misses is usually not a typo but a
+                # catalogue written as sections: the lookup is flat, so the
+                # dot has to be in the key itself.
+                hint = (
+                    " (a dot is part of the key — nested sections need flatten=True)"
+                    if "." in key
+                    else ""
+                )
+                _log.warning("missing translation for %r in %r%s", key, self._language, hint)
             entry = key if default is None else default
 
         if isinstance(entry, Mapping):
