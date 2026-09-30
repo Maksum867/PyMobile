@@ -17,6 +17,7 @@ from pymobile import (
     Column,
     Dropdown,
     Label,
+    PyMobileDeprecationWarning,
     RatingBar,
     Row,
     Screen,
@@ -49,10 +50,12 @@ def test_documented_validator_mapping_dsl() -> None:
     }
 
 
-def test_documented_selection_callbacks_are_compatibility_aliases() -> None:
+def test_selection_on_change_is_a_deprecated_alias_that_still_works() -> None:
     changed: list[str] = []
-    Dropdown(["one", "two"], on_change=changed.append).set_value("two")
-    SegmentedButtons(["light", "dark"], on_change=changed.append).set_value("dark")
+    with pytest.warns(PyMobileDeprecationWarning, match="use on_select= instead"):
+        Dropdown(["one", "two"], on_change=changed.append).set_value("two")
+    with pytest.warns(PyMobileDeprecationWarning, match="use on_select= instead"):
+        SegmentedButtons(["light", "dark"], on_change=changed.append).set_value("dark")
     assert changed == ["two", "dark"]
 
 

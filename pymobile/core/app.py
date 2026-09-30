@@ -60,6 +60,12 @@ def _noop() -> None:
 #: without dictating where the author keeps theirs.
 _current: App | None = None
 
+#: Guards ``_current``. ``run()`` publishes an app, ``stop()`` withdraws it *only
+#: if it is still the published one* (a check followed by a write), and worker
+#: threads read it: without one lock around all three, a ``stop()`` racing a
+#: ``run()`` could withdraw the app that had just been published.
+_current_lock = threading.Lock()
+
 
 def _app_store_path(package: str) -> Path:
     """Where this application keeps its store when nothing was configured.
@@ -259,8 +265,26 @@ class App:
 
     @staticmethod
     def current() -> App | None:
-        """The application currently running in this process, if any."""
-        return _current
+        """The application currently running in this process, if any.
+
+        Safe to call from any thread, a ``run_job`` worker included: publishing
+        and withdrawing the app are atomic with this read. Read it **once** and
+        keep the reference — ``App.current().x`` twice may see the app stop in
+        between — and treat ``None`` as "the app is gone"::
+
+            def worker():
+                app = App.current()
+                if app is None:
+                    return
+                app.notify("Done")
+
+        An app that is shutting down (its screens' ``on_unmount`` hooks are
+        running) is still returned until ``stop()`` has finished; check
+        :attr:`running` when that matters. Inside a screen, ``self.app`` is the
+        better handle: it does not depend on a process-wide global.
+        """
+        with _current_lock:
+            return _current
 
     # -- properties --------------------------------------------------------
     @property
@@ -341,7 +365,8 @@ class App:
         _log.info("starting %s on %s (bridge=%s)", self.name, self.platform, self.bridge.name)
         self._running = True
         self._ever_started = True
-        _current = self
+        with _current_lock:
+            _current = self
         self._unsubscribe_language()
         unsubscribe = translations.subscribe(_weak_language_listener(self))
         self._unsubscribe_language = unsubscribe
@@ -553,8 +578,9 @@ class App:
         self.navigator.dispose()
         self.jobs.shutdown()
         _plugin_registry.on_app_stop(self)
-        if _current is self:
-            _current = None
+        with _current_lock:
+            if _current is self:
+                _current = None
         self.events.emit("app:stop", source=self.name)
         self.events.clear()
         _log.info("stopped %s", self.name)
@@ -649,9 +675,11 @@ class App:
             self._warned_unknown_types.add(name)
             _log.warning(
                 "widget type %r has no branch in the native renderer (ViewBuilder.java): "
-                "on the phone it draws as an empty view, silently. Add the case there and "
-                "declare it with register_widget_type(%r) so this warning stops — or "
-                "compose the widget from existing ones (Row/Column/ProgressBar).",
+                "on the phone it draws as a placeholder, not as your widget. Add the case "
+                "there (`pymobile widget-java %s` writes it) and declare it with "
+                "register_widget_type(%r) so this warning stops — or compose the widget "
+                "from existing ones (Row/Column/ProgressBar).",
+                name,
                 name,
                 name,
             )

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pymobile-framework"
-version = "0.8.2"
+version = "0.8.3"
 description = "A small, fast and extensible Python framework for building Android applications."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -62,6 +62,14 @@ Issues = "https://github.com/Maksum867/py-mobile/issues"
 [project.scripts]
 pymobile = "pymobile.cli:main"
 
+# The testing fixtures (pymobile_session, pymobile_driver, pymobile_snapshot …)
+# are active in every pytest run once pymobile is installed. The entry point is
+# named after its module on purpose: `-p pymobile.testing.plugin` or a
+# `pytest_plugins` line then names the very same plugin instead of registering
+# it twice.
+[project.entry-points.pytest11]
+"pymobile.testing.plugin" = "pymobile.testing.plugin"
+
 # MANIFEST.in widens the sdist, and setuptools would otherwise copy anything it
 # lists that sits inside a package into the wheel as package data - the tests
 # included. Package data is declared explicitly below instead.
@@ -102,7 +110,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"pymobile/tests/*" = ["B018"]  # attribute access is the assertion under test
+# B018: attribute access is the assertion under test. RUF001: Ukrainian sample text
+# (translations, localised validator messages) is what several tests are about.
+"pymobile/tests/*" = ["B018", "RUF001"]
 # Cyrillic letters in the transliteration table are the point of the file.
 "pymobile/compiler/scaffold.py" = ["RUF001"]
 # Month names, currency symbols and separators of real locales.

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, overload
 from ...errors import PyMobileError
 from ...log import get_logger
 from ..events import Event, Subscription
+from ..i18n import translations
 from .widget import W, Widget, widget_scope
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -33,14 +34,39 @@ class Screen:
     Subclasses override :meth:`build` to return the widget tree. Lifecycle
     hooks (:meth:`on_mount`, :meth:`on_show`, :meth:`on_hide`,
     :meth:`on_unmount`) are optional.
+
+    **Titles and languages.** ``title`` is a plain string, fixed when the class
+    is defined — too early for ``t()``, whose catalogue is loaded later and can
+    change while the app runs. Name a catalogue key instead::
+
+        class Settings(Screen):
+            title = "Settings"                  # shown when the key is missing
+            title_key = "settings.title"        # resolved before every build()
+
+    The key is looked up again each time the tree is built, so switching the
+    language (which rebuilds every screen on the stack) retitles them too. A
+    title that depends on data can be assigned in ``build()`` itself
+    (``self.title = t("user.title", name=self.user)``).
     """
 
     #: Title shown in the action bar; defaults to the class name.
     title: str = ""
+    #: Catalogue key the title is translated from at every ``build()``; ``title``
+    #: (or the class name) is the fallback when the catalogue lacks it.
+    title_key: str | None = None
 
-    def __init__(self, title: str | None = None) -> None:
-        self.title = title or self.title or type(self).__name__
+    def __init__(self, title: str | None = None, *, title_key: str | None = None) -> None:
+        if title_key is not None:
+            if not isinstance(title_key, str) or not title_key.strip():
+                raise ValueError("title_key must be a non-empty catalogue key")
+            self.title_key = title_key
+        self._fallback_title = title or self.title or type(self).__name__
+        self.title = self._fallback_title
         self._app: App | None = None
+        #: True from just before ``on_show`` until just before ``on_hide``; kept
+        #: by the navigator so a worker thread can read it without touching the
+        #: stack (see :attr:`is_current`).
+        self._is_current = False
         self._root: Widget | None = None
         self._mounted = False
         #: Whether this screen was ever on a navigator stack. A screen that
@@ -74,6 +100,26 @@ class Screen:
             )
         return self._app
 
+    @property
+    def is_current(self) -> bool:
+        """Whether this screen is the one on display right now.
+
+        ``True`` while the screen is on top of the navigator stack — from just
+        before :meth:`on_show` until just before :meth:`on_hide` — and ``False``
+        when it is covered by another screen, was popped, or was never pushed.
+        It is the public spelling of ``app.screen is self``, and unlike
+        :attr:`app` it never raises, so a callback that may outlive the screen
+        (a timer, a job result) can simply ask::
+
+            def on_data(self, rows):
+                if self.is_current:
+                    self.table.rows = rows
+
+        Not to be confused with :attr:`mounted`, which stays ``True`` for a
+        screen that is on the stack but covered.
+        """
+        return self._is_current
+
     # -- construction ------------------------------------------------------
     def build(self) -> Widget:
         """Return the widget tree for this screen."""
@@ -83,6 +129,7 @@ class Screen:
     def root(self) -> Widget:
         """The built widget tree, constructed on first access."""
         if self._root is None:
+            self._resolve_title()
             with widget_scope(self):
                 root = self.build()
             if root is None:
@@ -102,6 +149,17 @@ class Screen:
             self._root = root
             self._name_widgets()
         return self._root
+
+    def _resolve_title(self) -> None:
+        """Translate ``title_key`` (when there is one) ahead of ``build()``.
+
+        Done before the build so ``build()`` reads the translated title, and on
+        every rebuild so a language change reaches it. A key missing from the
+        catalogue leaves the fallback title, and is logged once by the catalogue.
+        """
+        key = self.title_key
+        if key:
+            self.title = translations.get(key, default=self._fallback_title)
 
     def _name_widgets(self) -> None:
         """Give widgets stored on ``self`` an id derived from the attribute.
@@ -253,7 +311,10 @@ class Screen:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise the screen (title + widget tree)."""
-        return {"screen": self.title, **self.root.to_dict()}
+        # The tree first: building it is what translates ``title_key``, so the
+        # title read afterwards is the one for the current language.
+        tree = self.root.to_dict()
+        return {"screen": self.title, **tree}
 
     # -- events ------------------------------------------------------------
     def on(self, event: str, handler: Callable[[Event], None]) -> Subscription:
@@ -362,6 +423,7 @@ class Navigator:
     def _show_new(self, screen: ScreenT) -> ScreenT:
         """Put an already prepared screen on top and run its lifecycle hooks."""
         self._stack.append(screen)
+        screen._is_current = True
         if not screen._mounted:
             screen._mounted = True
             screen._ever_mounted = True
@@ -374,6 +436,7 @@ class Navigator:
     @staticmethod
     def _discard(screen: Screen) -> None:
         """Unmount a screen that has already been removed from the stack."""
+        screen._is_current = False
         screen._mounted = False
         screen.on_unmount()
         screen._cancel_subscriptions()
@@ -384,6 +447,7 @@ class Navigator:
         self._prepare(screen)
         previous = self.current
         if previous is not None:
+            previous._is_current = False
             previous.on_hide()
         return self._show_new(screen)
 
@@ -402,6 +466,7 @@ class Navigator:
         if len(self._stack) <= 1:
             return None
         screen = self._stack.pop()
+        screen._is_current = False
         screen.on_hide()
         screen._mounted = False
         # Run the user hook first: it is the documented place for farewell
@@ -414,6 +479,7 @@ class Navigator:
         screen._app = None
         current = self.current
         if current is not None:
+            current._is_current = True
             current.on_show()
         _log.debug("pop %s (depth=%d)", screen.title, self.depth)
         self._notify()
@@ -436,6 +502,7 @@ class Navigator:
         self._prepare(screen)
         if self._stack:
             top = self._stack.pop()
+            top._is_current = False
             top.on_hide()
             self._discard(top)
         return self._show_new(screen)
@@ -464,6 +531,7 @@ class Navigator:
         """
         current = self.current
         if current is not None:
+            current._is_current = False
             current.on_hide()
         while self._stack:
             self._discard(self._stack.pop())

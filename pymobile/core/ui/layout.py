@@ -6,6 +6,7 @@ more, so this module also ships the patterns that were previously faked with
 ``Row(weight=...)`` gymnastics:
 
 * :class:`Grid`      — an N-column grid of equal-width cells;
+* :class:`Wrap`      — children side by side, on a new line when the row is full;
 * :class:`Expanded`  — "take all the space left over on the main axis";
 * :class:`Flexible`  — the same, but the child may stay smaller;
 * :class:`Divider`   — a hairline between sections;
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .flow import ALIGNMENTS
 from .style import Align, Color
 from .widget import Container, Widget
 
@@ -28,6 +30,7 @@ __all__ = [
     "ScrollView",
     "Stack",
     "Grid",
+    "Wrap",
     "Expanded",
     "Flexible",
     "Divider",
@@ -175,6 +178,54 @@ class Grid(Container):
             "column_spacing": (
                 self.spacing if self.column_spacing is None else self.column_spacing
             ),
+        }
+
+
+class Wrap(Container):
+    """Lays children side by side and starts a new line when the row is full.
+
+    The layout for things whose number and width are not known in advance — tags,
+    filter chips, quick-reply buttons, translated labels — where a :class:`Row`
+    would push the last one off the screen and a :class:`Grid` would give every
+    cell the width of the widest::
+
+        Wrap(*[Chip(tag) for tag in tags], spacing=8, run_spacing=8)
+
+    ``spacing`` is the gap between children on a line, ``run_spacing`` the gap
+    between lines (it defaults to ``spacing``). ``align`` places each line when
+    it is shorter than the container: ``"start"`` (default), ``"center"`` or
+    ``"end"``. Children keep their natural size; one wider than the container
+    gets a line of its own.
+    """
+
+    type_name = "Wrap"
+    __slots__ = ("spacing", "run_spacing", "align")
+
+    def __init__(
+        self,
+        *children: Widget,
+        spacing: int = 0,
+        run_spacing: int | None = None,
+        align: str = Align.START,
+        **kwargs: Any,
+    ) -> None:
+        if spacing < 0:
+            raise ValueError("spacing must not be negative")
+        if run_spacing is not None and run_spacing < 0:
+            raise ValueError("run_spacing must not be negative")
+        if align not in ALIGNMENTS:
+            raise ValueError(f"invalid align {align!r}; expected one of {', '.join(ALIGNMENTS)}")
+        self.spacing = spacing
+        self.run_spacing = run_spacing
+        self.align = align
+        super().__init__(*children, **kwargs)
+
+    def props(self) -> dict[str, Any]:
+        return {
+            **super().props(),
+            "spacing": self.spacing,
+            "run_spacing": self.spacing if self.run_spacing is None else self.run_spacing,
+            "align": self.align,
         }
 
 

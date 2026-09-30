@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...log import get_logger
 from .contract import text_value
+from .flow import flow_lines, line_offset
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import tkinter as tk
@@ -55,6 +56,39 @@ def tkinter_available() -> bool:
     except ImportError:
         return False
     return True
+
+
+def place_flow(
+    frame: Any, cells: list[Any], gap: int, run_gap: int, align: str = "start"
+) -> None:
+    """Lay ``cells`` out inside ``frame`` in lines, like the device's ``FlowLayout``.
+
+    Tk has no flow geometry manager, so the cells are ``place()``d by hand from
+    their requested sizes and the frame is given the height that results. It runs
+    whenever the frame is resized; the height is only written when it changed,
+    which is what stops the resulting ``<Configure>`` from calling it forever.
+    Any failure is logged and leaves the cells where they were — a preview must
+    not die of a layout detail.
+    """
+    try:
+        width = int(frame.winfo_width())
+        if width <= 1 or not cells:  # not mapped yet, or nothing to place
+            return
+        widths = [int(cell.winfo_reqwidth()) for cell in cells]
+        heights = [int(cell.winfo_reqheight()) for cell in cells]
+        y = 0
+        for line in flow_lines(widths, width, gap):
+            used = sum(widths[i] for i in line) + gap * (len(line) - 1)
+            x = int(line_offset(align, width, used))
+            for index in line:
+                cells[index].place(x=x, y=y)
+                x += widths[index] + gap
+            y += max(heights[i] for i in line) + run_gap
+        total = max(1, y - run_gap)
+        if int(frame.cget("height")) != total:
+            frame.configure(height=total)
+    except Exception:  # pragma: no cover - defensive, see the docstring
+        _log.exception("could not lay out a Wrap")
 
 
 def skeleton(node: dict[str, Any]) -> tuple[Any, ...]:
@@ -337,6 +371,10 @@ class GuiPreview:
             self._build_grid(parent, node, props, background)
             return
 
+        if kind == "Wrap":
+            self._build_wrap(parent, node, props, background)
+            return
+
         if kind == "Divider":
             thickness = max(1, int(props.get("thickness", 1)))
             colour = _PALETTE["line"]
@@ -554,13 +592,20 @@ class GuiPreview:
             frame = tk.Frame(parent, bg=background)
             frame.pack(fill="x", pady=pad)
             selected = text_value(props.get("value", ""))
+            wrap = bool(props.get("wrap"))
+            buttons = []
             for option in props.get("options") or []:
-                tk.Button(
+                button = tk.Button(
                     frame,
                     text=str(option),
                     relief="sunken" if str(option) == selected else "raised",
                     command=lambda v=str(option): self._dispatch(widget_id, "change", v),
-                ).pack(side="left", expand=True, fill="x")
+                )
+                buttons.append(button)
+                if not wrap:  # one row; Tk never squeezes a word into a column of letters
+                    button.pack(side="left", expand=True, fill="x")
+            if wrap:
+                self._flow(frame, buttons, 0, 0, "start")
             return
 
         if kind == "ProgressText":
@@ -746,6 +791,34 @@ class GuiPreview:
                 pady=(0 if row == 0 else row_spacing, 0),
             )
             self._build(cell, child)
+
+    def _flow(self, frame: tk.Misc, cells: list[Any], gap: int, run_gap: int, align: str) -> None:
+        """Keep ``cells`` laid out as a flow inside ``frame`` whenever it is resized."""
+
+        def layout(_event: object = None) -> None:
+            place_flow(frame, cells, gap, run_gap, align)
+
+        frame.bind("<Configure>", layout)
+        frame.after_idle(layout)
+
+    def _build_wrap(
+        self, parent: tk.Misc, node: dict[str, Any], props: dict[str, Any], background: str
+    ) -> None:
+        """A Wrap: children side by side, a new line when the row is full."""
+        tk = self._tk
+        gap = int(props.get("spacing", 0) or 0)
+        run_value = props.get("run_spacing")
+        run_gap = gap if run_value is None else int(run_value or 0)
+        frame = tk.Frame(parent, bg=background, height=1)
+        frame.pack(fill="x", pady=2)
+        cells = []
+        for child in node.get("children", ()):
+            if not child.get("visible", True):
+                continue  # hidden takes no place, not even a gap
+            cell = tk.Frame(frame, bg=background)
+            self._build(cell, child)
+            cells.append(cell)
+        self._flow(frame, cells, gap, run_gap, text_value(props.get("align") or "start"))
 
     def _build_scroll(self, parent: tk.Misc, node: dict[str, Any], background: str) -> None:
         """A scrollable region: a Canvas holding a Frame, plus a scrollbar."""

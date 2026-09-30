@@ -65,8 +65,10 @@ _PAGE = """<!doctype html>
   a.w {{ color: {primary}; }}
   .avatar {{ display: inline-flex; align-items: center; justify-content: center;
              border-radius: 50%; font-weight: 600; }}
-  .seg {{ display: flex; gap: 0; }}
-  .seg button {{ flex: 1; border-radius: 0; }}
+  .seg {{ display: flex; gap: 0; overflow-x: auto; }}
+  .seg button {{ flex: 1 0 auto; border-radius: 0; width: auto; white-space: nowrap; }}
+  .seg.wrap {{ flex-wrap: wrap; overflow-x: visible; }}
+  .seg.wrap button {{ white-space: normal; }}
   .phone {{ position: relative; }}
   .swipe {{ width: auto; flex: 0 0 auto; padding: 9px 10px; color: #fff; border: 0; }}
   .refresh {{ text-align: center; }}
@@ -334,6 +336,15 @@ def render_html(node: dict[str, Any]) -> str:
             f'row-gap:{row_gap}px;column-gap:{column_gap}px;{css}">{inner}</div>'
         )
 
+    if kind == "Wrap":
+        gap = props.get("spacing", 0)
+        run_gap = props.get("run_spacing", gap)
+        justify = _alignment(props.get("align"))
+        return (
+            f'<div class="wrap" style="display:flex;flex-wrap:wrap;gap:{run_gap}px {gap}px;'
+            f'justify-content:{justify};align-items:flex-start;{css}">{inner}</div>'
+        )
+
     if kind in ("Expanded", "Flexible"):
         flex = int(props.get("flex", 1))
         basis = "0" if props.get("fit", "tight") == "tight" else "auto"
@@ -512,7 +523,8 @@ def render_html(node: dict[str, Any]) -> str:
             f"{escape(str(opt))}</button>"
             for opt in options
         )
-        return f'<div class="seg" style="{css}">{buttons}</div>'
+        classes = "seg wrap" if props.get("wrap") else "seg"
+        return f'<div class="{classes}" style="{css}">{buttons}</div>'
 
     if kind == "ProgressText":
         text = escape(text_value(props.get("text", "")))

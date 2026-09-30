@@ -429,10 +429,22 @@ class TestPipeline:
         assert not any("INTERNET" in warning for warning in result.warnings)
 
     def test_warns_about_notifications_on_new_sdk(self, tmp_path: Path) -> None:
-        (tmp_path / "main.py").write_text("x = 1", encoding="utf-8")
+        (tmp_path / "main.py").write_text(
+            "def done(app):\n    app.notify('Done')\n", encoding="utf-8"
+        )
         config = ProjectConfig(root=tmp_path, target_sdk=34)
         result = build_apk(config)
         assert any("POST_NOTIFICATIONS" in warning for warning in result.warnings)
+
+    def test_no_notifications_warning_for_an_app_that_never_notifies(
+        self, tmp_path: Path
+    ) -> None:
+        # The stock config targets SDK 35 without POST_NOTIFICATIONS; that is only
+        # a problem for code that posts a notification.
+        (tmp_path / "main.py").write_text("x = 1", encoding="utf-8")
+        config = ProjectConfig(root=tmp_path, target_sdk=34)
+        result = build_apk(config)
+        assert not any("POST_NOTIFICATIONS" in warning for warning in result.warnings)
 
     def test_custom_icon_flagged(self, project: ProjectConfig) -> None:
         icon = project.root / "logo.png"

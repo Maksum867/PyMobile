@@ -30,8 +30,11 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.8.2`) and read the
-> changelog before upgrading. Bug reports are genuinely welcome.
+> depend on it, pin an exact version (`pymobile-framework==0.8.3`) and read the
+> changelog before upgrading. What may change, and how much notice you get, is
+> written down in the
+> [versioning and deprecation policy](#versioning-and-deprecation-policy). Bug
+> reports are genuinely welcome.
 
 ---
 
@@ -112,6 +115,7 @@ device. No Java, no Gradle, no Android Studio.
 - [Extending the framework](#extending-the-framework)
 - [Limitations](#limitations)
 - [Known issues](#known-issues)
+- [Versioning and deprecation policy](#versioning-and-deprecation-policy)
 - [FAQ](#faq)
 - [Contributing](#contributing)
 
@@ -286,7 +290,6 @@ TextInput(
     max_length=50,             # extra characters are trimmed automatically
     on_change=lambda value: print(value),
 )
-TextInput(maxlength=50)        # alias: maxlength -> max_length (HTML style)
 
 TextInput(password=True)       # masked
 TextInput(multiline=True)      # multi-line
@@ -297,6 +300,9 @@ nothing. While the field has focus the framework never overwrites its contents,
 so the keyboard stays open and the caret does not jump.
 
 Methods: `set_value(text)`, `clear()`.
+
+> `maxlength=` (the HTML spelling) still works but is **deprecated** in favour
+> of `max_length=`; see [Versioning and deprecation policy](#versioning-and-deprecation-policy).
 
 ### Switch
 
@@ -338,24 +344,39 @@ Horizontal selection panel (tabs or segmented control).
 ```python
 segmented = SegmentedButtons(
     ["Today", "Week", "Month"],
-    on_change=lambda value: print(value),
+    on_select=lambda value: print(value),
 )
 ```
+
+**Long labels.** Every segment is as wide as its text. When they do not fit —
+five translated labels on a 360 dp phone — the bar **scrolls sideways** (the
+selected segment is scrolled into view) instead of squeezing a word into a
+column of letters. Pass `wrap=True` when every option should stay visible: the
+segments then flow onto further lines.
+
+```python
+SegmentedButtons(["Географія", "Історія", "Математика", "Біологія", "Хімія"])            # scrolls
+SegmentedButtons(["Географія", "Історія", "Математика", "Біологія", "Хімія"], wrap=True)  # flows
+```
+
+For anything other than a selection — tags, filter chips, quick replies — use
+[`Wrap`](#wrap).
 
 ### Slider
 
 ```python
 slider = Slider(value=50, minimum=0, maximum=100,
                 on_change=lambda v: print(v))
-# aliases supported: min/max
-slider = Slider(value=50, min=0, max=100)
 ```
+
+`min=` / `max=` still work as **deprecated** aliases of `minimum=` / `maximum=`
+(on `Slider`, `Stepper`, `ProgressBar`, `ProgressText` and `RatingBar`); they
+warn and are removed in 1.0.
 
 ### ProgressBar
 
 ```python
 bar = ProgressBar(40, maximum=100)
-bar = ProgressBar(40, max=100)      # alias: max -> maximum
 bar.set_value(150)         # clamped to maximum
 bar.fraction               # 0.0 … 1.0
 
@@ -376,7 +397,6 @@ ProgressText(42, maximum=100, label="Downloading")
 ```python
 rating = RatingBar(value=3, maximum=5,
                    on_change=lambda v: print(v))
-rating = RatingBar(value=3, max=5)  # alias: max -> maximum
 ```
 
 ### Dropdown
@@ -384,9 +404,15 @@ rating = RatingBar(value=3, max=5)  # alias: max -> maximum
 ```python
 dropdown = Dropdown(
     options=["Red", "Green", "Blue"],
-    on_change=lambda value: print(value),
+    on_select=lambda value: print(value),
 )
 ```
+
+Widgets that *choose one of several options* (`Dropdown`, `SegmentedButtons`,
+`BottomNavigation`, `RadioGroup`) report it with `on_select`; widgets that hold
+a *value* (`TextInput`, `Slider`, `Stepper`, `RatingBar`) use `on_change`. The
+old `on_change=` on the selection widgets is a **deprecated** alias of
+`on_select=`.
 
 ### SearchBar
 
@@ -409,7 +435,6 @@ Badge("3")       # notification badge
 ```python
 stepper = Stepper(value=1, minimum=0, maximum=10,
                   on_change=lambda v: print(v))
-stepper = Stepper(value=1, min=0, max=10)  # aliases: min/max
 ```
 
 ### Link
@@ -440,8 +465,24 @@ Round avatar with initials or an image.
 
 ```python
 Avatar("MK")                           # initials
-Avatar("MK", image="assets/photo.png") # image
+Avatar("MK", image="assets/photo.png") # image, showing "MK" until it loads
 ```
+
+The positional argument is *either* initials *or* an image source, and `Avatar`
+guesses: a URL, a path separator or an image extension means "image",
+everything else is initials. State the reading outright whenever the guess
+would be wrong:
+
+```python
+Avatar(text="A/B")                    # initials, whatever they look like
+Avatar(image="photo")                 # an image, whatever the path looks like
+Avatar("A/B", is_image=False)         # the positional is initials, not a path
+Avatar("photo", is_image=True)        # the positional is an image source
+Avatar("A/B", image="me.png", is_image=False)   # a photo with the initials "A/B"
+```
+
+`is_image` is three-valued: `None` (the default) guesses, `True` and `False`
+decide.
 
 ### Image
 
@@ -628,6 +669,7 @@ Containers, freely nestable.
 Column(a, b, c, spacing=12)                # vertical stack
 Row(a, b, spacing=8, align=Align.CENTER)   # horizontal stack
 Grid(a, b, c, d, columns=2, spacing=12)    # equal-width cells
+Wrap(a, b, c, d, spacing=8)                # side by side, a new line when full
 ScrollView(content, spacing=8)             # scrollable region
 Stack(background, foreground)              # layered, last on top
 SafeArea(content)                          # clears the notch and status bar
@@ -649,6 +691,24 @@ Grid(
 ```
 
 Rows fill left to right; the last row may be partially filled.
+
+### Wrap
+
+A flow layout: children sit side by side at their natural size, and a new line
+starts when the next one does not fit. It is the container for things whose
+number and width are not known in advance — tags, filter chips, quick-reply
+buttons, translated labels — where a `Row` would push the last one off the
+screen and a `Grid` would give every cell the width of the widest.
+
+```python
+Wrap(*[Chip(tag) for tag in tags], spacing=8, run_spacing=4)
+Wrap(a, b, c, align="center")     # each line centred (start | center | end)
+```
+
+`spacing` is the gap between children on a line, `run_spacing` the gap between
+lines (it defaults to `spacing`). A child wider than the container gets a line
+of its own; hidden children take no room. The Android renderer, the desktop
+preview and the mockup break lines by the same rule.
 
 ### Expanded and Flexible
 
@@ -822,6 +882,42 @@ blank window. The hardware back button is wired up automatically.
 
 > Do not push the same screen **object** twice; that raises `PyMobileError`.
 > Create a new instance each time: `app.push(Settings())`.
+
+### Is this screen on display?
+
+`screen.is_current` is `True` while the screen is on top of the stack — from just
+before `on_show` until just before `on_hide` — and `False` when another screen
+covers it, after it was popped, or before it was pushed. It never raises and
+can be read from any thread, so a callback that may outlive the screen (a
+timer, a job result) can simply ask, without touching the private `_app`:
+
+```python
+def on_rows(self, rows):
+    if self.is_current:               # same as `self.app.screen is self`, but never raises
+        self.table.rows = rows
+```
+
+Not to be confused with `screen.mounted`, which stays `True` for a screen that
+is on the stack but covered.
+
+### Titles that follow the language
+
+`title` is a plain class attribute — fixed when the class is defined, long before
+a catalogue is loaded or the language changes. Name a catalogue key instead:
+
+```python
+class Settings(Screen):
+    title = "Settings"                  # shown when the key is missing
+    title_key = "settings.title"        # translated before every build()
+```
+
+The key is looked up again each time the screen's tree is built, and switching
+the language rebuilds every screen on the stack, so titles (the action bar, the
+mockup, `to_dict()`) always match the current language. `Screen("Fallback",
+title_key="settings.title")` works too. A title that depends on data can be
+assigned inside `build()`: `self.title = t("user.title", name=self.user)`.
+A key the catalogue lacks leaves the fallback title and is logged once, like any
+missing translation.
 
 Find a widget anywhere in the current screen:
 
@@ -1209,6 +1305,58 @@ Validators come in two forms:
   `{"between": [1, 120]}`. A bare `"min_length"` is an error — there is no
   sensible default length.
 
+### Translating the messages
+
+The built-in messages are English, but they are not hard-wired. Every rule has
+a stable **id** and an English default (`DEFAULT_MESSAGES` in
+`pymobile.core.validation`); a message is taken from the first of these that
+has it:
+
+1. `Validator(..., messages={...})` — for one validator. The key is a rule id
+   (`"required"`) or `"field.rule"` for a single field (`"email.required"`); the
+   value is a `str.format` template, or a callable that receives the rule's
+   parameters as keyword arguments (handy for plural forms).
+2. the translation catalogue, under `validation.<rule id>` — **one** translation
+   for every validator in the app, looked up when the message is produced, so a
+   language switch at run time is followed.
+3. the English default.
+
+```python
+Validator(
+    {"email": ["required", "email"], "name": ["required", {"min_length": 2}]},
+    messages={
+        "required": "обов'язкове поле",
+        "email.email": "невірна адреса пошти",          # only the email field
+        "min_length": "не менше {minimum} символів",
+    },
+)
+
+# or once, for the whole app — the same ids, prefixed with "validation.":
+translations.load({
+    "validation.required": "обов'язкове поле",
+    "validation.email": "невірна адреса пошти",
+    "validation.min_length": "не менше {minimum} символів",
+}, language="uk")
+```
+
+| Rule id | Default text | Placeholders |
+| --- | --- | --- |
+| `required` | `is required` | |
+| `email` | `must be a valid email address` | |
+| `min_length` / `max_length` | `must be at least {minimum} characters` / `must be at most {maximum} characters` | `minimum`, `maximum` |
+| `integer` / `number` / `boolean` | `must be an integer` / `a number` / `a boolean` | |
+| `between` / `min` / `max` | `must be between {low} and {high}` | `low`, `high` |
+| `matches` | `does not match` (the `{"matches": "field"}` form: `does not match {field!r}`) | `field` |
+| `one_of` | `must be one of: {choices}` | `choices` |
+| `regex` | `must match {pattern!r}` | `pattern` |
+
+`matches_field` (the field form of `matches`) and `length` (both ends of a
+length rule) are also ids: an override for `matches` or `length` covers them
+unless the more specific id is overridden too. An id that does not exist —
+`messages={"requird": …}` — is an error at construction, not a message that
+silently never shows. The bare rule functions (`required("")`) return the same
+translated text, and a rule you write yourself keeps its own message.
+
 ---
 
 ## Plugins
@@ -1289,6 +1437,15 @@ if results.get(Permission.POST_NOTIFICATIONS.value, False):
 
 3. **Check device settings** — ensure notifications are enabled for the app:
    *Settings → Apps → Your App → Notifications*.
+
+`pymobile build` reminds you of step 1 only when it is needed: if the project
+targets Android 13+ (the default), does not declare `POST_NOTIFICATIONS`, **and**
+its code posts a notification (`app.notify(...)`, `app.notifications.notify(...)`,
+`Notifications(...)`), the build prints
+`targetSdk >= 33 without POST_NOTIFICATIONS: notifications stay hidden` with the
+file and line of the call. An app that never notifies gets no warning. The scan
+covers the files that ship in the APK (`exclude`, `tests/` and virtualenvs are
+skipped) and ignores comments and docstrings.
 
 A default `pymobile build --native` is enough. `DeviceServices.notify()`
 creates the notification channel on every post, so you do not need to rebuild
@@ -1914,7 +2071,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.8.2", "platform": "android",
+# {"framework_version": "0.8.3", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 
@@ -1927,6 +2084,69 @@ App("My App", log_level="debug", log_file="app.log")
 ---
 
 ## Testing your app
+
+`pip install pymobile-framework` ships a pytest plugin, so a test of your app
+needs no scaffolding: an app on a recording stub bridge, storage in a temporary
+folder, a driver that walks the screens like a user, and screenshot-style
+snapshots of a screen's text picture. The fixtures are there as soon as
+pymobile is installed (with pytest 7 or newer) — no `conftest.py`, nothing to
+import:
+
+| Fixture | What you get |
+| --- | --- |
+| `pymobile_session` | app + stub bridge + driver, set up and torn down for you: `.start(screen)`, `.app`, `.bridge`, `.driver`, `.screen` |
+| `pymobile_app` | the `App` (created, not running — `app.run(FirstScreen())`) |
+| `pymobile_bridge` | the recording `StubBridge`: `calls_named(...)`, `notifications`, `last_tree` |
+| `pymobile_driver` | a `Driver`: `open`, `press`, `change`, `back`, `navigate`, `find` |
+| `pymobile_snapshot` | compares the current screen's text picture with a golden file |
+
+```python
+def test_the_quiz_flow(pymobile_session):
+    session = pymobile_session
+    session.start(Menu())
+    session.driver.navigate("Menu.start, Quiz.answer=42, Quiz.next")   # press, type, press
+    assert session.driver.find("score").text == "42/10"
+
+
+def test_the_menu_looks_right(pymobile_session, pymobile_snapshot):
+    pymobile_session.start(Menu())
+    pymobile_snapshot()            # snapshots/test_menu__test_the_menu_looks_right.txt
+
+
+def test_open_a_screen_directly(pymobile_session):
+    pymobile_session.start(Menu())
+    pymobile_session.driver.open("ResultScreen", score=7)     # by name, with arguments
+    assert pymobile_session.screen.score == 7
+```
+
+**Navigation in tests.** `driver.press(id)`, `driver.change(id, value)` (types
+into a `TextInput`, picks a `Dropdown` option, sets a `Slider`, flips a `Switch`
+with `True`/`False`), `driver.back()` and `driver.navigate("Menu.start, Quiz.next")`
+all go through the same path as a real tap, so callbacks, navigation and
+redraws run exactly as on the phone. A step is `[Screen.]widget[=value]`; the
+`Screen.` prefix asserts where the step is taken, so a route that drifted fails
+at the step that matters. A wrong widget id names the closest ones
+(`Did you mean 'start'?`), and pressing a disabled widget or a `Label` is an
+error, as it would be for a finger. If your code builds its own `App` (a
+`main()`), call it and then `Driver.attach()`.
+
+**Snapshots.** `pymobile_snapshot()` renders the screen with `render_ascii` and
+compares it with `snapshots/<test module>__<test name>.txt` next to the test
+(`pymobile_snapshot(widget, "name")` picks the file; a second unnamed check in
+one test gets `_2`). A missing file is written and the test passes with a
+warning — unless the `CI` environment variable is set, where a snapshot nobody
+committed is a failure. A changed screen fails with a diff; accept it with
+`pytest --pymobile-update-snapshots` (or `PYMOBILE_UPDATE_SNAPSHOTS=1`) and
+commit the file.
+
+**Isolation.** After every test the app is stopped, the process-wide bridge is
+reset and the language the test switched to is undone; the store lives in
+`tmp_path`. The plugin is active automatically; turn it off with
+`pytest -p no:pymobile.testing.plugin`. Everything behind the fixtures is
+importable without pytest (`from pymobile.testing import app_session, Driver`)
+for other runners.
+
+### Without the fixtures
 
 `StubBridge` records every platform call, so no emulator is needed and tests
 run in milliseconds.
@@ -2027,9 +2247,9 @@ The CLI prints only the message and hint. Add `-v` for a full traceback.
 
 ## Desktop preview
 
-`pymobile preview` renders the first screen into a picture right on your
-laptop — no emulator, no phone. It runs your entry point with the stub
-bridge and draws the resulting widget tree:
+`pymobile preview` renders a screen into a picture right on your laptop — no
+emulator, no phone. It runs your entry point with the stub bridge and draws the
+resulting widget tree:
 
 ```bash
 pymobile preview            # text picture in the terminal
@@ -2039,9 +2259,45 @@ pymobile preview --png ui.png --size 360x640 --theme dark
 pymobile preview --png ui.png --text    # the text picture as an image (the pre-0.8 output)
 ```
 
+### A screen other than the first
+
+By default the picture is the screen `App.run()` starts with. To see a screen
+deeper in the app without editing `main.py`:
+
+```bash
+pymobile preview --screen ResultScreen                          # a Screen subclass of the project
+pymobile preview --screen ResultScreen --set score=7 --set total=10   # constructor arguments
+pymobile preview --screen ResultScreen --args '{"score": 7}'    # the same, as JSON (bash, zsh)
+pymobile preview --navigate "Menu.start"                        # press the way there
+pymobile preview --navigate "Menu.start, Quiz.answer=42, Quiz.next" --png result.png
+```
+
+`--screen NAME` pushes that screen on top of the first one (the class name, or
+`module.Class` when two screens share a name). `--set NAME=VALUE`, repeatable,
+passes one constructor argument: the value is read as JSON when it parses (`7`,
+`true`, `[1, 2]`) and is plain text otherwise (`--set player=Anna`). It needs no
+quoting, so it works in every shell — unlike `--args`, whose JSON needs its
+double quotes to arrive intact: fine in bash and zsh, but `cmd.exe` and Windows
+PowerShell 5.1 strip them. `--args` takes a JSON object for keyword arguments or
+a list for positional ones, and a `--set` overrides the same name.
+
+`--navigate` walks a route like a user: each step is `[Screen.]widget` (press it),
+`[Screen.]widget=value` (type into a `TextInput`, pick a `Dropdown` option, set a
+`Slider`, flip a `Switch` with `true`/`false`) or `<back>`. The optional
+`Screen.` prefix asserts where the step is taken. The steps are echoed
+(`Menu.start → Quiz`), and a mistake names what is available —
+`no screen called 'Resulz'. Did you mean 'Result'?`,
+`no widget with id 'strt'. Did you mean 'start'?`. Both flags work with `--png`,
+`--ids`, `--text`, and on `pymobile run` (including `--gui` and `--web`, which
+then open on that screen) and `pymobile watch`, where every reload lands on the
+screen you are working on. The same engine backs the test fixtures — see
+[Testing your app](#testing-your-app).
+
 `--png` draws a **mockup**: the tree is laid out with the rules of the
 Android renderer (columns stretch their children, rows wrap them,
-`Expanded` shares the free space, `Stack` overlays, `Grid` has equal columns)
+`Expanded` shares the free space, `Stack` overlays, `Grid` has equal columns,
+`Wrap` starts a new line when the row is full, a `SegmentedButtons` bar that
+does not fit is cut at the edge because it scrolls)
 and painted with Material-style widgets in your theme's colours — raised grey
 buttons, underlined text fields, switches, list rows, dialogs over a dimmed
 screen and the snackbar — under a status bar and an action bar with the app
@@ -2160,10 +2416,16 @@ end the session.
 | `pymobile build --native` | build a signed, installable APK (`--minimal-stdlib`, `--no-ssl`, `--abi x86_64`) |
 | `pymobile run` | run the app on your machine (`--gui` window, `--web` browser) |
 | `pymobile watch` | re-render on every save (`--png`, `--text`, `--ids`, `--interval`) |
-| `pymobile preview` | draw the first screen as a picture (`--png`, `--size`, `--theme`, `--text`, `--ids`) |
+| `pymobile preview` | draw a screen as a picture (`--png`, `--size`, `--theme`, `--text`, `--ids`) |
+| `pymobile widget-java TYPE` | print the `ViewBuilder.java` branch and Python skeleton for a custom widget type (`-p title -p value:int`, `--out FILE`) |
 | `pymobile info` | show the resolved configuration (`--json`) |
 | `pymobile doctor` | check environment and project health |
 | `pymobile clean` | remove build artifacts |
+
+`run`, `watch` and `preview` also take `--screen NAME` (with `--set NAME=VALUE` or
+`--args JSON`) and `--navigate "Menu.start, Quiz.next"` to open on a screen other
+than the first —
+see [Desktop preview](#desktop-preview).
 
 Global flags `-v` (verbose) and `-c PATH` (project directory) work both before
 and after the sub-command.
@@ -2194,36 +2456,43 @@ class Slider(Widget):
                 "minimum": self.minimum, "maximum": self.maximum}
 ```
 
-> **The Java branch is not optional, and omitting it fails quietly.**
-> `ViewBuilder.java` has one `case` per built-in type; a `type_name` with no
-> branch there is drawn as an **empty view on the phone** — no exception, no
-> warning, nothing to grep for — while the desktop and browser previews print
-> `<BarChart>` and look perfectly fine. A widget that exists in the preview and
-> is missing on the device is almost always this. Four things make the gap
-> visible:
+> **The Java branch is not optional — and the build now checks that it exists.**
+> `ViewBuilder.java` has one `case` per built-in type, compiled into
+> `classes.dex`. A `type_name` with no branch there is drawn as a red
+> `[BarChart: no native renderer]` placeholder on the phone, while the desktop
+> and browser previews print `<BarChart>` and look perfectly fine. Because the
+> packaged `classes.dex` is prebuilt, a branch added to `ViewBuilder.java`
+> reaches a phone only through a rebuild of that dex
+> (`PYMOBILE_BUILD_JAVA=1 pymobile build --native`, which needs the Android
+> SDK's `d8`). What makes a gap impossible to miss:
 >
-> - the renderer logs `no native renderer for widget type "BarChart"` (`adb logcat
->   -s pymobile`) and draws a red `[BarChart: no native renderer]` placeholder
->   where the widget should be — so a missing branch is visible on the device too;
-> - `App` logs the same warning once per unknown type on the first frame sent to
->   a native bridge (desktop previews stay quiet);
-> - `pymobile build` warns before you install anything, scanning the project for
->   `type_name = "…"` values the framework has no declaration for (a
->   `register_widget_type("…")` call in the project counts as a declaration);
+> - **`pymobile build --native` stops** when the `classes.dex` it is about to
+>   package has no branch for a widget type your project defines (a class that
+>   derives from a framework widget and sets `type_name = "BarChart"`) or
+>   registers with `register_widget_type("BarChart")`. It asks the dex itself, so
+>   a stale prebuilt dex, a forgotten rebuild and a typo in the `case` label are
+>   all caught — before the APK is signed. The error names the three ways out;
+> - `pymobile build` (any build) warns about a defined type nothing has declared,
+>   and a native build warns about types declared preview-only;
+> - `pymobile widget-java BarChart -p title -p value:int` prints everything you
+>   need to write: the Python widget, the `case`, the `buildBarChart(...)` method
+>   (it reads your props and shows them, so the widget is visible at once), the
+>   `updateNode` branch, and the rebuild command;
+> - on the device the renderer logs `no native renderer for widget type "BarChart"`
+>   (`adb logcat -s pymobile`), and `App` logs the same once per unknown type on
+>   the first frame sent to a native bridge (desktop previews stay quiet);
 > - `unknown_types(screen.to_dict())` returns the offending names, so a test can
 >   assert the tree contains nothing the renderer would drop:
 >   `assert unknown_types(Shell().to_dict()) == frozenset()`.
 >
-> Declare the type once the Java branch exists —
-> `from pymobile import register_widget_type, unknown_types` then
-> `register_widget_type("BarChart")` (add `web=True`/`gui=True` for the
-> previews, or `android=False` for a preview-only widget) — and every warning
-> above stops. Note that the packaged `classes.dex` is prebuilt: a change to
-> `ViewBuilder.java` reaches a phone only through a rebuild of that dex
-> (`PYMOBILE_BUILD_JAVA=1 pymobile build --native`, which needs the Android
-> SDK's `d8`), not through the framework source alone. The safest route for an
-> app widget stays composition: a `BarChart` made of `Row`, `ProgressBar` and
-> `Expanded` needs no Java at all.
+> Three ways out of the build error. **Compose** the widget from existing ones —
+> a `BarChart` made of `Row`, `ProgressBar` and `Expanded` needs no Java at all,
+> and is the safest route. **Add the branch** with `widget-java` and rebuild the
+> dex. Or declare it **preview-only**:
+> `register_widget_type("BarChart", android=False, web=True)` — the previews draw
+> it, the phone does not, and the build only warns. Declaring a type without
+> `android=False` (`register_widget_type("BarChart")`) is a promise that the Java
+> branch exists, and the build holds you to it.
 
 ```python
 from pymobile import register_widget_type, unknown_types
@@ -2231,6 +2500,11 @@ from pymobile import register_widget_type, unknown_types
 register_widget_type("Slider")             # case "Slider" exists in ViewBuilder.java
 assert unknown_types(screen.to_dict()) == frozenset()   # nothing the renderer drops
 ```
+
+`Wrap` is an example of a widget added the full way: `class Wrap(Container)` in
+`layout.py`, a `WidgetCapability` row in `registry.py`, a branch in each of the
+four renderers (`ViewBuilder.java` + a rebuilt `classes.dex`, `web.py`, `gui.py`,
+`preview.py`/`mockup.py`) and tests for all of them.
 
 **A new Android API** — add a method to `Bridge`, implement it in
 `AndroidBridge` and `StubBridge`, wrap it in a small class under `core/api/`.
@@ -2255,9 +2529,10 @@ assert unknown_types(screen.to_dict()) == frozenset()   # nothing the renderer d
   builds: the APK declares 24 and the build prints a warning.
 - The renderer covers the components documented here; more are being added.
   A custom widget with a new `type_name` is not one of them until you add a
-  branch to `ViewBuilder.java` — without it the widget is simply absent on the
-  phone, so the framework warns about such types at build time, on the first
-  frame and in the device log (see [Extending the framework](#extending-the-framework)).
+  branch to `ViewBuilder.java` and rebuild the dex — without it the widget is a
+  placeholder on the phone, so `pymobile build --native` stops, and the
+  framework also warns on the first frame and in the device log (see
+  [Extending the framework](#extending-the-framework)).
 - Translation catalogues are flat: `"stats.balance"` is one key, and nested
   JSON sections need `flatten=True` (see [Languages](#languages)).
 
@@ -2272,14 +2547,107 @@ ones most likely to bite a new user.
 
 | Symptom | Workaround | Tracked under |
 | --- | --- | --- |
-| `Avatar("foo")` accepts a string with no path separators as initials and a string that looks like a path as an image source — there is no way to force a plain string with a forward slash to be initials | Pass `Avatar("name", image=path)` for an image, `Avatar("name")` for initials; avoid ambiguous inputs like `"foo/bar"` | [#AVT-04] |
-| `App.current()` is a process-global; accessing it from a worker thread can race with `app.stop()` | Read `app.current()` from the UI thread (any widget callback), not from a `run_job` callback | [#APP-09] |
-| `Container.add` raises `PyMobileError` (not `ValueError`) when a widget already has a parent | Catch `PyMobileError`; if you previously caught `ValueError`, add the new base class | [#CNT-02] |
 | `pymobile watch` ignores saves on some tmpfs and overlayfs mounts (coarse mtime granularity) | Use `pymobile watch --interval 0.1` to poll more aggressively, or run from a real filesystem | [#WAT-03] |
-| `Grid` exists but there is no `Wrap` (flow layout) | Lay out a `Row` or `Column` manually, or build a `Wrap` from `ScrollView` and `Row` | [#LAY-05] |
 
 Report a new issue with a reproducer (`main.py` + `pymobile.toml`) and the
 device or platform. Bug reports with a regression test land faster.
+
+---
+
+## Versioning and deprecation policy
+
+PyMobile follows [Semantic Versioning 2.0.0](https://semver.org/):
+`MAJOR.MINOR.PATCH`. This page is the promise; the
+[changelog](https://github.com/Maksum867/py-mobile/blob/main/CHANGELOG.md) is
+where each release keeps it.
+
+### What the public API is
+
+Everything this policy protects:
+
+- every name importable from `pymobile` (`pymobile.__all__`) and from `pymobile.testing`;
+- the modules and functions this README documents by path
+  (`pymobile.core.ui.preview.render_ascii`, `pymobile.core.bridge.StubBridge`,
+  `pymobile.core.validation` …);
+- the `pymobile` command — sub-commands, flags and exit codes;
+- the keys of `pymobile.toml`;
+- the serialised widget tree a renderer receives: `type`, `id`, `props`, `style`,
+  `children`, and the type names and props of the built-in widgets;
+- the Python versions in the package classifiers (dropping one is a minor-release
+  change, announced in the changelog).
+
+Not covered: names that start with an underscore; anything the README does not
+document; how a preview *looks* (pixels, fonts, the text picture's exact layout);
+log and warning wording; build timings; the internals of `classes.dex` and
+`libpymobile.so` (only their protocol with Python is API).
+
+### What each release may contain
+
+| Release | Contains |
+| --- | --- |
+| **PATCH** (`0.9.1`) | Bug fixes only. No API change, no new deprecation. |
+| **MINOR** (`0.10.0`) | New features that keep old code working, and **new deprecations**. Before 1.0 a minor release may also make a breaking change — it is listed under *Changed* or *Removed* in the changelog. |
+| **MAJOR** (`2.0.0`) | Removal of what was deprecated, and other incompatible changes. |
+
+Until **1.0**, PyMobile is alpha (see the note at the top): the API can change
+between minor releases. What does not change is *how* things go away — see the
+next section. From 1.0 on, an incompatible change to the public API happens only
+in a major release.
+
+### The deprecation cycle
+
+Nothing in the public API is removed without going through three steps:
+
+1. **Announce.** A minor release adds the replacement and marks the old spelling
+   deprecated. Using it emits a `PyMobileDeprecationWarning` that names the
+   replacement and the release that will remove it; the changelog lists it under
+   *Deprecated*; the documentation stops recommending it.
+2. **Keep.** The deprecated spelling keeps working, unchanged, for **at least one
+   full minor release after the one that announced it**: deprecated in `0.9`, it
+   still works — and warns — in `0.10`.
+3. **Remove.** Only after that, in the release the warning named. From 1.0 on,
+   removals happen only in a major release, so a deprecation announced in `1.3`
+   is removed in `2.0` at the earliest.
+
+The one exception is a security or data-loss bug, which may change behaviour at
+once; the changelog says so under *Security*.
+
+### Seeing the warnings
+
+`PyMobileDeprecationWarning` is a `DeprecationWarning`: Python shows it for code
+you run yourself (a `main.py` run as a script — the message carries the file and
+line of *your* call) and pytest lists it in its warnings summary. To find every
+use before an upgrade, or to keep them out for good, turn it into an error in CI:
+
+```bash
+pytest -W error::pymobile.deprecation.PyMobileDeprecationWarning
+```
+
+```toml
+# pyproject.toml
+[tool.pytest.ini_options]
+filterwarnings = ["error::pymobile.deprecation.PyMobileDeprecationWarning"]
+```
+
+### Deprecated now
+
+| Deprecated | Use instead | Since | Removed in |
+| --- | --- | --- | --- |
+| `max=` on `Slider`, `Stepper`, `ProgressBar`, `ProgressText`, `RatingBar`; `min=` on `Slider`, `Stepper` | `maximum=`, `minimum=` | 0.9.0 | 1.0.0 |
+| `maxlength=` on `TextInput` | `max_length=` | 0.9.0 | 1.0.0 |
+| `on_change=` on `Dropdown`, `SegmentedButtons`, `BottomNavigation` | `on_select=` | 0.9.0 | 1.0.0 |
+
+Two spellings of one argument are permanent the day the API is frozen, which is
+why these are retired *before* 1.0 and why new API gets one name only. The
+alternative spellings that remain — `Storage.exists()` next to `contains()`,
+`RatingBar(value=…)` next to `rating`, `then(on_success=…)` next to `on_done` —
+are documented and are **not** deprecated.
+
+### Pinning
+
+- Before 1.0: `pymobile-framework~=0.9.0` accepts patch releases only; move to
+  the next minor when you have read its changelog.
+- From 1.0: `pymobile-framework>=1,<2` is safe.
 
 ---
 
@@ -2365,6 +2733,13 @@ $env:PYMOBILE_BUILD_JNI = "1"
 pymobile build --native --clean
 ```
 
+A change that removes or renames public API goes through the
+[deprecation cycle](#the-deprecation-cycle): keep the old spelling, call
+`pymobile.deprecation.warn_deprecated(...)`, add a test with
+`pytest.warns(PyMobileDeprecationWarning)` and a *Deprecated* changelog entry
+(the suite treats every other `DeprecationWarning` as an error, so the framework
+itself cannot keep using an old spelling by accident).
+
 Issues and pull requests are welcome.
 
 ---
@@ -2372,6 +2747,7 @@ Issues and pull requests are welcome.
 ## Documentation
 
 - **[CHANGELOG.md](https://github.com/Maksum867/py-mobile/blob/main/CHANGELOG.md)** — release history
+- **[Versioning and deprecation policy](#versioning-and-deprecation-policy)** — what may change, and how much notice you get
 
 ## License
 

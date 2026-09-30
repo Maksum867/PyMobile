@@ -26,6 +26,7 @@ from pymobile import (
     Label,
     List,
     ListTile,
+    PyMobileDeprecationWarning,
     RadioButton,
     RadioGroup,
     Screen,
@@ -278,7 +279,10 @@ class TestWidgets:
     def test_conflicting_aliases_raise(self) -> None:
         with pytest.raises((TypeError, ValueError)):
             Slider(minimum=0, min=10)
-        assert Slider(min=10, max=20).props()["minimum"] == 10
+        # min=/max= still work, but are deprecated aliases of minimum=/maximum=.
+        with pytest.warns(PyMobileDeprecationWarning) as record:
+            assert Slider(min=10, max=20).props()["minimum"] == 10
+        assert [str(w.message).split()[0] for w in record] == ["min=", "max="]
 
     def test_text_input_truncates_the_initial_value(self) -> None:
         assert TextInput(value="abcdef", max_length=3).value == "abc"

@@ -21,6 +21,7 @@ from typing import Any
 
 from ...log import get_logger
 from .contract import text_value
+from .flow import flow_lines, line_offset
 
 __all__ = [
     "render_ascii",
@@ -304,6 +305,8 @@ def _node_lines(node: dict[str, Any], *, show_ids: bool = False) -> list[str]:
         rows = _join_horizontal([_node_lines(child, show_ids=show_ids) for child in children])
     elif node_type == "Grid":
         rows = _grid_lines(node, show_ids=show_ids)
+    elif node_type == "Wrap":
+        rows = _wrap_lines(node, show_ids=show_ids)
     elif node_type in ("Expanded", "Flexible"):
         # A flex wrapper draws exactly as its child; the space it claims is a
         # device-side concept with no meaning in a text picture.
@@ -371,7 +374,31 @@ def _grid_lines(node: dict[str, Any], *, show_ids: bool = False) -> list[str]:
     return out
 
 
-def _join_horizontal(blocks: list[list[str]]) -> list[str]:
+#: Width of the text picture a ``Wrap`` breaks lines at (a phone holds about this
+#: many characters of body text).
+_WRAP_COLUMNS = 40
+
+
+def _wrap_lines(node: dict[str, Any], *, show_ids: bool = False) -> list[str]:
+    """Draw a Wrap: children side by side, a new line when the row is full."""
+    blocks = [_node_lines(child, show_ids=show_ids) for child in node.get("children", ())]
+    align = text_value(node.get("props", {}).get("align") or "start")
+    return _flow_blocks(blocks, _WRAP_COLUMNS, align=align, gap=2)
+
+
+def _flow_blocks(blocks: list[list[str]], columns: int, *, align: str, gap: int) -> list[str]:
+    """Lay text blocks out in lines of at most ``columns`` characters."""
+    widths = [max((len(line) for line in block), default=0) if block else -1 for block in blocks]
+    out: list[str] = []
+    for line in flow_lines(widths, columns, gap):
+        cells = [blocks[index] for index in line]
+        used = sum(widths[index] for index in line) + gap * (len(line) - 1)
+        indent = " " * int(line_offset(align, columns, used))
+        out.extend(indent + text for text in _join_horizontal(cells, gap=gap))
+    return out
+
+
+def _join_horizontal(blocks: list[list[str]], *, gap: int = 2) -> list[str]:
     blocks = [block for block in blocks if block]
     if not blocks:
         return []
@@ -383,7 +410,7 @@ def _join_horizontal(blocks: list[list[str]]) -> list[str]:
         for block, width in zip(blocks, widths, strict=True):
             cell = block[row] if row < len(block) else ""
             parts.append(cell.ljust(width))
-        out.append((" " * 2).join(parts).rstrip())
+        out.append((" " * gap).join(parts).rstrip())
     return out
 
 
@@ -476,6 +503,8 @@ def _leaf_lines(node: dict[str, Any], show_ids: bool = False) -> list[str]:
         options = [str(o) for o in props.get("options", [])]
         value = props.get("value", "")
         parts = [f"|{o}|" if o == value else f" {o} " for o in options]
+        if props.get("wrap"):  # the options flow onto more lines
+            return _flow_blocks([[part] for part in parts], _WRAP_COLUMNS, align="start", gap=1)
         return [" ".join(parts)]
 
     if node_type == "ProgressText":
@@ -574,6 +603,7 @@ def assert_snapshot(
     show_ids: bool = False,
     title: str = "",
     update: bool = False,
+    hint: str = "Run with update=True to accept the new output.",
 ) -> str:
     """Compare an ASCII render of ``widget_or_tree`` against a golden snapshot.
 
@@ -581,6 +611,8 @@ def assert_snapshot(
     the test passes; on later runs the render must equal the stored golden text,
     otherwise an :class:`AssertionError` is raised with a diff. This makes it
     trivial to pin a screen's layout in tests and catch unintended changes.
+
+    ``hint`` closes the failure message: what to do to accept the change.
 
     Returns the rendered text so it can be reused.
     """
@@ -603,7 +635,5 @@ def assert_snapshot(
                 lineterm="",
             )
         )
-        raise AssertionError(
-            f"Snapshot {path.name} changed:\n{diff}\nRun with update=True to accept the new output."
-        )
+        raise AssertionError(f"Snapshot {path.name} changed:\n{diff}\n{hint}")
     return rendered

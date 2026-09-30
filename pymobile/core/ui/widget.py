@@ -22,7 +22,7 @@ from difflib import get_close_matches
 from itertools import count
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 
-from ...errors import PyMobileError, WidgetNotFoundError, WidgetTypeError
+from ...errors import WidgetNotFoundError, WidgetParentError, WidgetTypeError
 from ...log import get_logger
 from .contract import SerializedValue, WidgetNode, WidgetProps
 from .registry import widget_types
@@ -471,13 +471,14 @@ class Container(Widget):
                 raise ValueError("a container cannot contain one of its ancestors")
             ancestor = ancestor._parent
         if child._parent is not None:
-            # ``PyMobileError`` is the right type here: a widget arriving in
-            # the tree twice is almost always a side effect of how the
-            # framework owns the tree (Screen.build() / Screen.refresh()
-            # attaching widgets you also stashed on ``self``), so the hint
-            # reaches the user, which a plain ValueError would not.
-            raise PyMobileError(
-                f"widget {child.id!r} already has a parent",
+            # A widget arriving in the tree twice is almost always a side
+            # effect of how the framework owns the tree (Screen.build() /
+            # Screen.refresh() attaching widgets you also stashed on ``self``),
+            # so the error carries a hint. It is also a ValueError, like every
+            # other rejection in this method, so existing ``except ValueError``
+            # clauses keep working.
+            raise WidgetParentError(
+                child.id,
                 hint=(
                     "A widget can only live in one place. Build the tree from scratch in "
                     "Screen.build(); widgets stored on the screen are detached for you by "

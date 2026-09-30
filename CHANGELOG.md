@@ -3,6 +3,125 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.8.3] — 2026-09-30
+
+### Added
+
+- **`Wrap`** — a flow layout: children side by side at their natural size, a
+  new line when the row is full (`spacing`, `run_spacing`, `align`). It exists on
+  every renderer — `ViewBuilder.java` (a `FlowLayout` view group) and the
+  rebuilt `classes.dex`, the browser and Tk previews, the mockup and the text
+  picture — and all of them break lines by one rule
+  (`pymobile.core.ui.flow.flow_lines`, mirrored by `ViewBuilder.FlowMath`).
+  Closes **#LAY-05**.
+- **`SegmentedButtons(wrap=True)`** — flow the options onto several lines instead
+  of scrolling them (see *Changed* for the default).
+- **`pymobile.testing` and a pytest plugin** — registered by a `pytest11` entry
+  point, so the fixtures exist as soon as pymobile is installed:
+  `pymobile_session` (app + stub bridge + driver, torn down afterwards),
+  `pymobile_app`, `pymobile_bridge`, `pymobile_driver` and `pymobile_snapshot`
+  (golden-file checks of a screen's text picture; `--pymobile-update-snapshots`
+  or `PYMOBILE_UPDATE_SNAPSHOTS=1` to accept a change; a missing snapshot is a
+  failure when `CI` is set). The store lives in `tmp_path`; the bridge and the
+  language are restored after every test. `pymobile.testing` itself imports
+  without pytest (`app_session`, `Driver`, `SnapshotChecker`).
+- **`pymobile.core.driver.Driver`** — operates a running app like a user:
+  `open("ResultScreen", score=7)`, `press`, `long_press`, `change` (type, pick,
+  set, switch), `back`, `find`, `navigate("Menu.start, Quiz.answer=42,
+  Quiz.next")`, `Driver.attach()` for an app that `main()` created. Mistakes are
+  `PyMobileError`s with a hint (*Did you mean 'start'?*).
+- **`--screen NAME`, `--set NAME=VALUE` (or `--args JSON`) and
+  `--navigate "Menu.start, Quiz.next"`** on `pymobile preview`, `run` (text,
+  `--gui`, `--web`) and `watch`, so a screen deep in the app can be previewed,
+  screenshotted and hot-reloaded without editing `main.py`. `--set` needs no
+  quoting, which JSON does in `cmd.exe` and Windows PowerShell. Closes the
+  "preview renders only the first screen" gap.
+- **`Validator(rules, messages=…)`** and **`DEFAULT_MESSAGES`** — validator
+  messages are no longer hard-wired English. A message comes from `messages=`
+  (`"required"` or `"email.required"`; a template or a callable), else from the
+  translation catalogue under `validation.<rule id>`, else the English default,
+  which is unchanged byte for byte. An unknown rule id is an error at
+  construction. `RuleMessage` (a `str` that knows its rule) lets the bare rule
+  functions keep returning plain strings.
+- **`Screen.is_current`** — whether the screen is on display (`app.screen is
+  self`, without the private `_app` and without raising). Kept by the navigator,
+  so it is also safe to read from a worker thread.
+- **`Screen.title_key`** (and `Screen(title_key=…)`) — the title is translated
+  from the catalogue before every `build()`, so it follows a language switch.
+- **`pymobile widget-java TYPE [-p NAME[:TYPE]]…`** — prints the Python widget
+  skeleton, the `case` and `build<Type>()` method for `ViewBuilder.java`, the
+  `updateNode` branch and the rebuild command for a custom widget type.
+- **`PyMobileDeprecationWarning`**, `pymobile.deprecation.warn_deprecated()` — one
+  category and one helper for every deprecation (see *Deprecated*).
+- **`WidgetParentError`** — what `Container.add` raises for a widget that already
+  has a parent; it is a `PyMobileError` **and** a `ValueError`. Closes **#CNT-02**.
+- **`Avatar(..., is_image=False)`** — `is_image` is three-valued (`None` guesses,
+  `True`/`False` decide), so a path-shaped string can be initials. Closes
+  **#AVT-04**.
+- **Versioning and deprecation policy** in the README: what the public API is,
+  what each release may contain, the announce → keep (at least one minor
+  release) → remove cycle, the list of what is deprecated now.
+
+### Changed
+
+- **`pymobile build --native` stops** when the `classes.dex` it is about to
+  package has no branch for a custom widget type the project defines (a class
+  deriving from a framework widget with `type_name = "…"`) or registers with
+  `register_widget_type("…")`. It asks the dex's string table, so a stale
+  prebuilt dex, a forgotten `PYMOBILE_BUILD_JAVA=1` and a typo in the `case`
+  label are caught before the APK is signed. A structural `build` still warns;
+  a type declared `android=False` only warns. The scan now looks at classes
+  (AST) instead of any `type_name = "…"` line, so an unrelated class attribute
+  is no longer reported.
+- **`SegmentedButtons` scrolls instead of squeezing.** On the device the bar is a
+  `HorizontalScrollView` holding natural-width segments (and scrolls to the
+  selected one); a five-segment bar of long labels at 360 dp used to wrap
+  "Біологія" into a column of letters. Bars that fit look as before. The
+  in-place update now rebuilds the bar when the labels change (a language
+  switch used to leave the old labels on the phone). The mockup, browser and
+  text previews follow.
+- **`Screen.to_dict()` builds the tree before it reads the title**, so the frame
+  after a language switch carries the new title.
+- The README's *Testing*, *Desktop preview*, *CLI reference*, *Extending* and
+  *Input validation* sections describe the above; examples use the canonical
+  argument names.
+
+### Deprecated
+
+Removed in **1.0.0**; each warns with `PyMobileDeprecationWarning`, naming the
+replacement:
+
+- `max=` on `Slider`, `Stepper`, `ProgressBar`, `ProgressText`, `RatingBar` and
+  `min=` on `Slider`, `Stepper` — use `maximum=` / `minimum=`.
+- `maxlength=` on `TextInput` — use `max_length=`.
+- `on_change=` on `Dropdown`, `SegmentedButtons`, `BottomNavigation` — use
+  `on_select=`. (`on_change` stays the canonical name on `TextInput`, `Slider`,
+  `Stepper`, `RatingBar` and the pickers: they report a value, not a choice.)
+
+### Fixed
+
+- **The `targetSdk >= 33 without POST_NOTIFICATIONS` build warning no longer fires
+  for apps that never notify.** It now runs after the sources are collected and
+  only when they post a notification (`app.notify`, `app.notifications.notify`,
+  `Notifications(...)`, a syntactic scan that ignores comments, docstrings,
+  `tests/` and virtualenvs); the message names the file and line.
+- **`App.current()` no longer races.** Publishing the app in `run()`, withdrawing
+  it in `stop()` (a check *and* a write) and reading it are one lock, so a
+  `stop()` racing another app's `run()` cannot withdraw the newer app, and a
+  worker thread reads a consistent value. Closes **#APP-09**.
+- **The packaged `classes.dex` was stale.** It had been built before
+  `ViewBuilder.buildUnknown`, so the red "no native renderer" placeholder the
+  README promised was not on the device. It is rebuilt (JDK 17, build-tools
+  35.0.0, through `NativeBackend._compile_java_from_source`, `--min-api 24`).
+  It has not been run on a physical device: the Java is compiled against
+  `android.jar` 35, and the flow-layout arithmetic was checked on a JVM against
+  an independent model.
+
+### Removed
+
+- The Known-issues rows **#AVT-04**, **#APP-09**, **#CNT-02** and **#LAY-05**
+  (fixed above); **#WAT-03** stays open.
+
 ## [0.8.2] — 2026-09-28
 
 A full-project review found twelve defects; all twelve are fixed here on top of

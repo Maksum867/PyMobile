@@ -64,6 +64,7 @@ WIDGET_CAPABILITIES: tuple[WidgetCapability, ...] = (
     WidgetCapability("ScrollView", web=True, gui=True),
     WidgetCapability("Stack", web=True, gui=True),
     WidgetCapability("Grid", web=True, gui=True),
+    WidgetCapability("Wrap", web=True, gui=True),
     WidgetCapability("Expanded", web=True, gui=True),
     WidgetCapability("Flexible", web=True, gui=True),
     WidgetCapability("Divider", web=True, gui=True),

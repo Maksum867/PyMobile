@@ -18,7 +18,7 @@ Build it with ``pymobile build``.
 
 from __future__ import annotations
 
-__version__ = "0.8.2"
+__version__ = "0.8.3"
 __author__ = "MAKSYM KHLYSTUN"
 __license__ = "MIT"
 
@@ -102,6 +102,7 @@ from .core.ui import (
     Theme,
     TimePicker,
     Widget,
+    Wrap,
 )
 from .core.ui.registry import (
     register_widget_type,
@@ -109,6 +110,7 @@ from .core.ui.registry import (
     unregister_widget_type,
 )
 from .core.validation import ValidationError, Validator
+from .deprecation import PyMobileDeprecationWarning
 from .errors import (
     BridgeError,
     ConfigError,
@@ -118,6 +120,7 @@ from .errors import (
     PyMobileError,
     ResourceError,
     WidgetNotFoundError,
+    WidgetParentError,
     WidgetTypeError,
 )
 from .log import get_diagnostics
@@ -215,6 +218,7 @@ __all__ = [
     "Expanded",
     "Flexible",
     "Grid",
+    "Wrap",
     "SafeArea",
     "Theme",
     # validation
@@ -237,7 +241,9 @@ __all__ = [
     "NetworkError",
     "ResourceError",
     "WidgetNotFoundError",
+    "WidgetParentError",
     "WidgetTypeError",
+    "PyMobileDeprecationWarning",
 ]
 
 # The logging helpers used to live in ``pymobile/logging.py``. A module named

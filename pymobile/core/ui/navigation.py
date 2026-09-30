@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from .components import _deprecated_on_change
 from .widget import Widget, callback_name
 
 __all__ = ["BottomNavigation"]
@@ -21,8 +22,9 @@ class BottomNavigation(Widget):
     """A persistent bar of mutually exclusive tabs.
 
     ``options`` are the tab labels; ``value`` is the selected one.
-    ``on_select`` (alias ``on_change``) fires when the user picks another
-    tab, exactly like :class:`~pymobile.Dropdown`, so the usual pattern is::
+    ``on_select`` fires when the user picks another tab, exactly like
+    :class:`~pymobile.Dropdown` (``on_change`` is a deprecated alias), so the
+    usual pattern is::
 
         self.tabs = BottomNavigation(
             ["Home", "Stats", "Settings"],
@@ -43,6 +45,7 @@ class BottomNavigation(Widget):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
+        _deprecated_on_change(on_select, on_change, exclusive=False)
         values = list(options)
         if not values:
             raise ValueError("BottomNavigation needs at least one tab")

@@ -37,6 +37,7 @@ from .layout import (
     SafeArea,
     ScrollView,
     Stack,
+    Wrap,
 )
 from .list import List, ListTile
 from .navigation import BottomNavigation
@@ -86,6 +87,7 @@ __all__ = [
     "Column",
     "Row",
     "Grid",
+    "Wrap",
     "Expanded",
     "Flexible",
     "SafeArea",

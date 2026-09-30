@@ -28,6 +28,7 @@ from typing import Any
 
 from ...log import get_logger
 from .contract import text_value
+from .flow import flow_lines, line_offset
 from .preview import _SYMBOL_CANDIDATES, _as_node, _has_glyph
 
 __all__ = ["render_mockup"]
@@ -750,6 +751,8 @@ class _Layout:
             return self._hscroll(props, style, children, w, force_h)
         if kind == "Grid":
             return self._grid(props, style, children, w, force_h)
+        if kind == "Wrap":
+            return self._wrap(props, style, children, w, fill)
         if kind == "Stack":
             return self._stack(style, children, w, fill, force_h)
         if kind in ("Expanded", "Flexible"):
@@ -1044,6 +1047,52 @@ class _Layout:
                 box.kids.append((pad[0] + column * (cell_w + col_gap), y, cell))
             y += height
         box.h = y + pad[3]
+        return box
+
+    def _flow(
+        self, boxes: list[_Box], width: float, gap: float, run_gap: float, align: str
+    ) -> tuple[list[tuple[float, float, _Box]], float, float]:
+        """Place boxes in lines, as ``ViewBuilder.FlowLayout`` does.
+
+        Returns the positioned boxes, the height used and the widest line.
+        """
+        placed: list[tuple[float, float, _Box]] = []
+        y = 0.0
+        widest = 0.0
+        for line in flow_lines([b.outer_w for b in boxes], width, gap):
+            used = sum(boxes[i].outer_w for i in line) + gap * (len(line) - 1)
+            x = line_offset(align, width, used)
+            for index in line:
+                placed.append((x, y, boxes[index]))
+                x += boxes[index].outer_w + gap
+            y += max(boxes[i].outer_h for i in line) + run_gap
+            widest = max(widest, used)
+        return placed, max(0.0, y - run_gap) if placed else 0.0, widest
+
+    def _wrap(
+        self,
+        props: dict[str, Any],
+        style: dict[str, Any],
+        children: list[dict[str, Any]],
+        w: float,
+        fill: bool,
+    ) -> _Box:
+        """Wrap: children in natural size, a new line when the row is full."""
+        pad = self._padding(style, (0, 0, 0, 0))
+        cw = max(0.0, w - pad[0] - pad[2])
+        gap = float(props.get("spacing", 0) or 0)
+        run_value = props.get("run_spacing")
+        run_gap = gap if run_value is None else float(run_value or 0)
+        align = text_value(props.get("align") or "start")
+        visible = [c for c in children if c.get("visible", True)]
+        boxes = [self.layout(child, cw, fill=False, axis="h") or _Box(0, 0) for child in visible]
+        placed, height, widest = self._flow(boxes, cw, gap, run_gap, align)
+        if not fill:
+            # A wrap-content box is as wide as its longest line, and the shorter
+            # lines are aligned inside that width.
+            placed, height, widest = self._flow(boxes, widest, gap, run_gap, align)
+        box = _Box((cw if fill else widest) + pad[0] + pad[2], height + pad[1] + pad[3])
+        box.kids = [(pad[0] + x, pad[1] + y, child) for x, y, child in placed]
         return box
 
     def _stack(
@@ -1490,24 +1539,44 @@ class _Layout:
         return box
 
     def _segmented(self, props: dict[str, Any], w: float, fill: bool) -> _Box:
+        """A row of segments, each as wide as its text.
+
+        The row scrolls sideways on the phone when the segments do not fit, so the
+        picture shows what the screen shows — the segments that fit, the next one
+        cut at the edge — rather than squeezed words. ``wrap`` flows them onto
+        more lines instead.
+        """
         p = self.p
         options = [str(o) for o in props.get("options", ()) or ()]
         selected = text_value(props.get("value", ""))
-        box = _Box(0, 48)
-        x = 0.0
+        wrap = bool(props.get("wrap"))
+        # A scrolling row measures its segments without a limit; a wrapping one
+        # never offers a segment more than the width of a line.
+        offer = w if wrap else 100000.0
+        segments: list[_Box] = []
         for option in options:
             if option == selected:
-                seg = self._button(
-                    option,
-                    {},
-                    max(0.0, w - x),
-                    False,
-                    flat=True,
-                    fill_colour=p["PRIMARY"],
-                    text_colour=p["ON_PRIMARY"],
+                segments.append(
+                    self._button(
+                        option,
+                        {},
+                        offer,
+                        False,
+                        flat=True,
+                        fill_colour=p["PRIMARY"],
+                        text_colour=p["ON_PRIMARY"],
+                    )
                 )
             else:
-                seg = self._button(option, {}, max(0.0, w - x), False, text_colour=p["TEXT"])
+                segments.append(self._button(option, {}, offer, False, text_colour=p["TEXT"]))
+        if wrap:
+            placed, height, widest = self._flow(segments, w, 0.0, 0.0, "start")
+            box = _Box(w if fill else min(w, widest), height)
+            box.kids = placed
+            return box
+        box = _Box(0, 48)
+        x = 0.0
+        for seg in segments:
             box.kids.append((x, 0.0, seg))
             x += seg.w
         box.w = w if fill else min(w, x)

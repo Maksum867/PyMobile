@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from ...deprecation import ALIASES_DEPRECATED_IN, ALIASES_REMOVED_IN, warn_deprecated
 from ...log import get_logger
 from .style import Color
 from .widget import Container, Widget, callback_name, in_build_scope
@@ -51,17 +52,51 @@ _WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 
 
 def _alias(kwargs: dict[str, Any], alias: str, name: str, value: Any, default: Any) -> Any:
-    """Resolve a shorthand keyword (``max=`` for ``maximum=``).
+    """Resolve a deprecated shorthand keyword (``max=`` for ``maximum=``).
 
     ``value`` is ``None`` when the full name was not passed. Comparing with the
     default instead (``if maximum != 100``) let ``Slider(minimum=0, min=10)``
     through silently, because the explicit ``0`` looked like "not passed".
+
+    The shorthand still works but warns: two spellings of one argument become
+    permanent the day the API is frozen, so ``name`` is the canonical one.
     """
     if alias in kwargs:
         if value is not None:
             raise ValueError(f"pass either {name} or {alias}, not both")
+        # Blame the application: _alias <- the widget's __init__ <- the caller.
+        warn_deprecated(
+            f"{alias}=",
+            f"{name}=",
+            since=ALIASES_DEPRECATED_IN,
+            removal=ALIASES_REMOVED_IN,
+            stacklevel=3,
+        )
         return kwargs.pop(alias)
     return default if value is None else value
+
+
+def _deprecated_on_change(
+    on_select: object, on_change: object, *, exclusive: bool = True
+) -> None:
+    """``on_change=`` of a selection widget: an alias of ``on_select=``, deprecated.
+
+    Widgets that pick one option of several (``Dropdown``, ``SegmentedButtons``,
+    ``BottomNavigation``) say ``on_select``; ``on_change`` stays the canonical
+    name for widgets that report a *value* (``TextInput``, ``Slider`` …).
+    """
+    if on_change is None:
+        return
+    if exclusive and on_select is not None:
+        raise ValueError("pass either on_select or on_change, not both")
+    # Blame the application: this <- the widget's __init__ <- the caller.
+    warn_deprecated(
+        "on_change=",
+        "on_select=",
+        since=ALIASES_DEPRECATED_IN,
+        removal=ALIASES_REMOVED_IN,
+        stacklevel=3,
+    )
 
 def _as_checked(value: object) -> bool:
     """Coerce a stored/JSON value into a toggle state.
@@ -186,10 +221,17 @@ class TextInput(Widget):
         on_change: Callable[[str], None] | None = None,
         **kwargs: Any,
     ) -> None:
-        # Alias: maxlength (HTML style) -> max_length
+        # Deprecated alias: maxlength (HTML style) -> max_length
         if "maxlength" in kwargs:
             if max_length is not None:
                 raise ValueError("pass either max_length or maxlength, not both")
+            warn_deprecated(
+                "maxlength=",
+                "max_length=",
+                since=ALIASES_DEPRECATED_IN,
+                removal=ALIASES_REMOVED_IN,
+                stacklevel=2,
+            )
             max_length = kwargs.pop("maxlength")
         super().__init__(**kwargs)
         if max_length is not None and max_length <= 0:
@@ -721,8 +763,7 @@ class Dropdown(Widget):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        if on_select is not None and on_change is not None:
-            raise ValueError("pass either on_select or on_change, not both")
+        _deprecated_on_change(on_select, on_change)
         if not options:
             raise ValueError(
                 "options must not be empty; "
@@ -1190,12 +1231,18 @@ class SegmentedButtons(Widget):
     """A horizontal bar of mutually exclusive options (like a tab bar / filter).
 
     ``options`` is the ordered list of choices; ``value`` is the selected one.
-    ``on_select`` fires when the selection changes. ``on_change`` is a
-    documented compatibility alias.
+    ``on_select`` fires when the selection changes (``on_change`` is a
+    deprecated alias of it).
+
+    **Long labels.** The options share one line, each as wide as its text. When
+    they do not fit — five translated labels on a 360 dp phone — the bar scrolls
+    sideways instead of squeezing the words into letter-by-letter columns. Pass
+    ``wrap=True`` to let the options flow onto more lines instead, when every
+    option should be visible at once.
     """
 
     type_name = "SegmentedButtons"
-    __slots__ = ("options", "_value", "on_select")
+    __slots__ = ("options", "_value", "on_select", "wrap")
 
     def __init__(
         self,
@@ -1204,11 +1251,11 @@ class SegmentedButtons(Widget):
         value: str | None = None,
         on_select: Callable[[str], None] | None = None,
         on_change: Callable[[str], None] | None = None,
+        wrap: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        if on_select is not None and on_change is not None:
-            raise ValueError("pass either on_select or on_change, not both")
+        _deprecated_on_change(on_select, on_change)
         if not options:
             raise ValueError(
                 "options must not be empty; "
@@ -1216,6 +1263,7 @@ class SegmentedButtons(Widget):
             )
         self.options = list(options)
         self.on_select = on_select or on_change
+        self.wrap = bool(wrap)
         # Fail fast, the way Style() does for a bad colour: silently swapping an
         # unknown value for the first option hides a typo until someone notices
         # the wrong row is selected on a phone.
@@ -1256,6 +1304,7 @@ class SegmentedButtons(Widget):
             "options": list(self.options),
             "value": self._value,
             "on_select": callback_name(self.on_select),
+            "wrap": self.wrap,
         }
 
 
@@ -1474,10 +1523,24 @@ def _looks_like_image_source(value: str) -> bool:
 class Avatar(Widget):
     """A round image or initial-avatar (e.g. a user's picture or initials).
 
-    ``Avatar("MK")`` is initials (as documented). Pass ``image=`` or a
-    path-like positional for a photo. Pass ``is_image=True`` to force a
-    string that the heuristic would treat as initials (e.g. ``"photo"``
-    without an extension) to be interpreted as a source path.
+    The positional argument is *either* initials *or* an image source, and
+    ``Avatar`` guesses: a URL, anything with a path separator or an image
+    extension is an image, everything else (``"MK"``) is initials. The guess is
+    only a convenience — every reading can be stated outright:
+
+    ==============================  ====================================
+    ``Avatar("MK")``                initials (guessed)
+    ``Avatar("assets/me.png")``     image (guessed)
+    ``Avatar(text="A/B")``          initials, whatever the text looks like
+    ``Avatar(image="photo")``       image, whatever the path looks like
+    ``Avatar("A/B", is_image=False)``  the positional is initials
+    ``Avatar("photo", is_image=True)`` the positional is an image source
+    ==============================  ====================================
+
+    ``is_image`` is three-valued: ``None`` (the default) guesses, ``True`` and
+    ``False`` decide. ``Avatar("MK", image="me.png")`` is a photo that shows
+    ``MK`` until it loads; when the positional there looks like a path, pass
+    ``is_image=False`` so it is read as those initials.
     """
 
     type_name = "Avatar"
@@ -1489,7 +1552,7 @@ class Avatar(Widget):
         *,
         text: str = "",
         image: str | None = None,
-        is_image: bool = False,
+        is_image: bool | None = None,
         size: int = 48,
         color: str = Color.BACKGROUND,
         background: str = Color.PRIMARY,
@@ -1498,18 +1561,25 @@ class Avatar(Widget):
         super().__init__(**kwargs)
         if size <= 0:
             raise ValueError("size must be positive")
+        if is_image is not None and not isinstance(is_image, bool):
+            raise TypeError(f"is_image must be True, False or None, got {is_image!r}")
         # Docs: Avatar("MK") is initials. Avatar("MK", image=...) is a photo
-        # with a fallback glyph. A path-like positional is a source.
-        # ``is_image=True`` is the explicit override when a string would
-        # otherwise be treated as initials but is in fact a path without a
-        # recognised extension.
+        # with a fallback glyph. ``is_image`` settles what the positional is:
+        # None guesses from its shape, True/False decide (so "photo" can be a
+        # path and "foo/bar" can be initials).
+        positional_is_image = _looks_like_image_source(source) if is_image is None else is_image
+        if is_image is False and source and text:
+            raise ValueError(
+                "the positional argument is initials (is_image=False), so text= "
+                "cannot be given as well; pass one of them"
+            )
         if image is not None:
-            if source and (_looks_like_image_source(source) or is_image):
+            if source and positional_is_image:
                 raise ValueError("pass either source or image, not both")
             if source and not text:
                 text = source
             source = image
-        elif source and not text and not (_looks_like_image_source(source) or is_image):
+        elif source and not text and not positional_is_image:
             text = source
             source = ""
         if not source and not text:

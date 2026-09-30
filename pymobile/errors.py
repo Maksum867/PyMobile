@@ -18,6 +18,7 @@ __all__ = [
     "ResourceError",
     "WidgetNotFoundError",
     "WidgetTypeError",
+    "WidgetParentError",
 ]
 
 
@@ -89,3 +90,17 @@ class WidgetTypeError(PyMobileError, TypeError):
         self.widget_id = widget_id
         self.expected = expected
         self.actual = actual
+
+
+class WidgetParentError(PyMobileError, ValueError):
+    """``Container.add()`` was given a widget that already has a parent.
+
+    Also a :class:`ValueError`, so ``except ValueError`` catches it — like the
+    other misuse errors of ``add()`` (a container inside itself, a cycle) that
+    have always been ``ValueError`` — while ``except PyMobileError`` still gets
+    the ``hint`` that explains how a widget usually ends up in two places.
+    """
+
+    def __init__(self, widget_id: str, *, hint: str | None = None) -> None:
+        super().__init__(f"widget {widget_id!r} already has a parent", hint=hint)
+        self.widget_id = widget_id

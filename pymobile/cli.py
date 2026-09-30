@@ -1,6 +1,7 @@
 """Command line interface.
 
-Sub-commands: ``init``, ``build``, ``run``, ``info``, ``clean``, ``doctor``.
+Sub-commands: ``init``, ``build``, ``run``, ``watch``, ``preview``, ``info``,
+``clean``, ``widget-java``, ``setup-sdk``, ``doctor``.
 Every command returns an exit code; :func:`main` is the console-script entry
 point declared in ``pyproject.toml``.
 
@@ -157,6 +158,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         result = pipeline.run()
     except Exception as exc:
         from .compiler.toolchain import ToolchainError
+        from .compiler.widgets import MissingRendererError
 
         if isinstance(exc, ToolchainError):
             hint = getattr(exc, "hint", None) or ""
@@ -165,7 +167,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                     f"Run `{_invocation()} setup-sdk` to install it automatically."
                 )
             raise type(exc)(str(exc), hint=hint.strip()) from exc
-        if native:
+        if native and not isinstance(exc, MissingRendererError):
             from .errors import PyMobileError as _PyErr
 
             if isinstance(exc, _PyErr) and exc.hint and "setup-sdk" not in exc.hint:
@@ -210,10 +212,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     if getattr(args, "web", False):
         return _run_web(config, entry, args)
     if getattr(args, "gui", False):
-        return _run_gui(config, entry)
+        return _run_gui(config, entry, args)
 
     _out.info(f"running {entry.name} in desktop preview mode")
     _execute(config, entry)
+    _navigate(args)
 
     from .core.bridge import get_bridge
     from .core.ui.preview import render_ascii
@@ -231,7 +234,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_gui(config: ProjectConfig, entry: Path) -> int:
+def _run_gui(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> int:
     """Run the app in an interactive Tkinter window."""
     from .core.bridge import GuiBridge, set_bridge
     from .core.ui.gui import GuiPreview, tkinter_available
@@ -248,6 +251,7 @@ def _run_gui(config: ProjectConfig, entry: Path) -> int:
     bridge = GuiBridge(verbose=False)
     set_bridge(bridge)
     _execute(config, entry)
+    _navigate(args)
     app = App.current()
     if app is None:
         raise PyMobileError(
@@ -277,6 +281,7 @@ def _run_web(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> in
     bridge = WebBridge(verbose=False)
     set_bridge(bridge)
     _execute(config, entry)
+    _navigate(args)
     app = App.current()
     if app is None:
         raise PyMobileError(
@@ -343,8 +348,11 @@ def _reload(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> Non
 
     try:
         _execute(config, entry)
+        _navigate(args)
     except Exception as error:
         _out.error(f"{type(error).__name__}: {error}")
+        if isinstance(error, PyMobileError) and error.hint:
+            _out.hint(error.hint)
         if args.verbose:
             import traceback
 
@@ -408,6 +416,112 @@ def _purge_project_modules(source: Path) -> None:
     importlib.invalidate_caches()
 
 
+def _not_a_constant(name: str) -> object:
+    raise ValueError(name)  # NaN and Infinity are words on a command line, not numbers
+
+
+def _set_value(text: str) -> object:
+    """The value of ``--set name=VALUE``: JSON when it parses (``7``, ``true``), else the text."""
+    try:
+        return json.loads(text, parse_constant=_not_a_constant)
+    except ValueError:
+        return text
+
+
+def _screen_arguments(
+    text: str | None, pairs: Sequence[str] | None = None
+) -> tuple[list[object], dict[str, object]]:
+    """``--args`` and ``--set``: the constructor arguments of the ``--screen`` to open.
+
+    ``--args`` is JSON — an object is keywords, a list positional, a scalar one value.
+    ``--set NAME=VALUE`` adds one keyword and needs no quoting, which is why it is the
+    form for ``cmd.exe`` and Windows PowerShell, where the shell eats the quotes inside
+    the JSON. A ``--set`` overrides the same name coming from ``--args``.
+    """
+    positional: list[object] = []
+    keywords: dict[str, object] = {}
+    if text is not None:
+        try:
+            value = json.loads(text)
+        except ValueError as error:
+            raise PyMobileError(
+                f"--args is not valid JSON: {error}",
+                hint=(
+                    "A shell may have eaten the quotes (cmd.exe and Windows PowerShell do). "
+                    "Pass the values one by one instead — --set score=7 --set player=Anna — "
+                    "which needs no quoting; or escape the JSON for your shell."
+                ),
+            ) from error
+        if isinstance(value, dict):
+            keywords.update({str(key): item for key, item in value.items()})
+        elif isinstance(value, list):
+            positional.extend(value)
+        else:
+            positional.append(value)
+    for pair in pairs or ():
+        name, separator, raw = pair.partition("=")
+        name = name.strip()
+        if not separator or not name.isidentifier():
+            raise PyMobileError(
+                f"--set expects NAME=VALUE, got {pair!r}",
+                hint="For example: --set score=7 --set player=Anna.",
+            )
+        keywords[name] = _set_value(raw)
+    return positional, keywords
+
+
+def _navigate(args: argparse.Namespace) -> None:
+    """Take the running app to the screen ``--screen`` / ``--navigate`` ask for.
+
+    The first screen is what ``App.run()`` shows; ``--screen ResultScreen`` pushes
+    another one on top of it and ``--navigate "Menu.start, Quiz.next"`` presses its
+    way there like a user, so a screen deep in the app can be previewed without
+    editing ``main.py``. Both may be combined (the screen first, then the route).
+    """
+    screen = getattr(args, "screen", None)
+    route = getattr(args, "navigate", None)
+    given = [
+        flag
+        for flag, present in (
+            ("--args", getattr(args, "screen_args", None) is not None),
+            ("--set", bool(getattr(args, "screen_set", None))),
+        )
+        if present
+    ]
+    if given and not screen:
+        verb = "makes" if len(given) == 1 else "make"
+        raise PyMobileError(
+            f"{' and '.join(given)} only {verb} sense with --screen", hint="Add --screen NAME."
+        )
+    if not screen and not route:
+        return
+
+    from .core.app import App
+    from .core.driver import Driver
+
+    app = App.current()
+    if app is None:
+        raise PyMobileError(
+            "No running application was found in the entry point.",
+            hint="Make sure it calls App(...).run(SomeScreen()) before returning.",
+        )
+    driver = Driver(app)
+    if screen:
+        positional, keywords = _screen_arguments(
+            getattr(args, "screen_args", None), getattr(args, "screen_set", None)
+        )
+        opened = driver.open(screen, *positional, **keywords)
+        _out.info(f"opened {type(opened).__name__}")
+    if route:
+        for step, landed in zip(route_steps(route), driver.navigate(route), strict=True):
+            _out.info(f"{step} → {type(landed).__name__}")
+
+
+def route_steps(route: str) -> list[str]:
+    """The steps of a ``--navigate`` route, for progress lines."""
+    return [part.strip() for part in route.replace(">", ",").split(",") if part.strip()]
+
+
 def _entrypoint(config: ProjectConfig) -> Path:
     """Resolve and validate the configured entry point."""
     entry = config.entrypoint_path
@@ -456,7 +570,7 @@ def _parse_size(value: str | None) -> tuple[int, int | None]:
 
 
 def cmd_preview(args: argparse.Namespace) -> int:
-    """Render the app's first screen as a picture on this machine."""
+    """Render a screen of the app — the first, or the one --screen/--navigate reach."""
     from .core.bridge import StubBridge, set_bridge
     from .core.ui.preview import render_ascii, render_mockup, render_png
 
@@ -466,6 +580,7 @@ def cmd_preview(args: argparse.Namespace) -> int:
     bridge = StubBridge(verbose=False)
     set_bridge(bridge)
     _execute(config, entry)
+    _navigate(args)
 
     tree = bridge.last_tree
     if tree is None:
@@ -534,6 +649,27 @@ def cmd_clean(args: argparse.Namespace) -> int:
     # The debug key lives outside build/, so cleaning never changes the
     # signature (a different key makes the next APK un-installable over this one).
     _out.info(f"debug signing key kept at {debug_keystore_path(config.package)}")
+    return 0
+
+
+def cmd_widget_java(args: argparse.Namespace) -> int:
+    """Print (or save) the Android renderer branch for a custom widget type."""
+    from .compiler.widgets import java_branch, parse_props
+    from .errors import ResourceError
+    from .resources import resource_path
+
+    branch = java_branch(args.type_name, parse_props(args.prop))
+    try:
+        viewbuilder: Path | None = resource_path("android", "java", "ViewBuilder.java")
+    except ResourceError:  # pragma: no cover - broken installation
+        viewbuilder = None
+    guide = branch.render(viewbuilder)
+    if args.out:
+        target = Path(args.out)
+        target.write_text(guide, encoding="utf-8")
+        _out.ok(f"wrote the {args.type_name} guide to {target}")
+    else:
+        print(guide)
     return 0
 
 
@@ -679,6 +815,43 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"path to {CONFIG_FILENAME} or a project directory",
     )
 
+    # Which screen to show: shared by run, watch and preview.
+    where = argparse.ArgumentParser(add_help=False)
+    where.add_argument(
+        "--screen",
+        metavar="NAME",
+        help="show this screen (a Screen subclass of the project) instead of the first one",
+    )
+    where.add_argument(
+        "--args",
+        dest="screen_args",
+        metavar="JSON",
+        help=(
+            "with --screen: constructor arguments as JSON — an object is keywords "
+            '(\'{"score": 7}\'), a list is positional (\'[7, 10]\'). cmd.exe and Windows '
+            "PowerShell eat the quotes inside JSON: use --set there"
+        ),
+    )
+    where.add_argument(
+        "--set",
+        dest="screen_set",
+        metavar="NAME=VALUE",
+        action="append",
+        help=(
+            "with --screen: one constructor argument, e.g. --set score=7 --set player=Anna "
+            "(repeatable; the value is JSON if it parses — 7, true, [1, 2] — else plain text; "
+            "needs no quoting in any shell)"
+        ),
+    )
+    where.add_argument(
+        "--navigate",
+        metavar="STEPS",
+        help=(
+            'press your way to a screen: "Menu.start, Quiz.next" takes the step '
+            "[Screen.]widget in order; widget=value types a value, <back> goes back"
+        ),
+    )
+
     parser = argparse.ArgumentParser(
         prog="pymobile",
         description="Build Android applications with Python.",
@@ -747,7 +920,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build.set_defaults(func=cmd_build)
 
-    run = sub.add_parser("run", help="preview the app on this machine", parents=[common])
+    run = sub.add_parser(
+        "run", help="preview the app on this machine", parents=[common, where]
+    )
     run.add_argument(
         "--gui",
         action="store_true",
@@ -767,7 +942,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.set_defaults(func=cmd_run)
 
     watch = sub.add_parser(
-        "watch", help="re-render automatically when a source file changes", parents=[common]
+        "watch",
+        help="re-render automatically when a source file changes",
+        parents=[common, where],
     )
     watch.add_argument(
         "--png", metavar="PATH", help="write a mockup of the screen as a PNG on every reload"
@@ -786,7 +963,9 @@ def build_parser() -> argparse.ArgumentParser:
     watch.set_defaults(func=cmd_watch)
 
     preview = sub.add_parser(
-        "preview", help="draw the first screen as a desktop picture", parents=[common]
+        "preview",
+        help="draw a screen (the first, or --screen / --navigate) as a desktop picture",
+        parents=[common, where],
     )
     preview.add_argument(
         "--png",
@@ -820,6 +999,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     clean = sub.add_parser("clean", help="remove build artifacts", parents=[common])
     clean.set_defaults(func=cmd_clean)
+
+    widget = sub.add_parser(
+        "widget-java",
+        help="print the ViewBuilder.java branch for a custom widget type",
+        parents=[common],
+    )
+    widget.add_argument("type_name", metavar="TYPE", help="the widget's type_name, e.g. BarChart")
+    widget.add_argument(
+        "-p",
+        "--prop",
+        action="append",
+        default=[],
+        metavar="NAME[:TYPE]",
+        help=(
+            "a prop the Python widget sends; TYPE is str (default), int, float, bool or "
+            "list. Repeat for several: -p title -p value:int"
+        ),
+    )
+    widget.add_argument("-o", "--out", metavar="FILE", help="write the guide to FILE, not stdout")
+    widget.set_defaults(func=cmd_widget_java)
 
     setup = sub.add_parser(
         "setup-sdk", help="download the Android SDK/NDK for native builds", parents=[common]

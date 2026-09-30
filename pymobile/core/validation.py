@@ -14,6 +14,20 @@ Example::
     )
     errors = v.validate({"email": "x@y.com", "age": 30})
     assert errors == {}
+
+**Localizing the messages.** Every rule has a stable id (``"required"``,
+``"min_length"``, ``"between"`` …) and an English default in
+:data:`DEFAULT_MESSAGES`. A message is looked up, most specific first, in:
+
+1. the ``messages=`` mapping of the :class:`Validator` (``"email.required"`` for
+   one field, ``"required"`` for every field);
+2. the application's translation catalogue under ``validation.<id>``
+   (``validation.required``), so ``translations.use("uk")`` translates the
+   messages of every validator at once, at the moment they are produced;
+3. :data:`DEFAULT_MESSAGES`.
+
+Templates use ``str.format`` placeholders named after the rule's parameters —
+``"must be at least {minimum} characters"``.
 """
 
 from __future__ import annotations
@@ -24,8 +38,12 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from ..errors import PyMobileError
+from ..log import get_logger
+from .i18n import translations
 
 __all__ = [
+    "DEFAULT_MESSAGES",
+    "RuleMessage",
     "Validator",
     "ValidationError",
     "required",
@@ -45,8 +63,110 @@ __all__ = [
     "boolean",
 ]
 
+_log = get_logger("validation")
+
 #: A validator: takes a value and returns None (ok) or an error message.
 ValidatorFn = Callable[[Any], str | None]
+
+#: The English text of every built-in rule, by rule id. ``{name}`` marks a
+#: parameter of the rule. Translate them with ``validation.<id>`` entries in a
+#: catalogue, or replace them for one validator with ``Validator(messages=…)``.
+DEFAULT_MESSAGES: Mapping[str, str] = {
+    "required": "is required",
+    "email": "must be a valid email address",
+    "min_length": "must be at least {minimum} characters",
+    "max_length": "must be at most {maximum} characters",
+    "integer": "must be an integer",
+    "number": "must be a number",
+    "between": "must be between {low} and {high}",
+    "min": "must be between {low} and {high}",
+    "max": "must be between {low} and {high}",
+    "matches": "does not match",
+    "matches_field": "does not match {field!r}",
+    "one_of": "must be one of: {choices}",
+    "regex": "must match {pattern!r}",
+    "boolean": "must be a boolean",
+}
+
+#: Ids that only exist to override several rules at once (``"length"`` covers
+#: ``min_length`` and ``max_length``); they have no text of their own.
+_GROUP_IDS = frozenset({"length"})
+
+#: A ``messages=`` value: a ``str.format`` template, or a callable that takes the
+#: rule's parameters as keyword arguments and returns the message.
+MessageOverride = str | Callable[..., str]
+
+
+def _lookup_override(
+    overrides: Mapping[str, MessageOverride], ids: Sequence[str], field: str | None
+) -> MessageOverride | None:
+    """The override for the first of ``ids``: ``field.id`` beats ``id``."""
+    for rule_id in ids:
+        if field is not None and f"{field}.{rule_id}" in overrides:
+            return overrides[f"{field}.{rule_id}"]
+    for rule_id in ids:
+        if rule_id in overrides:
+            return overrides[rule_id]
+    return None
+
+
+def _fill(template: str, params: Mapping[str, Any], rule_id: str) -> str:
+    """``template.format(**params)`` that never takes a form down."""
+    try:
+        return template.format(**params)
+    except (KeyError, IndexError, ValueError, AttributeError):
+        _log.warning("could not format the %r validation message %r", rule_id, template)
+        return template
+
+
+def render_message(
+    key: str,
+    params: Mapping[str, Any],
+    *,
+    fallback: str | None = None,
+    overrides: Mapping[str, MessageOverride] | None = None,
+    field: str | None = None,
+) -> str:
+    """Produce the text of rule ``key``: overrides, then the catalogue, then English.
+
+    ``fallback`` is the more general id (``matches`` for ``matches_field``):
+    it is consulted after the specific id at each step, so overriding
+    ``"matches"`` covers both spellings of the rule.
+    """
+    ids = (key, fallback) if fallback else (key,)
+    if overrides:
+        override = _lookup_override(overrides, ids, field)
+        if override is not None:
+            if callable(override):
+                return str(override(**params))
+            return _fill(override, params, key)
+    for rule_id in ids:
+        # ``has`` first: ``get`` logs a "missing translation" warning, and an
+        # application that does not translate validation is not making a mistake.
+        if translations.has(f"validation.{rule_id}"):
+            return translations.get(f"validation.{rule_id}", **params)
+    return _fill(DEFAULT_MESSAGES[key], params, key)
+
+
+class RuleMessage(str):
+    """The error text of a built-in rule, which remembers which rule it came from.
+
+    It *is* the message — ``required("") == "is required"`` — so callers of the
+    bare rule functions see an ordinary string. :class:`Validator` reads
+    :attr:`key` and :attr:`params` to apply its ``messages=`` overrides before
+    it reports the error as a plain ``str``.
+    """
+
+    key: str
+    fallback: str | None
+    params: dict[str, Any]
+
+    def __new__(cls, key: str, /, *, fallback: str | None = None, **params: Any) -> RuleMessage:
+        self = super().__new__(cls, render_message(key, params, fallback=fallback))
+        self.key = key
+        self.fallback = fallback
+        self.params = params
+        return self
 
 #: Well-known regex for email addresses (pragmatic, not RFC-perfect).
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -87,7 +207,7 @@ class ValidationError(PyMobileError):
 # --------------------------------------------------------------------------
 def required(value: Any) -> str | None:
     """A value must be present: not None, not empty, not only whitespace."""
-    return "is required" if _is_empty(value) else None
+    return RuleMessage("required") if _is_empty(value) else None
 
 
 def optional(value: Any) -> str | None:
@@ -102,7 +222,7 @@ def optional(value: Any) -> str | None:
 def email(value: Any) -> str | None:
     """A value must look like an email address."""
     if not isinstance(value, str) or not _EMAIL_RE.match(value.strip()):
-        return "must be a valid email address"
+        return RuleMessage("email")
     return None
 
 
@@ -114,9 +234,9 @@ def length(minimum: int | None = None, maximum: int | None = None) -> ValidatorF
             return None
         size = len(value)
         if minimum is not None and size < minimum:
-            return f"must be at least {minimum} characters"
+            return RuleMessage("min_length", fallback="length", minimum=minimum, maximum=maximum)
         if maximum is not None and size > maximum:
-            return f"must be at most {maximum} characters"
+            return RuleMessage("max_length", fallback="length", minimum=minimum, maximum=maximum)
         return None
 
     return _check
@@ -135,29 +255,34 @@ def max_length(n: int) -> ValidatorFn:
 def integer(value: Any) -> str | None:
     """A value must be an integer (or a string of digits)."""
     if isinstance(value, bool):
-        return "must be an integer"
+        return RuleMessage("integer")
     if isinstance(value, int):
         return None
     if isinstance(value, str) and _INTEGER_RE.fullmatch(value.strip()):
         return None
-    return "must be an integer"
+    return RuleMessage("integer")
 
 
 def number(value: Any) -> str | None:
     """A value must be a number (int or float)."""
     if isinstance(value, bool):
-        return "must be a number"
+        return RuleMessage("number")
     if isinstance(value, int):
         return None
     if isinstance(value, float):
-        return None if math.isfinite(value) else "must be a number"
+        return None if math.isfinite(value) else RuleMessage("number")
     if isinstance(value, str) and _NUMBER_RE.fullmatch(value.strip()):
         return None
-    return "must be a number"
+    return RuleMessage("number")
 
 
-def between(low: float, high: float) -> ValidatorFn:
-    """A numeric value must lie within [low, high]."""
+def _in_range(low: float, high: float, key: str, fallback: str | None) -> ValidatorFn:
+    """The check behind :func:`between`, :func:`min` and :func:`max`.
+
+    They fail with the same English text, but their own rule ids, so a
+    translation can say "at least {low}" for ``min`` and "between … and …" for
+    ``between``.
+    """
 
     def _check(value: Any) -> str | None:
         if value is None:
@@ -165,22 +290,27 @@ def between(low: float, high: float) -> ValidatorFn:
         try:
             num = float(value)
         except (TypeError, ValueError):
-            return "must be a number"
+            return RuleMessage("number")
         if not (low <= num <= high):
-            return f"must be between {low} and {high}"
+            return RuleMessage(key, fallback=fallback, low=low, high=high)
         return None
 
     return _check
 
 
+def between(low: float, high: float) -> ValidatorFn:
+    """A numeric value must lie within [low, high]."""
+    return _in_range(low, high, "between", None)
+
+
 def min(low: float) -> ValidatorFn:
     """A numeric value must be at least ``low``."""
-    return between(low, float("inf"))
+    return _in_range(low, float("inf"), "min", "between")
 
 
 def max(high: float) -> ValidatorFn:
     """A numeric value must be at most ``high``."""
-    return between(float("-inf"), high)
+    return _in_range(float("-inf"), high, "max", "between")
 
 
 def matches(other: str) -> ValidatorFn:
@@ -196,7 +326,7 @@ def matches(other: str) -> ValidatorFn:
 
     def _check(value: Any) -> str | None:
         if value != other:
-            return "does not match"
+            return RuleMessage("matches")
         return None
 
     return _check
@@ -217,7 +347,7 @@ class _MatchesField:
         if _is_empty(value) and _is_empty(other_value):
             return None  # both left empty: nothing to confirm
         if value != other_value:
-            return f"does not match {self.field_name!r}"
+            return RuleMessage("matches_field", fallback="matches", field=self.field_name)
         return None
 
 
@@ -228,19 +358,19 @@ def one_of(choices: Sequence[Any]) -> ValidatorFn:
     def _check(value: Any) -> str | None:
         if value not in allowed:
             rendered = ", ".join(str(c) for c in allowed)
-            return f"must be one of: {rendered}"
+            return RuleMessage("one_of", choices=rendered)
         return None
 
     return _check
 
 
 def regex(pattern: str, message: str | None = None) -> ValidatorFn:
-    """A string must match ``pattern``."""
+    """A string must match ``pattern``; ``message`` replaces the built-in text."""
     compiled = re.compile(pattern)
 
     def _check(value: Any) -> str | None:
         if not isinstance(value, str) or not compiled.fullmatch(value.strip()):
-            return message or f"must match {pattern!r}"
+            return message or RuleMessage("regex", pattern=pattern)
         return None
 
     return _check
@@ -252,7 +382,7 @@ def boolean(value: Any) -> str | None:
         return None
     if isinstance(value, str) and value.strip().lower() in ("true", "false", "1", "0", "yes", "no"):
         return None
-    return "must be a boolean"
+    return RuleMessage("boolean")
 
 
 # --------------------------------------------------------------------------
@@ -296,6 +426,26 @@ class Validator:
     Callable validators remain supported for advanced cases. The result maps
     every invalid field to its first human-readable error.
 
+    ``messages`` replaces the text of built-in rules for this validator — the
+    key is a rule id (``"required"``) or ``"field.rule"`` for a single field,
+    the value a ``str.format`` template or a callable taking the rule's
+    parameters::
+
+        Validator(
+            {"email": ["required", "email"], "name": [{"min_length": 2}]},
+            messages={
+                "required": "обов'язкове поле",
+                "email.email": "невірна адреса пошти",
+                "min_length": "не менше {minimum} символів",
+            },
+        )
+
+    Without an override the text comes from the translation catalogue
+    (``validation.<rule id>``) and finally from :data:`DEFAULT_MESSAGES`, so an
+    application that translates once with ``translations`` gets every form
+    translated. An unknown rule id is an error at construction, not a message
+    that silently never shows.
+
     Empty values (None, ``""``, whitespace, empty collections):
 
     * ``required`` reports ``"is required"``;
@@ -305,13 +455,41 @@ class Validator:
     * a field with neither is validated as is, so ``["email"]`` rejects ``""``.
     """
 
-    __slots__ = ("_fields",)
+    __slots__ = ("_fields", "_messages")
 
-    def __init__(self, fields: FieldRules = ()) -> None:
+    def __init__(
+        self,
+        fields: FieldRules = (),
+        *,
+        messages: Mapping[str, MessageOverride] | None = None,
+    ) -> None:
+        self._messages = self._check_messages(messages)
         self._fields = [
             (name, [self._resolve(rule) for rule in rules])
             for name, rules in self.normalize(fields).items()
         ]
+
+    @staticmethod
+    def _check_messages(
+        messages: Mapping[str, MessageOverride] | None,
+    ) -> dict[str, MessageOverride]:
+        """Reject an override that could never apply (a typo in a rule id)."""
+        checked: dict[str, MessageOverride] = {}
+        known = sorted({*DEFAULT_MESSAGES, *_GROUP_IDS})
+        for key, template in (messages or {}).items():
+            rule_id = key.rsplit(".", 1)[-1]
+            if rule_id not in DEFAULT_MESSAGES and rule_id not in _GROUP_IDS:
+                raise ValueError(
+                    f"unknown validation message key {key!r}: the rule id is {rule_id!r}; "
+                    f"known ids: {', '.join(known)} (prefix one with 'field.' for a single field)"
+                )
+            if not isinstance(template, str) and not callable(template):
+                raise TypeError(
+                    f"the message for {key!r} must be a template string or a callable, "
+                    f"got {type(template).__name__}"
+                )
+            checked[key] = template
+        return checked
 
     @staticmethod
     def normalize(fields: FieldRules = ()) -> dict[str, list[RuleSpec]]:
@@ -407,9 +585,21 @@ class Validator:
                     fn(value, data) if isinstance(fn, _MatchesField) else fn(value)
                 )
                 if message is not None:
-                    errors[name] = message
+                    errors[name] = self._finish(name, message)
                     break
         return errors
+
+    def _finish(self, field: str, message: str) -> str:
+        """Apply this validator's overrides to a built-in rule's message."""
+        if self._messages and isinstance(message, RuleMessage):
+            return render_message(
+                message.key,
+                message.params,
+                fallback=message.fallback,
+                overrides=self._messages,
+                field=field,
+            )
+        return str(message)  # always a plain str, never the RuleMessage subclass
 
     def validate_or_raise(self, data: Mapping[str, Any]) -> None:
         """Like :meth:`validate` but raises :class:`ValidationError` on failure."""

@@ -11,9 +11,11 @@ appending to the list — no existing stage has to change.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
 import py_compile
+import re
 import shutil
 import sys
 import tempfile
@@ -34,6 +36,7 @@ from .manifest import build_manifest
 from .packager import ApkPackager, PackageResult
 from .runtime import ensure_runtime
 from .toolchain import find_toolchain
+from .widgets import CustomWidgets, MissingRendererError, dex_has_case, scan_custom_widgets
 
 __all__ = ["BuildPipeline", "BuildResult", "StageTiming", "build_apk"]
 
@@ -41,6 +44,80 @@ _log = get_logger("compiler")
 
 #: Python version of the interpreter embedded in native APKs.
 DEVICE_PYTHON = (3, 14)
+
+#: Names that make ``<receiver>.notify(...)`` a PyMobile notification: ``app``,
+#: ``self.app``, ``my_app``, ``app.notifications``, ``get_bridge()`` … A
+#: ``threading.Condition.notify()`` or an observer's ``notify`` has none of them.
+_NOTIFY_RECEIVER_TOKENS = frozenset({"app", "application", "notifications", "bridge"})
+#: Classes whose mere use means the project posts notifications itself.
+_NOTIFY_CLASSES = frozenset({"Notifications", "NotificationSpec"})
+_NOTIFY_FALLBACK = re.compile(
+    r"(?:\b(?:app|application|notifications|bridge)|_app)\s*\.\s*notify\s*\("
+    r"|\b(?:Notifications|NotificationSpec)\s*\("
+)
+
+
+def _receiver_tokens(node: ast.expr) -> set[str]:
+    """Lower-case words of a receiver expression (``self.my_app`` → my, app)."""
+    parts: list[str] = []
+    while True:
+        if isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        elif isinstance(node, ast.Call):
+            node = node.func  # App.current().notify -> App.current
+        elif isinstance(node, ast.Name):
+            parts.append(node.id)
+            break
+        else:
+            break
+    words: set[str] = set()
+    for part in parts:
+        words.update(word for word in re.split(r"[^a-z0-9]+", part.lower()) if word)
+    return words
+
+
+def find_notification_use(sources: SourceSet) -> str | None:
+    """``"main.py:12"`` of the first line that posts a notification, or ``None``.
+
+    Recognises ``app.notify(...)``, ``self.app.notify(...)``,
+    ``app.notifications.notify(...)``, ``App.current().notify(...)``,
+    ``get_bridge().notify(...)`` and any use of ``Notifications`` /
+    ``NotificationSpec``. Files that do not parse fall back to a regex.
+    """
+    for path in sources.files:
+        if path.suffix != ".py":
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        try:
+            # Bytes, not text: the interpreter then strips a UTF-8 BOM (Notepad and
+            # Windows PowerShell write one) and honours a ``# coding: cp1251`` line.
+            # A str that starts with a BOM is a SyntaxError, and a file that is not
+            # UTF-8 would not even decode — either way the file would be skipped.
+            tree = ast.parse(data)
+        except (SyntaxError, ValueError):
+            text = data.decode("utf-8-sig", errors="replace")
+            match = _NOTIFY_FALLBACK.search(text)
+            if match is not None:
+                line = text.count("\n", 0, match.start()) + 1
+                return f"{path.relative_to(sources.root).as_posix()}:{line}"
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                posts = node.func.attr == "notify" and bool(
+                    _receiver_tokens(node.func.value) & _NOTIFY_RECEIVER_TOKENS
+                )
+            elif isinstance(node, (ast.Name, ast.Attribute)):
+                name = node.id if isinstance(node, ast.Name) else node.attr
+                posts = name in _NOTIFY_CLASSES and isinstance(node.ctx, ast.Load)
+            else:
+                continue
+            if posts:
+                return f"{path.relative_to(sources.root).as_posix()}:{node.lineno}"
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +186,9 @@ class BuildPipeline:
         self.key_password = key_password
         self.warnings: list[str] = []
         self._timings: list[StageTiming] = []
+        #: The project's own widget types, found by :meth:`_check_widget_types`
+        #: and checked against the packaged dex by :meth:`_verify_renderers`.
+        self._custom_widgets = CustomWidgets(frozenset(), frozenset(), frozenset())
 
     # -- helpers -----------------------------------------------------------
     def _stage(self, name: str, action: Callable[[], Any]) -> Any:
@@ -147,12 +227,8 @@ class BuildPipeline:
                 "Your code uses HttpClient but android.permission.INTERNET is not "
                 "declared; HTTP requests will fail on device."
             )
-        if self.config.target_sdk >= 33 and "android.permission.POST_NOTIFICATIONS" not in (
-            permissions
-        ):
-            self.warnings.append(
-                "targetSdk >= 33 without POST_NOTIFICATIONS: notifications stay hidden."
-            )
+        # POST_NOTIFICATIONS is checked in _check_notifications(), after the
+        # sources are collected: it only matters to code that posts one.
         if self.config.no_ssl and self._uses_http():
             self.warnings.append(
                 "Built with --no-ssl but code uses HttpClient; HTTPS requests will fail."
@@ -177,6 +253,34 @@ class BuildPipeline:
             if any(marker in text for marker in markers):
                 return True
         return False
+
+    def _check_notifications(self, sources: SourceSet) -> None:
+        """Warn about missing POST_NOTIFICATIONS — only for code that posts one.
+
+        From Android 13 (API 33) an app must hold ``POST_NOTIFICATIONS`` to show
+        a notification, and the framework targets 35 by default, so the warning
+        used to fire for *every* project with the stock config — including the
+        ones that never call ``notify()``. It now looks for the calls: an app
+        with no notification code gets no warning. Sources are the ones that
+        ship (``exclude`` and the virtualenv folders are already applied), and
+        the scan is syntactic, so a comment or a docstring mentioning
+        ``app.notify`` does not count.
+        """
+        if self.config.target_sdk < 33:
+            return
+        if "android.permission.POST_NOTIFICATIONS" in {str(p) for p in self.config.permissions}:
+            return
+        if any("POST_NOTIFICATIONS" in warning for warning in self.warnings):
+            return  # Permission.POST_NOTIFICATIONS in code: already reported
+        where = find_notification_use(sources)
+        if where is None:
+            return
+        self.warnings.append(
+            "targetSdk >= 33 without POST_NOTIFICATIONS: notifications stay hidden. "
+            f"{where} posts a notification; add \"android.permission.POST_NOTIFICATIONS\" to "
+            "permissions in pymobile.toml (and ask for it with "
+            "app.permissions.require(Permission.POST_NOTIFICATIONS))."
+        )
 
     def _check_requested_permissions(self, sources: SourceSet) -> None:
         """Warn about permissions used in code but missing from the config.
@@ -236,42 +340,69 @@ class BuildPipeline:
         """Warn about custom widget types the native renderer cannot draw.
 
         ``ViewBuilder.java`` has one branch per built-in widget; a class with
-        its own ``type_name`` and no branch there renders as an empty view on
-        the phone — no exception, no placeholder — while the desktop preview
-        prints ``<BarChart>`` and looks fine. The scan is best-effort (a
-        ``type_name`` built at runtime is invisible to it), and only reports a
-        type nothing has declared: ``register_widget_type("BarChart")`` in the
-        app is the way to say "the Java branch exists".
-        """
-        import re
+        its own ``type_name`` and no branch there draws as a placeholder (or,
+        before 0.8, an empty view) on the phone while the desktop preview prints
+        ``<BarChart>`` and looks fine. The scan is best-effort (a ``type_name``
+        built at runtime is invisible to it) and only names a type nothing has
+        declared: ``register_widget_type("BarChart")`` in the app is the way to
+        say "the Java branch exists".
 
+        A *native* build goes further — :meth:`_verify_renderers` checks the
+        ``classes.dex`` it is about to package and stops if a type is missing.
+        """
         from ..core.ui.registry import known_types
 
-        # A type is "declared" either at the text level — the project calls
-        # register_widget_type("BarChart") somewhere — or in the running
-        # process, which covers a plugin that registered it at import time.
-        type_name = re.compile(r"""type_name\s*[:=]\s*(?:str\s*=\s*)?["']([A-Za-z_][\w.]*)["']""")
-        declared = re.compile(r"""register_widget_type\(\s*["']([A-Za-z_][\w.]*)["']""")
-        found: set[str] = set()
-        for path in sources.files:
-            if path.suffix != ".py":
-                continue
-            try:
-                text = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
-            found.update(type_name.findall(text))
-            found.difference_update(declared.findall(text))
-
-        unknown = sorted(found - known_types())
+        self._custom_widgets = scan_custom_widgets(sources.files)
+        found = self._custom_widgets
+        unknown = sorted(found.undeclared - known_types())
         if unknown:
             names = ", ".join(repr(name) for name in unknown)
             self.warnings.append(
                 f"custom widget type(s) with no renderer: {names} — on Android a node "
-                "whose type has no branch in ViewBuilder.java is drawn as an empty view, "
-                "with no error. Build the widget from existing ones, or add the Java "
-                "branch and confirm it with register_widget_type(<name>)."
+                "whose type has no branch in ViewBuilder.java is drawn as a placeholder, "
+                "not as your widget. Build the widget from existing ones, or add the Java "
+                f"branch (`pymobile widget-java {unknown[0]}` writes it) and confirm it "
+                "with register_widget_type(<name>)."
             )
+        if self.native and found.preview_only:
+            names = ", ".join(repr(name) for name in sorted(found.preview_only))
+            self.warnings.append(
+                f"widget type(s) declared preview-only (android=False): {names} — the "
+                "desktop and browser previews draw them, the phone does not"
+            )
+
+    def _verify_renderers(self, dex: Path) -> None:
+        """Stop a native build whose ``classes.dex`` cannot draw the app's widgets.
+
+        The packaged dex only knows the built-in widget types. A project that
+        adds a type — and registers it, or not — but never adds the Java branch
+        and rebuilds the dex (``PYMOBILE_BUILD_JAVA=1``) used to produce an APK
+        in which that widget quietly is not there. The dex that is about to be
+        packaged is asked directly, so a stale prebuilt one, a forgotten rebuild
+        and a typo in the ``case`` label are all caught here, before the APK is
+        signed.
+        """
+        wanted = self._custom_widgets.android
+        if not wanted:
+            return
+        data = dex.read_bytes()
+        missing = sorted(name for name in wanted if not dex_has_case(data, name))
+        if not missing:
+            return
+        names = ", ".join(repr(name) for name in missing)
+        first = missing[0]
+        raise MissingRendererError(
+            f"no Android renderer for the custom widget type(s) {names}: the classes.dex "
+            "that would go into this APK has no branch for them, so on the phone they "
+            "would be drawn as a placeholder instead of your widget",
+            hint=(
+                f"`pymobile widget-java {first}` prints the Java branch; add it to "
+                "ViewBuilder.java and rebuild the dex with PYMOBILE_BUILD_JAVA=1 pymobile "
+                "build --native. Or compose the widget from existing ones (Row, Column, "
+                f"ProgressBar …), or mark it preview-only: register_widget_type({first!r}, "
+                "android=False)."
+            ),
+        )
 
     def _collect(self) -> SourceSet:
         """Gather the files that go into the APK."""
@@ -389,6 +520,7 @@ class BuildPipeline:
         sources: SourceSet = self._stage("collect", self._collect)
         self._check_requested_permissions(sources)
         self._check_widget_types(sources)
+        self._check_notifications(sources)
 
         output_dir = self.config.output_path
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -476,6 +608,7 @@ class BuildPipeline:
 
         native_dir = self._stage("jni", lambda: backend.compile_jni(workdir))
         dex = self._stage("dex", lambda: backend.compile_java(workdir))
+        self._verify_renderers(dex)
         base = self._stage("resources", lambda: backend.link_resources(workdir, icons.files))
         assets = self._stage("assets", lambda: backend.collect_assets(entries))
         signed = self._stage(
