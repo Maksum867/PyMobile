@@ -124,3 +124,65 @@ def test_browser_url_points_at_loopback_for_wildcard_binds() -> None:
     assert browser_url("::", 8765) == "http://127.0.0.1:8765"
     assert browser_url("127.0.0.1", 9000) == "http://127.0.0.1:9000"
     assert browser_url("192.168.0.7", 9000) == "http://192.168.0.7:9000"
+
+def test_pickers_are_silent_while_building() -> None:
+    """A value set in build() must not fire on_change — Slider/Switch do not either."""
+    from pymobile import Screen, Widget
+
+    seen: list[str] = []
+
+    class Form(Screen):
+        def build(self) -> Widget:
+            self.date = DatePicker("2026-06-01", on_change=seen.append)
+            self.time = TimePicker("09:00", on_change=seen.append)
+            self.date.value = "2026-07-01"       # inside build(): no callback
+            self.time.value = "10:30"
+            return Column(self.date, self.time)
+
+    Form().root  # builds the tree, i.e. runs build()
+    assert seen == []
+
+    picker = DatePicker("2026-06-01", on_change=seen.append)
+    picker.value = "2026-08-01"              # outside build(): the listener runs
+    assert seen == ["2026-08-01"]
+
+
+def test_tab_bar_is_silent_while_building() -> None:
+    """Picking the initial tab in build() must not call on_select."""
+    from pymobile import Screen, Widget
+
+    seen: list[str] = []
+
+    class Shell(Screen):
+        def build(self) -> Widget:
+            self.tabs = BottomNavigation(["Home", "Stats"], on_select=seen.append)
+            self.tabs.value = "Stats"            # inside build(): no callback
+            return Column(self.tabs)
+
+    Shell().root
+    assert seen == []
+
+    tabs = BottomNavigation(["Home", "Stats"], on_select=seen.append)
+    tabs.select("Stats")                     # outside build(): the listener runs
+    assert seen == ["Stats"]
+
+
+def test_radio_group_is_silent_while_building() -> None:
+    from pymobile import RadioButton, RadioGroup, Screen, Widget
+
+    seen: list[str] = []
+
+    class Form(Screen):
+        def build(self) -> Widget:
+            self.group = RadioGroup(
+                RadioButton("A"), RadioButton("B"), value="A", on_select=seen.append
+            )
+            self.group.select("B")               # inside build(): no callback
+            return Column(self.group)
+
+    Form().root
+    assert seen == []
+
+    group = RadioGroup(RadioButton("A"), RadioButton("B"), value="A", on_select=seen.append)
+    group.select("B")                        # outside build(): the listener runs
+    assert seen == ["B"]

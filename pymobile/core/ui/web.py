@@ -36,33 +36,41 @@ _PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
 <style>
-  :root {{ color-scheme: {color_scheme}; }}
+  /* The chrome colours are custom properties, not literals baked into the
+     rules: the polling loop rewrites them when App.set_theme() switches the
+     palette, so the phone shell follows dark mode without a page reload. */
+  :root {{ color-scheme: {color_scheme};
+    --page-bg: {page_bg}; --phone-bg: {phone_bg}; --text: {text}; --bar-bg: {bar_bg};
+    --line: {line}; --primary: {primary}; --muted: {muted};
+    --snack-bg: {snack_bg}; --snack-fg: {snack_fg}; --snack-action: {snack_action}; }}
   * {{ box-sizing: border-box; }}
-  body {{ margin: 0; background: {page_bg}; color: {text}; font: 15px/1.45 system-ui, sans-serif; }}
-  .phone {{ max-width: 420px; margin: 24px auto; background: {phone_bg}; min-height: 80vh;
+  body {{ margin: 0; background: var(--page-bg); color: var(--text);
+          font: 15px/1.45 system-ui, sans-serif; }}
+  .phone {{ max-width: 420px; margin: 24px auto; background: var(--phone-bg); min-height: 80vh;
            border-radius: 22px; box-shadow: 0 6px 32px rgba(0,0,0,.18); overflow: hidden;
-           display: flex; flex-direction: column; color: {text}; }}
-  .bar {{ background: {bar_bg}; border-bottom: 1px solid {line}; padding: 10px 16px;
+           display: flex; flex-direction: column; color: var(--text); }}
+  .bar {{ background: var(--bar-bg); border-bottom: 1px solid var(--line); padding: 10px 16px;
           display: flex; align-items: center; gap: 12px; font-weight: 600; }}
   .bar button {{ font: inherit; font-weight: 500; border: 0; background: none;
-                 color: {primary}; cursor: pointer; padding: 0; }}
+                 color: var(--primary); cursor: pointer; padding: 0; }}
   .screen {{ padding: 16px; flex: 1; }}
-  .status {{ background: {bar_bg}; border-top: 1px solid {line}; padding: 6px 16px;
-             min-height: 28px; color: {muted}; font-size: 13px; }}
+  .status {{ background: var(--bar-bg); border-top: 1px solid var(--line); padding: 6px 16px;
+             min-height: 28px; color: var(--muted); font-size: 13px; }}
   .row {{ display: flex; }}
   .col {{ display: flex; flex-direction: column; }}
   .grid {{ display: grid; }}
   button.w {{ font: inherit; padding: 9px 14px; border-radius: 8px; cursor: pointer;
-              border: 1px solid {line}; background: {bar_bg}; color: {text}; width: 100%; }}
+              border: 1px solid var(--line); background: var(--bar-bg); color: var(--text);
+              width: 100%; }}
   button.w:disabled {{ opacity: .45; cursor: not-allowed; }}
-  input.w, textarea.w, select.w {{ font: inherit; padding: 8px 10px; border: 1px solid {line};
-             border-radius: 8px; width: 100%; background: {phone_bg}; color: {text}; }}
+  input.w, textarea.w, select.w {{ font: inherit; padding: 8px 10px; border: 1px solid var(--line);
+             border-radius: 8px; width: 100%; background: var(--phone-bg); color: var(--text); }}
   progress.w {{ width: 100%; height: 10px; }}
-  hr.w {{ border: 0; border-top: 1px solid {line}; margin: 8px 0; width: 100%; }}
-  .muted {{ color: {muted}; }}
+  hr.w {{ border: 0; border-top: 1px solid var(--line); margin: 8px 0; width: 100%; }}
+  .muted {{ color: var(--muted); }}
   table.w {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
-  table.w th, table.w td {{ border: 1px solid {line}; padding: 6px 8px; text-align: left; }}
-  a.w {{ color: {primary}; }}
+  table.w th, table.w td {{ border: 1px solid var(--line); padding: 6px 8px; text-align: left; }}
+  a.w {{ color: var(--primary); }}
   .avatar {{ display: inline-flex; align-items: center; justify-content: center;
              border-radius: 50%; font-weight: 600; }}
   .seg {{ display: flex; gap: 0; overflow-x: auto; }}
@@ -74,11 +82,11 @@ _PAGE = """<!doctype html>
   .refresh {{ text-align: center; }}
   #snack {{ position: absolute; left: 12px; right: 12px; bottom: 40px; display: none;
             align-items: center; gap: 8px; padding: 6px 8px 6px 16px; min-height: 48px;
-            border-radius: 4px; background: {snack_bg}; color: {snack_fg};
+            border-radius: 4px; background: var(--snack-bg); color: var(--snack-fg);
             box-shadow: 0 3px 10px rgba(0,0,0,.3); }}
   #snack span {{ flex: 1; }}
   #snack button {{ font: inherit; font-weight: 700; border: 0; background: none;
-                   color: {snack_action}; cursor: pointer; padding: 8px; }}
+                   color: var(--snack-action); cursor: pointer; padding: 8px; }}
 </style>
 </head>
 <body>
@@ -104,7 +112,16 @@ async function send(id, kind, value) {{
   }});
   apply(await r.json());
 }}
+function applyChrome(chrome) {{
+  if (!chrome) return;
+  const root = document.documentElement;
+  for (const name in chrome) {{
+    root.style.setProperty('--' + name.replace(/_/g, '-'), chrome[name]);
+  }}
+  if (chrome.color_scheme) root.style.colorScheme = chrome.color_scheme;
+}}
 function apply(state) {{
+  applyChrome(state.chrome);  // the shell follows App.set_theme() every poll
   if (state.version === version) return;
   version = state.version;
   const active = document.activeElement;
@@ -672,7 +689,13 @@ class WebPreview:
             self._version += 1
 
     def state(self) -> dict[str, Any]:
-        """The payload the page polls for."""
+        """The payload the page polls for.
+
+        ``chrome`` travels with every poll, not only with the initial page: a
+        theme switched at runtime (``App.set_theme("dark")``) darkens the
+        widgets the moment the next tree is rendered, and without the colours
+        here the phone frame around them would stay light until a reload.
+        """
         with self._lock:
             tree = self._tree
             status = self._status
@@ -684,6 +707,7 @@ class WebPreview:
             "depth": self.app.navigator.depth,
             "status": status,
             "snackbar": tree.get("snackbar") if tree else None,
+            "chrome": self._theme_vars(),
         }
 
     def _theme_vars(self) -> dict[str, str]:

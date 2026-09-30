@@ -3,6 +3,30 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.8.4] — 2026-09-30
+
+### Fixed
+
+- **`preview --png --theme dark`** now builds the tree *in* that theme:
+  `cmd_preview()` calls `App.set_theme()` once the entry point has created the
+  app, before `--navigate` and before `bridge.last_tree` is read. Previously the
+  theme reached only `render_mockup()`, so a `build()` that follows the
+  documented `self.app.theme["SURFACE"]` produced light cards and the mockup
+  painted the dark palette over them — white-on-light-grey, unreadable.
+- **`WebPreview`** publishes the chrome colours in every `/state` payload and
+  the page writes them back as CSS custom properties, so
+  `App.set_theme("dark")` recoulours the phone frame and the page background on
+  the next poll instead of waiting for a browser reload. The initial page is
+  unchanged (the rules read the same variables it defines).
+- **`DatePicker.set_value()` and `TimePicker.set_value()`** no longer fire
+  `on_change` while a tree is being built — they were the last two components
+  missing the `in_build_scope()` guard of BUG-25. `RadioGroup.select()` and
+  `BottomNavigation.select()` had the same gap and got the guard too.
+- **`pymobile init`** writes a `main.py` that creates its widgets inside
+  `build()` (state still lives in `__init__`), matching *Updating the screen*;
+  the `optimize` row of the configuration reference no longer claims the
+  template ships `optimize = true` when it ships `optimize = false`.
+
 ## [0.8.3] — 2026-09-30
 
 ### Added

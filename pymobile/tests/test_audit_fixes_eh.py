@@ -7,6 +7,7 @@ checked through their sources and the prebuilt binaries that actually ship.
 
 from __future__ import annotations
 
+import ast
 import gc
 import logging
 import queue
@@ -446,6 +447,37 @@ class TestDocsAndTemplates:
         assert "self.app.render()" not in main
 
     def test_template_does_not_promise_bytecode_by_default(self) -> None:
+        toml = (self.templates / "pymobile.toml.template").read_text(encoding="utf-8")
+        assert re.search(r"^optimize = false", toml, re.M)
+
+    def test_template_builds_widgets_in_build(self) -> None:
+        """Widgets belong in build() — it runs again on every refresh.
+
+        The README teaches `self.counter = Label(...)` inside ``build()``; the
+        generated ``main.py`` used to create it in ``__init__``, which put the
+        template and the documentation at odds.
+        """
+        main = (self.templates / "main.py.template").read_text(encoding="utf-8")
+        module = ast.parse(main)
+        home = next(node for node in module.body if isinstance(node, ast.ClassDef))
+        methods = {node.name: node for node in home.body if isinstance(node, ast.FunctionDef)}
+        assert "build" in methods and "__init__" in methods
+
+        def labels(method: ast.AST) -> list[ast.Call]:
+            return [
+                node
+                for node in ast.walk(method)
+                if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "Label"
+            ]
+
+        assert labels(methods["build"]), "build() creates the screen's widgets"
+        assert labels(methods["__init__"]) == [], "__init__ only sets up state"
+
+    @pytest.mark.skipif(not README.exists(), reason="README not packaged")
+    def test_readme_optimize_row_matches_the_init_template(self) -> None:
+        """The reference table claimed the template ships `optimize = true`."""
+        row = next(line for line in self.readme.splitlines() if line.startswith("| `optimize` |"))
+        assert "`true` in the `init` template" not in row
         toml = (self.templates / "pymobile.toml.template").read_text(encoding="utf-8")
         assert re.search(r"^optimize = false", toml, re.M)
 

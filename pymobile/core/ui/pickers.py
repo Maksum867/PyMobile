@@ -14,7 +14,7 @@ import datetime as _dt
 from collections.abc import Callable
 from typing import Any
 
-from .widget import Widget, callback_name
+from .widget import Widget, callback_name, in_build_scope
 
 __all__ = ["DatePicker", "TimePicker"]
 
@@ -108,7 +108,10 @@ class DatePicker(Widget):
         if text != self._value:
             self._value = text
             self.invalidate()
-            if self.on_change is not None:
+            # A value set while the tree is being built (build()) stays silent,
+            # exactly like Slider/Switch/Checkbox/Dropdown: the handler would
+            # otherwise run against widgets that do not exist yet (BUG-25).
+            if self.on_change is not None and not in_build_scope():
                 self.on_change(text)
 
     def props(self) -> dict[str, Any]:
@@ -156,7 +159,8 @@ class TimePicker(Widget):
         if text != self._value:
             self._value = text
             self.invalidate()
-            if self.on_change is not None:
+            # Same guard as DatePicker.set_value(): silent inside build().
+            if self.on_change is not None and not in_build_scope():
                 self.on_change(text)
 
     def props(self) -> dict[str, Any]:

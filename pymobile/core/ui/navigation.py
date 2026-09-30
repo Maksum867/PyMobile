@@ -13,7 +13,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from .components import _deprecated_on_change
-from .widget import Widget, callback_name
+from .widget import Widget, callback_name, in_build_scope
 
 __all__ = ["BottomNavigation"]
 
@@ -73,7 +73,9 @@ class BottomNavigation(Widget):
         if value != self._value:
             self._value = value
             self.invalidate()
-            if self.on_select is not None:
+            # Picking the initial tab while build() assembles the shell must not
+            # call the handler: it is the trap BUG-25 removed everywhere else.
+            if self.on_select is not None and not in_build_scope():
                 self.on_select(value)
 
     def set_value(self, value: str) -> None:

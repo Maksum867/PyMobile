@@ -285,3 +285,28 @@ class TestWebPreviewServer:
         finally:
             preview.stop()
             app.stop()
+
+    def test_the_phone_shell_follows_a_theme_change(self) -> None:
+        """set_theme() must repaint the frame too — over /state, not a reload."""
+        import json
+        import urllib.request
+
+        app, _screen, preview, port = self._serve()
+        try:
+            base = f"http://127.0.0.1:{port}"
+            page = urllib.request.urlopen(base, timeout=5).read().decode()
+            assert "--phone-bg" in page         # the rules read the variables
+            assert "applyChrome" in page        # and the poll loop rewrites them
+
+            light = json.loads(urllib.request.urlopen(f"{base}/state", timeout=5).read())
+            assert light["chrome"]["phone_bg"] == "#FFFFFF"
+            assert light["chrome"]["color_scheme"] == "light"
+
+            app.set_theme("dark")
+            dark = json.loads(urllib.request.urlopen(f"{base}/state", timeout=5).read())
+            assert dark["chrome"]["phone_bg"] == "#121212"
+            assert dark["chrome"]["page_bg"] == "#121212"
+            assert dark["chrome"]["color_scheme"] == "dark"
+        finally:
+            preview.stop()
+            app.stop()

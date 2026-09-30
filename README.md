@@ -30,7 +30,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.8.3`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.8.4`) and read the
 > changelog before upgrading. What may change, and how much notice you get, is
 > written down in the
 > [versioning and deprecation policy](#versioning-and-deprecation-policy). Bug
@@ -1851,7 +1851,7 @@ allow_backup = false            # keep the private store out of cloud/adb backup
 # --- build ---
 abis = ["arm64-v8a"]
 output_dir = "build"
-optimize = true                 # ship bytecode instead of sources
+optimize = false                # ship bytecode instead of sources (needs a Python 3.14 build host)
 strip_debug = true              # -OO: drop docstrings and asserts
 exclude = ["docs/**", "secrets/**"]   # added to the built-in defaults
 exclude_only = false                    # true = use exclude as written
@@ -1873,7 +1873,7 @@ exclude_only = false                    # true = use exclude as written
 | `allow_backup` | `false` | let Android back up the app's private data |
 | `abis` | `["arm64-v8a"]` | architectures |
 | `output_dir` | `build` | where the APK is written |
-| `optimize` | `false` in `ProjectConfig`; `true` in the `init` template | package `.pyc` when enabled; for `--native` only when the build runs on Python 3.14 (the device's version), otherwise sources are shipped with a warning |
+| `optimize` | `false` | package `.pyc` when enabled; for `--native` only when the build runs on Python 3.14 (the device's version), otherwise sources are shipped with a warning — which is why the `init` template ships `optimize = false` too |
 | `strip_debug` | `true` | compile with `-OO` |
 | `exclude` | *(none)* | glob patterns to skip, **added to** the built-in list (`**/__pycache__/**`, `**/*.pyc`, `**/tests/**`, `tests/**`, `**/test_*.py`, `.git/**`, `.venv/**`, `venv/**`, `build/**`, `dist/**`) |
 | `exclude_only` | `false` | `true` = `exclude` replaces the built-in list (advanced; the build then warns if `output_dir` would ship itself) |
@@ -2071,7 +2071,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.8.3", "platform": "android",
+# {"framework_version": "0.8.4", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 
@@ -2258,6 +2258,11 @@ pymobile preview --png ui.png   # a mockup of the screen as the phone draws it (
 pymobile preview --png ui.png --size 360x640 --theme dark
 pymobile preview --png ui.png --text    # the text picture as an image (the pre-0.8 output)
 ```
+
+`--theme dark` switches the application itself (`App.set_theme("dark")`) before
+the tree is built, so a `build()` that reads `self.app.theme["SURFACE"]` lays
+out and paints in that palette — the mockup is never asked to draw a light tree
+with dark colours.
 
 ### A screen other than the first
 

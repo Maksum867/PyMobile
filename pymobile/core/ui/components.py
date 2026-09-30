@@ -1185,7 +1185,9 @@ class RadioGroup(Container):
             return
         self._select_silent(chosen)
         self.invalidate()
-        if self.on_select is not None:
+        # A selection made while the tree is being built (build()) stays
+        # silent, like every other set_value() in this module (BUG-25).
+        if self.on_select is not None and not in_build_scope():
             self.on_select(chosen.text)
 
     @property

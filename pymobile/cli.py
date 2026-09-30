@@ -571,6 +571,7 @@ def _parse_size(value: str | None) -> tuple[int, int | None]:
 
 def cmd_preview(args: argparse.Namespace) -> int:
     """Render a screen of the app — the first, or the one --screen/--navigate reach."""
+    from .core.app import App
     from .core.bridge import StubBridge, set_bridge
     from .core.ui.preview import render_ascii, render_mockup, render_png
 
@@ -580,6 +581,18 @@ def cmd_preview(args: argparse.Namespace) -> int:
     bridge = StubBridge(verbose=False)
     set_bridge(bridge)
     _execute(config, entry)
+
+    # --theme must reach the *app* before the tree is read, not just the
+    # renderer: build() resolves colours through app.theme (the documented
+    # `self.app.theme["SURFACE"]`), so rendering a tree built in the light
+    # palette with the dark one paints dark text over light cards. set_theme()
+    # rebuilds the screens, hence last_tree is read afterwards — and after
+    # --navigate, whose screens must be built in that theme too.
+    requested_theme = getattr(args, "theme", None)
+    app = App.current()
+    if requested_theme and app is not None:
+        app.set_theme(requested_theme)
+
     _navigate(args)
 
     tree = bridge.last_tree
@@ -593,11 +606,10 @@ def cmd_preview(args: argparse.Namespace) -> int:
         path = render_png(tree, args.png)
         _out.ok(f"wrote the text preview to {path}")
     elif args.png:
-        from .core.app import App
-
         width, height = _parse_size(getattr(args, "size", None))
-        app = App.current()
-        theme = getattr(args, "theme", None) or (app.theme if app is not None else None)
+        # The app carries the requested theme by now; the flag is the fallback
+        # for an entry point that never created one.
+        theme = app.theme if app is not None else requested_theme
         path = render_mockup(
             tree,
             args.png,
@@ -980,7 +992,7 @@ def build_parser() -> argparse.ArgumentParser:
     preview.add_argument(
         "--theme",
         choices=("light", "dark"),
-        help="with --png: draw in this theme instead of the app's",
+        help="with --png: build the tree and draw it in this theme instead of the app's",
     )
     preview.add_argument(
         "--size",

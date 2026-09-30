@@ -24,9 +24,15 @@ class HomeScreen(Screen):
     def __init__(self) -> None:
         super().__init__()
         self.taps = 0
-        self.counter = Label("Taps: 0", style=Style(font_size=18, color=Color.TEXT))
 
     def build(self) -> Widget:
+        # Widgets are built here, not in __init__: build() runs again on a
+        # refresh, a theme or a language change, and the tree then reflects the
+        # state the screen holds now (see "Updating the screen" in the README).
+        self.counter = Label(
+            f"Taps: {self.taps}",
+            style=Style(font_size=18, color=Color.TEXT),
+        )
         return Column(
             Label(
                 "{{name}}",

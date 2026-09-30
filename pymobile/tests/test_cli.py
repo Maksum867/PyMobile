@@ -308,6 +308,40 @@ class TestPreview:
         assert main(["preview", "-c", str(tmp_path), "--png", str(out)]) == 0
         assert out.exists() and out.stat().st_size > 0
 
+    def _themed_project(self, root: Path) -> None:
+        """An app whose build() takes its colours from the active theme."""
+        (root / "pymobile.toml").write_text(
+            '[app]\nname = "T"\npackage = "com.example.t"\n', encoding="utf-8"
+        )
+        (root / "main.py").write_text(
+            "from pymobile import App, Column, Label, Screen, Style\n"
+            "class Home(Screen):\n"
+            "    def build(self):\n"
+            "        return Column(Label('CARD',\n"
+            "            style=Style(background=self.app.theme['SURFACE'])))\n"
+            "App('T').run(Home())\n",
+            encoding="utf-8",
+        )
+
+    def test_preview_theme_reaches_build(self, tmp_path: Path) -> None:
+        """`--theme dark` switches the app before the tree is read, not after.
+
+        Painting a tree built in the light palette with the dark one is what
+        made the text unreadable: the cards kept the light SURFACE while the
+        text came from the dark theme.
+        """
+        from pymobile.core.bridge import get_bridge
+
+        pytest.importorskip("PIL")
+        self._themed_project(tmp_path)
+        out = tmp_path / "shot.png"
+
+        assert main(["preview", "-c", str(tmp_path)]) == 0
+        assert get_bridge().last_tree["children"][0]["style"]["background"] == "#F5F5F5"
+
+        assert main(["preview", "-c", str(tmp_path), "--png", str(out), "--theme", "dark"]) == 0
+        assert get_bridge().last_tree["children"][0]["style"]["background"] == "#1E1E1E"
+
 
 class TestWatch:
     """`pymobile watch` — the edit-save-see loop."""
