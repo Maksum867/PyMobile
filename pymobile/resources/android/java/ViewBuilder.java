@@ -38,7 +38,6 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
-import android.widget.RatingBar;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.Spinner;
@@ -506,6 +505,20 @@ final class ViewBuilder {
             case "TimePicker":
                 view = buildTimePicker(id, props);
                 break;
+            case "Icon":
+            case "IconButton":
+            case "Chart":
+                view = buildVector(type, id, props);
+                break;
+            case "AutoComplete":
+                view = buildAutoComplete(id, props);
+                break;
+            case "RangeSlider":
+                view = buildRange(id, props);
+                break;
+            case "PageView":
+                view = buildPageView(node, props);
+                break;
             case "Label":
                 view = buildLabel(props);
                 break;
@@ -535,6 +548,35 @@ final class ViewBuilder {
         // Remember the widget id so a later tree can patch this view in place
         // instead of rebuilding the screen (which loses scroll and focus).
         view.setTag(id);
+        return view;
+    }
+
+    private View buildVector(String kind, String id, JSONObject props) {
+        AdvancedViews.VectorView view = new AdvancedViews.VectorView(context, kind);
+        view.bind(id, props, colorText);
+        return view;
+    }
+
+    private View buildAutoComplete(String id, JSONObject props) {
+        AdvancedViews.AutoInput view = new AdvancedViews.AutoInput(context);
+        view.bind(id, props, colorText, colorTextMuted);
+        return view;
+    }
+
+    private View buildRange(String id, JSONObject props) {
+        AdvancedViews.RangeView view = new AdvancedViews.RangeView(context);
+        view.bind(id, props, colorPrimary, colorText);
+        return view;
+    }
+
+    private View buildPageView(JSONObject node, JSONObject props) throws JSONException {
+        AdvancedViews.PagerView view = new AdvancedViews.PagerView(context);
+        view.bind(node.optString("id", ""), props);
+        JSONArray children = node.optJSONArray("children");
+        if (children != null && children.length() == 1) {
+            view.addView(buildChild(children.getJSONObject(0)), new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
         return view;
     }
 
@@ -643,6 +685,12 @@ final class ViewBuilder {
                 dividerParams.rightMargin = inset;
             }
             return dividerParams;
+        }
+
+        // Stars have a natural width: stretching the view across a Column
+        // only leaves a dead touch area to the right of the last star.
+        if ("RatingBar".equals(type) && vertical) {
+            width = ViewGroup.LayoutParams.WRAP_CONTENT;
         }
 
         // An explicit weight in the style keeps working exactly as before.
@@ -1387,21 +1435,10 @@ final class ViewBuilder {
     }
 
     private View buildRatingBar(final String id, JSONObject props) {
-        RatingBar rating = new RatingBar(context);
-        int maximum = Math.max(1, props.optInt("maximum", 5));
-        rating.setNumStars(maximum);
-        rating.setMax(maximum);
-        rating.setStepSize(1f);
-        rating.setRating((float) props.optDouble("rating", 0));
-        rating.setOnRatingBarChangeListener(new RatingBar.OnRatingBarChangeListener() {
-            @Override
-            public void onRatingChanged(RatingBar bar, float value, boolean fromUser) {
-                if (fromUser) {
-                    Native.dispatchEvent(id, "change", String.valueOf(value));
-                }
-            }
-        });
-        return rating;
+        // A hand-drawn view, not android.widget.RatingBar: see StarView.
+        AdvancedViews.StarView view = new AdvancedViews.StarView(context);
+        view.bind(id, props, colorPrimary, colorText);
+        return view;
     }
 
     private View buildDropdown(final String id, JSONObject props) {
@@ -2511,6 +2548,42 @@ final class ViewBuilder {
         // makes the caller rebuild the ENTIRE screen — closing the keyboard,
         // resetting scroll and losing widget state on every render.
 
+        if ("Icon".equals(type) || "IconButton".equals(type) || "Chart".equals(type)) {
+            if (!(view instanceof AdvancedViews.VectorView)
+                    || !type.equals(((AdvancedViews.VectorView) view).kind)) return false;
+            ((AdvancedViews.VectorView) view).bind(id, props, colorText);
+            return true;
+        }
+        if ("AutoComplete".equals(type)) {
+            if (!(view instanceof AdvancedViews.AutoInput)) return false;
+            ((AdvancedViews.AutoInput) view).bind(id, props, colorText, colorTextMuted);
+            return true;
+        }
+        if ("RatingBar".equals(type)) {
+            if (!(view instanceof AdvancedViews.StarView)) return false;
+            ((AdvancedViews.StarView) view).bind(id, props, colorPrimary, colorText);
+            return true;
+        }
+        if ("RangeSlider".equals(type)) {
+            if (!(view instanceof AdvancedViews.RangeView)) return false;
+            ((AdvancedViews.RangeView) view).bind(id, props, colorPrimary, colorText);
+            return true;
+        }
+        if ("PageView".equals(type)) {
+            if (!(view instanceof AdvancedViews.PagerView)) return false;
+            AdvancedViews.PagerView pager = (AdvancedViews.PagerView) view;
+            JSONArray children = node.optJSONArray("children");
+            if (children == null || children.length() != 1) return false;
+            pager.bind(id, props);
+            JSONObject page = children.getJSONObject(0);
+            if (pager.getChildCount() != 1 || !updateNode(pager.getChildAt(0), page)) {
+                pager.removeAllViews();
+                pager.addView(buildChild(page), new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            }
+            return true;
+        }
+
         if ("Dialog".equals(type)) {
             DialogHost host = dialogs.get(view);
             if (host == null) {
@@ -2753,17 +2826,6 @@ final class ViewBuilder {
         }
         if (view instanceof SeekBar) {
             applySliderScale((SeekBar) view, props);
-            return true;
-        }
-        if (view instanceof RatingBar) {
-            RatingBar rating = (RatingBar) view;
-            float value = (float) props.optDouble("rating", 0);
-            if (Math.abs(rating.getRating() - value) > 1e-3f) {
-                rating.setOnRatingBarChangeListener(null);
-                rating.setRating(value);
-                // Re-attach is intentionally skipped: the build path owns the
-                // listener and a partial tree rebuild re-creates the view.
-            }
             return true;
         }
         if (("DatePicker".equals(type) || "TimePicker".equals(type)) && view instanceof Button) {

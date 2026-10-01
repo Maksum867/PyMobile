@@ -3,6 +3,42 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.9.0] — 2026-10-01
+
+### Added
+
+- **Extended components**: `Card`, `FormField`/`Form`, `TabView` (`Tabs`),
+  `ExpansionPanel`/`Accordion`, `EmptyState`, `Skeleton`, `MultiSelect`,
+  `Calendar`, `DateRangePicker` and `Carousel` — compositions of existing
+  widget types, usable on every renderer without Java changes.
+- **Native types** `Icon`, `IconButton`, `FloatingActionButton`, `AutoComplete`,
+  `RangeSlider`, `PageView` and the `BarChart` / `LineChart` / `PieChart` family
+  (serialised as `Chart`): `AdvancedViews.java` plus branches in `ViewBuilder.java`,
+  a rebuilt prebuilt `classes.dex`, and browser, Tk, mockup and text renderers.
+- `FormField`/`Form` reuse the existing `Validator` and its message overrides.
+
+### Fixed
+
+- **`RatingBar` on a phone**: with many stars (a 10-star bar) tapping the 8th
+  star painted part of the 9th. `android.widget.RatingBar` tiles fixed-size
+  star bitmaps while its filled area follows the view's width, so a bar that was
+  stretched by a `Column` or wider than the screen drew the two out of step. It
+  is now a hand-drawn `StarView` (`AdvancedViews.java`) whose star size, drawing
+  and touch handling share one calculation, and it is no longer stretched across
+  a `Column`. The same change fixes the old patch path, which detached the
+  change listener after the first Python-side update so later taps were lost.
+- `RatingBar` in the Tk preview shows empty stars too, is clickable and updates
+  in place; the PNG mockup shrinks the stars to fit the width instead of running
+  off the screen.
+
+### Changed
+
+- The mockup honours an explicit `min_width` on buttons (it always forced 88 dp).
+- Composite widgets that set `_gates_events` block events for descendants while
+  they are disabled; ordinary containers behave as before.
+
+P.S. Today is the Python 3.15 release
+
 ## [0.8.4] — 2026-09-30
 
 ### Fixed

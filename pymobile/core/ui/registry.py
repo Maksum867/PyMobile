@@ -91,6 +91,12 @@ WIDGET_CAPABILITIES: tuple[WidgetCapability, ...] = (
     WidgetCapability("Dialog", web=True, gui=True),
     WidgetCapability("DatePicker", web=True, gui=True),
     WidgetCapability("TimePicker", web=True, gui=True),
+    WidgetCapability("Icon", web=True, gui=True),
+    WidgetCapability("IconButton", web=True, gui=True),
+    WidgetCapability("AutoComplete", web=True, gui=True),
+    WidgetCapability("RangeSlider", web=True, gui=True),
+    WidgetCapability("PageView", web=True, gui=True),
+    WidgetCapability("Chart", web=True, gui=True),
 )
 
 #: Types an application declared as handled by renderer code of its own.

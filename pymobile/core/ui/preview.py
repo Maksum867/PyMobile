@@ -21,6 +21,7 @@ from typing import Any
 
 from ...log import get_logger
 from .contract import text_value
+from .extras_preview import extra_ascii
 from .flow import flow_lines, line_offset
 
 __all__ = [
@@ -311,6 +312,10 @@ def _node_lines(node: dict[str, Any], *, show_ids: bool = False) -> list[str]:
         # A flex wrapper draws exactly as its child; the space it claims is a
         # device-side concept with no meaning in a text picture.
         rows = _join_vertical([_node_lines(child, show_ids=show_ids) for child in children])
+    elif node_type == "PageView":
+        props = node.get("props", {})
+        rows = _join_vertical([_node_lines(child, show_ids=show_ids) for child in children])
+        rows.append(f"◂ {int(props.get('value', 0)) + 1} / {props.get('item_count', 1)} ▸")
     elif node_type in (
         "Column",
         "ScrollView",
@@ -418,6 +423,9 @@ def _leaf_lines(node: dict[str, Any], show_ids: bool = False) -> list[str]:
     node_type = node.get("type", "")
     props = node.get("props", {})
     disabled = not node.get("enabled", True)
+
+    if node_type in ("Icon", "IconButton", "AutoComplete", "RangeSlider", "Chart"):
+        return extra_ascii(node)
 
     if node_type == "Label":
         text = text_value(props.get("text", ""))

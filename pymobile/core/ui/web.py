@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...log import get_logger
 from .contract import text_value
+from .extras_preview import EXTRA_SCRIPT, render_extra_html
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..app import App
@@ -103,6 +104,7 @@ _PAGE = """<!doctype html>
   </div>
 </div>
 <script>
+{extra_script}
 let version = {version};
 const scrolled = {{}};
 async function send(id, kind, value) {{
@@ -659,6 +661,9 @@ def render_html(node: dict[str, Any]) -> str:
             f"onchange=\"send(this.dataset.wid,'change',this.value)\">"
         )
 
+    if kind in ("Icon", "IconButton", "AutoComplete", "RangeSlider", "PageView", "Chart"):
+        return render_extra_html(node, render_html, css)
+
     return f'<div class="muted">&lt;{escape(kind)}&gt;</div>'
 
 
@@ -745,6 +750,7 @@ class WebPreview:
             title=escape(state["title"]),
             body=state["body"],
             version=state["version"],
+            extra_script=EXTRA_SCRIPT,
             **self._theme_vars(),
         )
 

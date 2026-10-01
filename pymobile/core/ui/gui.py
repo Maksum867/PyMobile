@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...log import get_logger
 from .contract import text_value
+from .extras_preview import build_extra_gui, patch_extra_gui
 from .flow import flow_lines, line_offset
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -105,6 +106,9 @@ def skeleton(node: dict[str, Any]) -> tuple[Any, ...]:
         for name in ("refreshable", "refreshing", "swipe_left", "swipe_right")
         if name in props
     )
+    if node.get("type") == "PageView":
+        # Another page is another subtree: it cannot be patched into this one.
+        extra += (props.get("value"), props.get("item_count"), props.get("loop"))
     return (
         node.get("type"),
         node.get("id"),
@@ -199,6 +203,7 @@ class GuiPreview:
         #: Leaf widgets by widget id, used to patch instead of rebuild.
         self._widgets: dict[str, Any] = {}
         self._variables: dict[str, Any] = {}
+        self._extra_states: dict[str, Any] = {}
         self._skeleton: tuple[Any, ...] | None = None
         self._patching = False
         self._closing = False
@@ -264,6 +269,7 @@ class GuiPreview:
             child.destroy()
         self._widgets.clear()
         self._variables.clear()
+        self._extra_states.clear()
         self._build(self._canvas, tree)
 
     def _patch(self, node: dict[str, Any]) -> None:
@@ -279,7 +285,11 @@ class GuiPreview:
         props = node.get("props", {})
         kind = node.get("type")
 
-        if widget is not None:
+        if kind in ("Icon", "IconButton", "AutoComplete", "RangeSlider", "PageView", "Chart"):
+            patch_extra_gui(self, node)
+        elif kind == "RatingBar" and widget is not None:
+            self._paint_stars(widget, props.get("rating", 0))
+        elif widget is not None:
             state = "normal" if node.get("enabled", True) else "disabled"
             if kind in ("Button", "TextInput", "Switch"):
                 widget.configure(state=state)
@@ -305,6 +315,16 @@ class GuiPreview:
 
         for child in node.get("children", ()):
             self._patch_node(child)
+
+    @staticmethod
+    def _paint_stars(frame: Any, rating: Any) -> None:
+        """Show ``rating`` as filled and empty stars (rounded to whole stars)."""
+        try:
+            filled = round(float(rating or 0))
+        except (TypeError, ValueError):
+            filled = 0
+        for index, star in enumerate(frame.stars):
+            star.configure(text="★" if index < filled else "☆")
 
     def _sync_snackbar(self, data: dict[str, Any] | None) -> None:
         if not data:
@@ -355,6 +375,10 @@ class GuiPreview:
                 self._build_row(parent, node, background)
             else:
                 self._build_scroll(parent, node, background)
+            return
+
+        if kind in ("Icon", "IconButton", "AutoComplete", "RangeSlider", "PageView", "Chart"):
+            build_extra_gui(self, parent, node, background)
             return
 
         if kind in _VERTICAL:
@@ -510,13 +534,23 @@ class GuiPreview:
             return
 
         if kind == "RatingBar":
-            tk.Label(
-                parent,
-                text="★" * int(float(props.get("rating", 0) or 0)),
-                bg=background,
-                fg=self._colour(style.get("color"), _PALETTE["text"]),
-                anchor="w",
-            ).pack(fill="x", pady=pad)
+            maximum = max(1, int(props.get("maximum", 5) or 5))
+            frame = tk.Frame(parent, bg=background)
+            frame.pack(anchor="w", pady=pad)
+            colour = self._colour(style.get("color"), _PALETTE["text"])
+            stars: list[Any] = []
+            for number in range(1, maximum + 1):
+                star = tk.Label(frame, bg=background, fg=colour, font=("TkDefaultFont", 18))
+                star.pack(side="left")
+                if node.get("enabled", True):
+                    star.bind(
+                        "<Button-1>",
+                        lambda _event, n=number: self._dispatch(widget_id, "change", str(float(n))),
+                    )
+                stars.append(star)
+            frame.stars = stars  # type: ignore[attr-defined]
+            self._paint_stars(frame, props.get("rating", 0))
+            self._widgets[widget_id] = frame
             return
 
         if kind == "Dropdown":

@@ -491,6 +491,16 @@ class App:
             "ui event %s on %s (type=%s) value=%r", kind, widget_id, type(widget).__name__, value
         )
 
+        if kind in ("press", "long_press", "change", "select", "toggle", "search",
+                    "increment", "decrement", "swipe", "refresh", "load_more"):
+            # Composite widgets (Form, TabView, Card ...) mark themselves with
+            # ``_gates_events``: disabling them disables everything inside.
+            ancestor = widget.parent
+            while ancestor is not None:
+                if getattr(ancestor, "_gates_events", False) and not ancestor.enabled:
+                    return
+                ancestor = ancestor.parent
+
         # A handler that raises must not take the application down with it, and
         # a malformed value from a front end (Stepper ← "abc") must not either.
         # Event-bus handlers and timer callbacks are already protected this way;
@@ -500,6 +510,8 @@ class App:
                 widget.press()
             elif kind == "long_press" and hasattr(widget, "long_press"):
                 widget.long_press()
+            elif kind == "select" and hasattr(widget, "_ui_select"):
+                widget._ui_select(value)
             elif kind == "change" and hasattr(widget, "_ui_set_value"):
                 widget._ui_set_value(value)
             elif kind == "change" and hasattr(widget, "set_value"):

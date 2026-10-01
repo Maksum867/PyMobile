@@ -755,6 +755,8 @@ class _Layout:
             return self._wrap(props, style, children, w, fill)
         if kind == "Stack":
             return self._stack(style, children, w, fill, force_h)
+        if kind == "PageView":
+            return self._vertical("Column", node, props, style, children[:1], w, True, force_h)
         if kind in ("Expanded", "Flexible"):
             pad = self._padding(style, (0, 0, 0, 0))
             inner = (
@@ -1207,7 +1209,7 @@ class _Layout:
             fill,
             pad=(16 + inset_x, 10, 16 + inset_x, 10),
             min_h=48,
-            min_w=88,
+            min_w=88 if style.get("min_width") is None else 0,
             align="center",
             background=background,
         )
@@ -1224,6 +1226,12 @@ class _Layout:
     ) -> _Box:
         p = self.p
         text = text_value(props.get("text", ""))
+        if kind in ("Icon", "IconButton", "AutoComplete", "RangeSlider", "Chart"):
+            from .extras_preview import extra_mockup
+
+            drawn: _Box | None = extra_mockup(self, kind, node, w, fill)
+            if drawn is not None:
+                return drawn
         if kind == "Label":
             return self._text_box(text, 16, p["TEXT"], style, w, fill)
         if kind == "Link":
@@ -1486,7 +1494,8 @@ class _Layout:
             rating = float(props.get("rating", 0) or 0)
         except (TypeError, ValueError):
             rating = 0.0
-        size = 40.0
+        # As on the phone: stars shrink to fit rather than run off the screen.
+        size = max(1.0, min(40.0, w / count))
 
         def star(cx: float, cy: float, r: float) -> list[tuple[float, float]]:
             points = []

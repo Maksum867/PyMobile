@@ -60,6 +60,7 @@ _DESKTOP_ONLY_FRAMEWORK = (
     "core/ui/gui.py",
     "core/ui/web.py",
     "core/ui/preview.py",
+    "core/ui/extras_preview.py",
 )
 
 
@@ -355,6 +356,7 @@ class NativeBackend:
             "Native.java",
             "DeviceServices.java",
             "ViewBuilder.java",
+            "AdvancedViews.java",
             "PythonRuntime.java",
             "MainActivity.java",
         ):

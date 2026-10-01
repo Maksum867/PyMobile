@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .charts import BarChart, LineChart, PieChart
 from .components import (
     Avatar,
     Badge,
@@ -26,7 +27,9 @@ from .components import (
     Switch,
     TextInput,
 )
+from .controls import AutoComplete, FloatingActionButton, Icon, IconButton, PageView, RangeSlider
 from .dialogs import AlertDialog, BottomSheet, ConfirmDialog, Dialog
+from .drawing import ICON_NAMES
 from .layout import (
     Column,
     Divider,
@@ -41,6 +44,21 @@ from .layout import (
 )
 from .list import List, ListTile
 from .navigation import BottomNavigation
+from .patterns import (
+    Accordion,
+    Calendar,
+    Card,
+    Carousel,
+    DateRangePicker,
+    EmptyState,
+    ExpansionPanel,
+    Form,
+    FormField,
+    MultiSelect,
+    Skeleton,
+    Tabs,
+    TabView,
+)
 from .pickers import DatePicker, TimePicker
 from .registry import WidgetCapability, supported_by, widget_types
 from .screen import Navigator, Screen
@@ -50,6 +68,30 @@ from .theme import Theme
 from .widget import Container, Widget
 
 __all__ = [
+    "ICON_NAMES",
+    "Icon",
+    "IconButton",
+    "FloatingActionButton",
+    "AutoComplete",
+    "RangeSlider",
+    "PageView",
+    "Card",
+    "FormField",
+    "Form",
+    "Tabs",
+    "TabView",
+    "ExpansionPanel",
+    "Accordion",
+    "EmptyState",
+    "Skeleton",
+    "MultiSelect",
+    "Calendar",
+    "DateRangePicker",
+    "Carousel",
+    "BarChart",
+    "LineChart",
+    "PieChart",
+
     "Widget",
     "Container",
     "Label",

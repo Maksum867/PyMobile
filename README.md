@@ -30,7 +30,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.8.4`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.9.0`) and read the
 > changelog before upgrading. What may change, and how much notice you get, is
 > written down in the
 > [versioning and deprecation policy](#versioning-and-deprecation-policy). Bug
@@ -645,6 +645,56 @@ DatePicker(value="2026-09-19", minimum="2026-01-01",
            on_change=lambda iso: print(iso))
 TimePicker(value="14:30", on_change=self.on_time)
 ```
+
+### Cards, forms, tabs and other extended components
+
+These components are exported from `pymobile` like the basic ones. Cards, forms,
+tabs, accordions, states, multi-select, calendars and the carousel are *compositions*
+of existing widget types (`Column`, `Row`, `Grid`, `Wrap`, `Button`, `Label`, `Chip`),
+so they need no new Java. `Icon`, `IconButton`, `AutoComplete`, `RangeSlider`,
+`PageView` and the charts are native types and live in `ViewBuilder.java` /
+`AdvancedViews.java` (the bundled `classes.dex` already contains them).
+
+```python
+Card(Label("Body"), title="Profile", actions=[Button("Edit")])
+
+Form(
+    FormField("email", "Email", required=True, rules=["email"]),
+    FormField("password", "Password", password=True, rules=[{"min_length": 8}]),
+    on_submit=lambda values: print(values),
+    messages={"required": "обов'язкове поле"},   # same keys as Validator(messages=)
+)                                                # call form.submit() from a Button
+
+TabView({"home": HomeView(), "stats": lambda: StatsView()}, labels={"home": "Головна"})
+ExpansionPanel("Details", Label("…")); Accordion(panel_a, panel_b)   # one open at a time
+MultiSelect({"a": "Alpha", "b": "Beta"}, ["a"], maximum_selected=2)
+AutoComplete(["Kyiv", "Lviv"], threshold=2, on_select=print)
+RangeSlider(20, 70, minimum=0, maximum=100, step=5, on_change=print)   # value == (low, high)
+IconButton("add", label="Add item", on_press=self.add)    # label is required for TalkBack
+PageView(page_a, page_b)   # or PageView(item_count=100, builder=make_page)
+Carousel(page_a, page_b)   # PageView + buttons + "1 / 2" indicator
+Calendar("2026-10-01"); DateRangePicker(on_change=print)   # ISO dates
+BarChart({"Jan": 4, "Feb": -2}); LineChart([1, 3, 2]); PieChart({"A": 3, "B": 1})
+EmptyState("Nothing here", action_label="Add", on_action=self.add); Skeleton(3)
+```
+
+Things worth knowing:
+
+- Keep stateful ones (`Form`, `TabView`, `PageView`, `MultiSelect`, `Calendar` …) in
+  `__init__` or on `self`, not created fresh inside `build()`, when their state must
+  survive `Screen.refresh()`. They repair their own parent links after a refresh.
+- Disabling a `Form`, `TabView`, `Card`… (`enabled=False`) blocks events for every
+  widget inside it, not only for the container.
+- `TabView` is not a nested `Screen`: the owning screen renders the active content.
+  A builder (`lambda: …`) creates fresh content on selection; keep the data outside.
+- `Icon` names are in `pymobile.ICON_NAMES`; they are drawn as vectors, not emoji.
+  `IconButton` must be at least 48 dp and have a non-empty `label`.
+- `RangeSlider` snaps to `step` from `minimum`; the phone commits the value when the
+  finger is lifted. `PageView` renders only the selected page.
+- Charts are read-only, equally spaced, and support signed values. `PieChart` rejects
+  negative values. Large inputs are labelled sparsely instead of crowding the axis.
+- Remote suggestions for `AutoComplete`: run the request in a job and call
+  `set_options(...)`; debouncing belongs to the application.
 
 ### Spacer
 
@@ -2071,7 +2121,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.8.4", "platform": "android",
+# {"framework_version": "0.9.0", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 
