@@ -574,6 +574,97 @@ class TestJdkDiscovery:
 
 
 # --------------------------------------------------------------------------
+# zipalign flags for 16 KB pages (found in CI, build-tools 37.0.0)
+# --------------------------------------------------------------------------
+class TestZipAlignPageSizeFlag:
+    """``-p`` and ``-P`` are mutually exclusive since build-tools 35.
+
+    The tree used to run ``zipalign -f -p 4 -P 16``: every build-tools that
+    has ``-P`` (35, 36, 37) refuses that combination with "Invalid options:
+    '-P <pagesize_kb>' and '-p' cannot be used in combination" and exits 2, so
+    the build died in the alignment stage — but only where a real SDK was
+    installed (CI), which is why the unit tests never saw it. The command is
+    asserted here so the flag cannot come back silently.
+    """
+
+    def _backend(self, tmp_path: Path, version: str) -> NativeBackend:
+        build_tools = tmp_path / "build-tools" / version
+        build_tools.mkdir(parents=True, exist_ok=True)
+        jdk = tmp_path / "jdk" / "bin"
+        jdk.mkdir(parents=True, exist_ok=True)
+        (jdk / "javac").write_text("", encoding="utf-8")
+        (tmp_path / "android.jar").write_text("", encoding="utf-8")
+        toolchain = Toolchain(
+            sdk=tmp_path,
+            build_tools=build_tools,
+            platform_jar=tmp_path / "android.jar",
+            java_home=tmp_path / "jdk",
+        )
+        return NativeBackend(ProjectConfig(root=tmp_path), toolchain, tmp_path / "runtime")
+
+    def test_the_command_passes_the_page_size_without_the_old_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import pymobile.compiler.backends.native as native_module
+
+        seen: list[list[str]] = []
+
+        def record(command: list[Any], **_: Any) -> str:
+            seen.append([str(part) for part in command])
+            return "ok"
+
+        monkeypatch.setattr(native_module, "_run", record)
+        backend = self._backend(tmp_path, "37.0.0")
+        backend._align(tmp_path / "in.apk", tmp_path / "out.apk")  # type: ignore[attr-defined]
+        (command,) = seen
+        assert "-P" in command and command[command.index("-P") + 1] == "16"
+        assert "-p" not in command, command
+        # The alignment argument stays: it is the positional one, and without
+        # it zipalign 37 refuses to run at all.
+        assert command[-3] == "4", command
+
+    def test_a_tool_without_the_flag_falls_back_to_the_alignment_argument(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import pymobile.compiler.backends.native as native_module
+        from pymobile.errors import PyMobileError
+
+        seen: list[list[str]] = []
+
+        def refuse_the_flag(command: list[Any], **_: Any) -> str:
+            seen.append([str(part) for part in command])
+            if "-P" in [str(part) for part in command]:
+                raise PyMobileError("zipalign failed (exit 2)", hint="unknown flag")
+            return "ok"
+
+        monkeypatch.setattr(native_module, "_run", refuse_the_flag)
+        backend = self._backend(tmp_path, "34.0.0")
+        backend._align(tmp_path / "in.apk", tmp_path / "out.apk")  # type: ignore[attr-defined]
+        # build-tools 34 has no -P at all: the old shape is used directly.
+        (command,) = seen
+        assert "-P" not in command and command[2] == "16384", command
+
+    def test_an_unknown_version_tries_both_shapes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import pymobile.compiler.backends.native as native_module
+        from pymobile.errors import PyMobileError
+
+        seen: list[list[str]] = []
+
+        def refuse_everything(command: list[Any], **_: Any) -> str:
+            seen.append([str(part) for part in command])
+            raise PyMobileError("zipalign failed (exit 2)", hint="nope")
+
+        monkeypatch.setattr(native_module, "_run", refuse_everything)
+        backend = self._backend(tmp_path, "beta")  # no numeric version to trust
+        with pytest.raises(PyMobileError, match="both shapes"):
+            backend._align(tmp_path / "in.apk", tmp_path / "out.apk")  # type: ignore[attr-defined]
+        assert len(seen) == 2, seen
+        assert "-P" in seen[0] and "-P" not in seen[1]
+
+
+# --------------------------------------------------------------------------
 # Documentation that disagreed with the code (PM-21, PM-22)
 # --------------------------------------------------------------------------
 class TestDocumentation:

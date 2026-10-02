@@ -889,10 +889,9 @@ else:
         modern: list[str | Path] = [
             self.toolchain.zipalign,
             "-f",
-            "-p",
-            "4",
             "-P",
             "16",
+            "4",
             staged,
             aligned,
         ]
