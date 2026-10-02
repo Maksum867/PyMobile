@@ -91,9 +91,18 @@ public class MainActivity extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                int status = PythonRuntime.run(getApplicationContext(), "main.py");
+                // The entry point comes from the build (assets/pymobile.properties):
+                // pymobile.toml may name any module, and optimize = true ships
+                // bytecode. Hard-coding "main.py" here made such an APK install
+                // fine and then fail with FileNotFoundError on start.
+                String entrypoint = PythonRuntime.entrypointFromAssets(getAssets());
+                int status = PythonRuntime.run(getApplicationContext(), entrypoint);
                 Log.i(TAG, "python exited with " + status);
                 if (status != 0) {
+                    // The runner reports non-zero for a missing entry point and
+                    // for an exception during startup (it used to print the
+                    // traceback and return 0, so this placeholder never
+                    // appeared and the app looked frozen on "Starting Python…").
                     postPlaceholder("Python exited with code " + status
                             + "\n\nRun `adb logcat -s pymobile.stderr` for details.");
                 }

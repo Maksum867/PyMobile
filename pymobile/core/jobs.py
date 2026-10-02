@@ -122,6 +122,10 @@ class JobHandle:
 
         You may pass ``on_error`` without ``on_done``/``on_success`` to handle
         only failures — the success value is silently discarded.
+
+        Cancelling the handle suppresses the callbacks even when one of them is
+        already sitting in the delivery queue: the wrapper re-checks
+        ``cancelled`` right before it runs.
         """
         if on_done is not None and on_success is not None:
             raise TypeError("pass either on_done or on_success, not both")
@@ -134,6 +138,11 @@ class JobHandle:
                 return self
 
             def callback() -> None:
+                # Re-check at delivery time: cancel() may have run after this
+                # wrapper was queued, and the documented contract is that a
+                # cancelled job fires no callbacks at all.
+                if self._cancelled:
+                    return
                 self._fire(done, on_error)
 
             if not self._done.is_set():
@@ -272,8 +281,7 @@ class JobManager:
                         self._jobs.pop(handle_id, None)
 
         handle = JobHandle(handle_id, cancel_fn=cancelled.set, deliver=self._deliver)
-        with self._lock:
-            self._jobs[handle_id] = handle
+        self._track(handle)
         threading.Thread(target=run, name=f"pymobile-job-{handle_id}", daemon=True).start()
         return handle
 
@@ -312,11 +320,29 @@ class JobManager:
                     if self._jobs.get(handle_id) is handle:
                         self._jobs.pop(handle_id, None)
 
-        handle = JobHandle(handle_id, cancel_fn=lambda: stop.set(), deliver=self._deliver)
-        with self._lock:
-            self._jobs[handle_id] = handle
+        handle = JobHandle(handle_id, cancel_fn=stop.set, deliver=self._deliver)
+        self._track(handle)
         threading.Thread(target=run, name=f"pymobile-job-{handle_id}", daemon=True).start()
         return handle
+
+    def _track(self, handle: JobHandle) -> None:
+        """Register ``handle``, replacing — and cancelling — an older same-name job.
+
+        Two ``every(..., name="sync")`` calls used to leave two workers running
+        while ``_jobs["sync"]`` kept only the second one: the first was
+        untracked, so ``shutdown()``/``cancel_all()`` never stopped it and its
+        side effects outlived the app. An explicit name now means "at most one
+        live job": the previous one is cancelled (loudly) instead of orphaned.
+        """
+        with self._lock:
+            previous = self._jobs.get(handle.id)
+            self._jobs[handle.id] = handle
+        if previous is not None and not previous.done and not previous.cancelled:
+            _log.warning(
+                "job %r already exists and is being replaced; the previous one is cancelled",
+                handle.id,
+            )
+            previous.cancel()
 
     def cancel(self, handle_id: str) -> bool:
         """Cancel a job by id; returns whether it was found."""

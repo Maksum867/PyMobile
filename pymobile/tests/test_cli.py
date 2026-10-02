@@ -453,9 +453,18 @@ class TestRunGui:
     def test_gui_flag_exists(self) -> None:
         assert build_parser().parse_args(["run", "--gui"]).gui is True
 
-    def test_web_host_defaults_to_all_interfaces(self) -> None:
+    def test_web_host_defaults_to_loopback(self) -> None:
+        """The preview is a private window by default (PM-28).
+
+        It was bound to 0.0.0.0 out of the box — readable and clickable by
+        anything that could reach the port, with no authentication. Serving
+        the network is now an explicit ``--host 0.0.0.0`` (the preview then
+        generates and requires a session token).
+        """
         args = build_parser().parse_args(["run", "--web"])
-        assert args.host == "0.0.0.0"
+        assert args.host == "127.0.0.1"
+        exposed = build_parser().parse_args(["run", "--web", "--host", "0.0.0.0"])
+        assert exposed.host == "0.0.0.0"
 
     def test_missing_tkinter_is_explained(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch

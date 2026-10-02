@@ -16,6 +16,7 @@
 #include <jni.h>
 #include <pthread.h>
 #include <Python.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -30,51 +31,236 @@ static JavaVM *g_vm = NULL;
 static jclass g_native_class = NULL;
 
 /* ------------------------------------------------------------------ */
+/* Text conversion: UTF-16 (JVM) ↔ UTF-8 (CPython)                     */
+/* ------------------------------------------------------------------ */
+
+/* Do NOT use GetStringUTFChars/NewStringUTF for application text.
+ *
+ * Those speak *Modified* UTF-8: a character outside the BMP (any emoji, most
+ * historic scripts) travels as a CESU-8 surrogate pair (ED A0 BD ED B8 80 for
+ * U+1F600). Python's strict UTF-8 decoder rejects those bytes, so an emoji
+ * typed into a TextInput raised UnicodeDecodeError inside next_event() and the
+ * event loop died; the same bytes sent the other way rendered as mojibake.
+ * Both directions are converted here by hand, and every queued string carries
+ * an explicit length: a decoded event may legitimately contain U+0000, which
+ * no NUL-terminated representation can carry. */
+
+typedef struct {
+    char *data;   /* UTF-8 bytes, NUL-terminated *and* length-delimited */
+    size_t len;
+} Utf8Text;
+
+static Utf8Text text_empty(void) {
+    Utf8Text text = {NULL, 0};
+    return text;
+}
+
+static void text_free(Utf8Text *text) {
+    free(text->data);
+    text->data = NULL;
+    text->len = 0;
+}
+
+static int text_copy(Utf8Text *target, const char *data, size_t len) {
+    target->data = (char *)malloc(len + 1);
+    if (!target->data) {
+        target->len = 0;
+        return 0;
+    }
+    if (len) {
+        memcpy(target->data, data, len);
+    }
+    target->data[len] = '\0';
+    target->len = len;
+    return 1;
+}
+
+/* Append one code point (0..0x10FFFF) as UTF-8; returns the byte count. */
+static size_t utf8_encode(uint32_t code, char *out) {
+    if (code <= 0x7F) {
+        out[0] = (char)code;
+        return 1;
+    }
+    if (code <= 0x7FF) {
+        out[0] = (char)(0xC0 | (code >> 6));
+        out[1] = (char)(0x80 | (code & 0x3F));
+        return 2;
+    }
+    if (code <= 0xFFFF) {
+        out[0] = (char)(0xE0 | (code >> 12));
+        out[1] = (char)(0x80 | ((code >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (code & 0x3F));
+        return 3;
+    }
+    out[0] = (char)(0xF0 | (code >> 18));
+    out[1] = (char)(0x80 | ((code >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((code >> 6) & 0x3F));
+    out[3] = (char)(0x80 | (code & 0x3F));
+    return 4;
+}
+
+/* Java string → fresh standard UTF-8 with an explicit length. */
+static Utf8Text jstring_to_utf8(JNIEnv *env, jstring value) {
+    Utf8Text text = text_empty();
+    if (!value) {
+        return text;
+    }
+    jsize units = (*env)->GetStringLength(env, value);
+    if (units <= 0) {
+        return text;
+    }
+    const jchar *chars = (*env)->GetStringChars(env, value, NULL);
+    if (!chars) {
+        return text;
+    }
+    /* Worst case four bytes per unit; a surrogate pair collapses to one. */
+    char *buffer = (char *)malloc((size_t)units * 4 + 1);
+    if (buffer) {
+        size_t used = 0;
+        for (jsize i = 0; i < units; i++) {
+            uint32_t code = chars[i];
+            if (code >= 0xD800 && code <= 0xDBFF && i + 1 < units
+                    && chars[i + 1] >= 0xDC00 && chars[i + 1] <= 0xDFFF) {
+                code = 0x10000 + ((code - 0xD800) << 10) + (chars[i + 1] - 0xDC00);
+                i++;
+            } else if (code >= 0xD800 && code <= 0xDFFF) {
+                /* Lone surrogate: no standard UTF-8 form exists. */
+                code = 0xFFFD;
+            }
+            used += utf8_encode(code, buffer + used);
+        }
+        buffer[used] = '\0';
+        text.data = buffer;
+        text.len = used;
+    }
+    (*env)->ReleaseStringChars(env, value, chars);
+    return text;
+}
+
+/* Python UTF-8 (length-delimited) → Java string; invalid bytes → U+FFFD. */
+static jstring utf8_to_jstring(JNIEnv *env, const char *data, size_t len) {
+    jchar *units = (jchar *)malloc(len * sizeof(jchar) + sizeof(jchar));
+    if (!units) {
+        return NULL;
+    }
+    size_t used = 0;
+    size_t i = 0;
+    while (i < len) {
+        unsigned char byte = (unsigned char)data[i];
+        uint32_t code = 0xFFFD;
+        size_t width = 1;
+        if (byte < 0x80) {
+            code = byte;
+        } else if ((byte & 0xE0) == 0xC0) {
+            width = 2;
+            code = byte & 0x1F;
+        } else if ((byte & 0xF0) == 0xE0) {
+            width = 3;
+            code = byte & 0x0F;
+        } else if ((byte & 0xF8) == 0xF0) {
+            width = 4;
+            code = byte & 0x07;
+        }
+        if (width > 1) {
+            if (i + width > len) {
+                code = 0xFFFD;
+            } else {
+                for (size_t k = 1; k < width; k++) {
+                    unsigned char next = (unsigned char)data[i + k];
+                    if ((next & 0xC0) != 0x80) {
+                        code = 0xFFFD;
+                        width = 1;
+                        break;
+                    }
+                    code = (code << 6) | (next & 0x3F);
+                }
+                if (width > 1 && (code > 0x10FFFF
+                        || (code >= 0xD800 && code <= 0xDFFF))) {
+                    code = 0xFFFD;
+                }
+            }
+        }
+        if (code <= 0xFFFF) {
+            units[used++] = (jchar)code;
+        } else {
+            code -= 0x10000;
+            units[used++] = (jchar)(0xD800 + (code >> 10));
+            units[used++] = (jchar)(0xDC00 + (code & 0x3FF));
+        }
+        i += width;
+    }
+    jstring result = (*env)->NewString(env, units, (jsize)used);
+    free(units);
+    return result;
+}
+
+/* ------------------------------------------------------------------ */
 /* Event queue: Java UI thread → Python thread                         */
 /* ------------------------------------------------------------------ */
 
 typedef struct Event {
-    char *widget_id;
-    char *type;
-    char *value;
+    Utf8Text widget_id;
+    Utf8Text type;
+    Utf8Text value;
     struct Event *next;
 } Event;
 
 static Event *q_head = NULL;
 static Event *q_tail = NULL;
+static int q_count = 0;
 static pthread_mutex_t q_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t q_cond = PTHREAD_COND_INITIALIZER;
 static int q_stopped = 0;
 
+/* The UI thread must never block on the interpreter, and a burst of events
+ * (fast scrolling, a slow handler) must not grow memory without bound. Past
+ * this many pending events the *oldest* one is dropped: input belonging to a
+ * screen the app has already left is the least valuable item in the queue.
+ * Dropping the newest would lose the tap the user just made; blocking the UI
+ * thread would freeze the app. */
+#define MAX_PENDING_EVENTS 1024
+
 static void event_free(Event *event) {
-    free(event->widget_id);
-    free(event->type);
-    free(event->value);
+    text_free(&event->widget_id);
+    text_free(&event->type);
+    text_free(&event->value);
     free(event);
 }
 
-static void queue_push(const char *widget_id, const char *type, const char *value) {
+static void queue_push(const char *widget_id, size_t widget_id_len, const char *type,
+                       size_t type_len, const char *value, size_t value_len) {
     Event *event = (Event *)calloc(1, sizeof(Event));
     if (!event) {
         return;
     }
-    event->widget_id = strdup(widget_id ? widget_id : "");
-    event->type = strdup(type ? type : "");
-    event->value = strdup(value ? value : "");
-    if (!event->widget_id || !event->type || !event->value) {
+    if (!text_copy(&event->widget_id, widget_id, widget_id_len)
+            || !text_copy(&event->type, type, type_len)
+            || !text_copy(&event->value, value, value_len)) {
         /* Out of memory: drop the event instead of dereferencing NULL later. */
-        LOGI("dropping event: strdup failed");
+        LOGE("dropping event: out of memory");
         event_free(event);
         return;
     }
 
     pthread_mutex_lock(&q_mutex);
+    if (q_count >= MAX_PENDING_EVENTS && q_head) {
+        Event *oldest = q_head;
+        q_head = oldest->next;
+        if (!q_head) {
+            q_tail = NULL;
+        }
+        q_count--;
+        event_free(oldest);
+        LOGE("event queue is full (%d pending): dropping the oldest event", MAX_PENDING_EVENTS);
+    }
+
     if (q_tail) {
         q_tail->next = event;
     } else {
         q_head = event;
     }
     q_tail = event;
+    q_count++;
     pthread_cond_signal(&q_cond);
     pthread_mutex_unlock(&q_mutex);
 }
@@ -201,7 +387,7 @@ static PyObject *py_render(PyObject *self, PyObject *args) {
     int attached = 0;
     JNIEnv *env = jni_env(&attached);
     if (env && g_native_class) {
-        jstring jjson = (*env)->NewStringUTF(env, json);
+        jstring jjson = utf8_to_jstring(env, json, strlen(json));
         jmethodID method =
             static_method(env, "render", "(Ljava/lang/String;)V");
         if (method) {
@@ -225,7 +411,7 @@ static PyObject *call_with_string(const char *name, const char *signature, const
     int attached = 0;
     JNIEnv *env = jni_env(&attached);
     if (env && g_native_class) {
-        jstring jvalue = (*env)->NewStringUTF(env, value);
+        jstring jvalue = utf8_to_jstring(env, value, strlen(value));
         jmethodID method = static_method(env, name, signature);
         if (method) {
             if (has_bool) {
@@ -360,11 +546,11 @@ static PyObject *py_notify(PyObject *self, PyObject *args) {
     int attached = 0;
     JNIEnv *env = jni_env(&attached);
     if (env && g_native_class) {
-        jstring jtitle = (*env)->NewStringUTF(env, title);
-        jstring jbody = (*env)->NewStringUTF(env, body);
-        jstring jchannel = (*env)->NewStringUTF(env, channel_id);
-        jstring jchannelname = (*env)->NewStringUTF(env, channel_name);
-        jstring jicon = (*env)->NewStringUTF(env, small_icon);
+        jstring jtitle = utf8_to_jstring(env, title, strlen(title));
+        jstring jbody = utf8_to_jstring(env, body, strlen(body));
+        jstring jchannel = utf8_to_jstring(env, channel_id, strlen(channel_id));
+        jstring jchannelname = utf8_to_jstring(env, channel_name, strlen(channel_name));
+        jstring jicon = utf8_to_jstring(env, small_icon, strlen(small_icon));
         jmethodID method = static_method(env, "notify",
             "(Ljava/lang/String;Ljava/lang/String;IZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
         if (method) {
@@ -398,8 +584,8 @@ static PyObject *py_ensure_channel(PyObject *self, PyObject *args) {
     int attached = 0;
     JNIEnv *env = jni_env(&attached);
     if (env && g_native_class) {
-        jstring jid = (*env)->NewStringUTF(env, channel_id);
-        jstring jname = (*env)->NewStringUTF(env, channel_name);
+        jstring jid = utf8_to_jstring(env, channel_id, strlen(channel_id));
+        jstring jname = utf8_to_jstring(env, channel_name, strlen(channel_name));
         jmethodID method = static_method(env, "ensureChannel", "(Ljava/lang/String;Ljava/lang/String;I)V");
         if (method) {
             (*env)->CallStaticVoidMethod(env, g_native_class, method, jid, jname,
@@ -437,7 +623,7 @@ static PyObject *py_has_permission(PyObject *self, PyObject *args) {
     int attached = 0;
     JNIEnv *env = jni_env(&attached);
     if (env && g_native_class) {
-        jstring jperm = (*env)->NewStringUTF(env, permission);
+        jstring jperm = utf8_to_jstring(env, permission, strlen(permission));
         jmethodID method = static_method(env, "hasPermission",
                                                      "(Ljava/lang/String;)Z");
         if (method) {
@@ -469,11 +655,11 @@ static PyObject *py_device_language(PyObject *self, PyObject *args) {
             if ((*env)->ExceptionCheck(env)) {
                 (*env)->ExceptionClear(env);
             } else if (value) {
-                const char *utf = (*env)->GetStringUTFChars(env, value, NULL);
-                if (utf) {
-                    result = PyUnicode_FromString(utf);
-                    (*env)->ReleaseStringUTFChars(env, value, utf);
+                Utf8Text text = jstring_to_utf8(env, value);
+                if (text.data) {
+                    result = PyUnicode_FromStringAndSize(text.data, (Py_ssize_t)text.len);
                 }
+                text_free(&text);
                 (*env)->DeleteLocalRef(env, value);
             }
         }
@@ -497,7 +683,7 @@ static PyObject *py_request_permission(PyObject *self, PyObject *args) {
     int attached = 0;
     JNIEnv *env = jni_env(&attached);
     if (env && g_native_class) {
-        jstring jperm = (*env)->NewStringUTF(env, permission);
+        jstring jperm = utf8_to_jstring(env, permission, strlen(permission));
         jmethodID method = static_method(env, "requestPermission",
                                                      "(Ljava/lang/String;)Z");
         if (method) {
@@ -529,7 +715,7 @@ static PyObject *py_open_url(PyObject *self, PyObject *args) {
     int attached = 0;
     JNIEnv *env = jni_env(&attached);
     if (env && g_native_class) {
-        jstring jurl = (*env)->NewStringUTF(env, url);
+        jstring jurl = utf8_to_jstring(env, url, strlen(url));
         jmethodID method = static_method(env, "openUrl", "(Ljava/lang/String;)Z");
         if (method) {
             opened = (*env)->CallStaticBooleanMethod(env, g_native_class, method, jurl);
@@ -556,7 +742,10 @@ static PyObject *py_next_event(PyObject *self, PyObject *args) {
     Event *event = NULL;
     Py_BEGIN_ALLOW_THREADS
     pthread_mutex_lock(&q_mutex);
-    if (!q_head && !q_stopped) {
+    /* A condition variable may wake spuriously, so its predicate must be
+     * re-checked in a loop: the old ``if`` could return None from an empty
+     * queue, and Python reads None as "the platform asked the loop to end". */
+    while (!q_head && !q_stopped) {
         if (timeout_ms < 0) {
             pthread_cond_wait(&q_cond, &q_mutex);
         } else {
@@ -569,7 +758,9 @@ static PyObject *py_next_event(PyObject *self, PyObject *args) {
                 deadline.tv_sec += 1;
                 deadline.tv_nsec -= 1000000000L;
             }
-            pthread_cond_timedwait(&q_cond, &q_mutex, &deadline);
+            if (pthread_cond_timedwait(&q_cond, &q_mutex, &deadline) == ETIMEDOUT) {
+                break;  /* deadline reached: give the interpreter its timers back */
+            }
         }
     }
     if (q_head) {
@@ -578,6 +769,7 @@ static PyObject *py_next_event(PyObject *self, PyObject *args) {
         if (!q_head) {
             q_tail = NULL;
         }
+        q_count--;
     }
     pthread_mutex_unlock(&q_mutex);
     Py_END_ALLOW_THREADS
@@ -585,9 +777,14 @@ static PyObject *py_next_event(PyObject *self, PyObject *args) {
     if (!event) {
         Py_RETURN_NONE;
     }
-    PyObject *result = Py_BuildValue("(sss)", event->widget_id, event->type, event->value);
+    /* ``s#`` carries the byte length: the payload may contain U+0000. */
+    PyObject *result = Py_BuildValue("(s#s#s#)",
+                                     event->widget_id.data, (Py_ssize_t)event->widget_id.len,
+                                     event->type.data, (Py_ssize_t)event->type.len,
+                                     event->value.data, (Py_ssize_t)event->value.len);
     event_free(event);
     return result;
+
 }
 
 /* Wake a next_event() that is blocked waiting, from any Python thread: the
@@ -595,7 +792,7 @@ static PyObject *py_next_event(PyObject *self, PyObject *args) {
 static PyObject *py_wake(PyObject *self, PyObject *args) {
     (void)self;
     (void)args;
-    queue_push("", "__wake__", "");
+    queue_push("", 0, "__wake__", 7, "", 0);
     Py_RETURN_NONE;
 }
 
@@ -648,32 +845,19 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 JNIEXPORT void JNICALL Java_org_pymobile_app_Native_dispatchEvent(
         JNIEnv *env, jclass clazz, jstring widgetIdJ, jstring typeJ, jstring valueJ) {
     (void)clazz;
-    const char *widget_id = (*env)->GetStringUTFChars(env, widgetIdJ, NULL);
-    const char *type = (*env)->GetStringUTFChars(env, typeJ, NULL);
     /* ``valueJ`` may legitimately be null (e.g. a bare "press" event carries
-     * no payload). Treat that as an empty string rather than letting
-     * ``GetStringUTFChars`` hand us a null that some Android JVMs reject when
-     * later released. */
-    const char *value = "";
-    const char *fetched = NULL;
-    if (valueJ) {
-        fetched = (*env)->GetStringUTFChars(env, valueJ, NULL);
-        /* NULL means OOM inside the JVM: still queue the event, empty. */
-        if (fetched) {
-            value = fetched;
-        }
-    }
+     * no payload); jstring_to_utf8 maps both null and "" to empty text. */
+    Utf8Text widget_id = jstring_to_utf8(env, widgetIdJ);
+    Utf8Text type = jstring_to_utf8(env, typeJ);
+    Utf8Text value = jstring_to_utf8(env, valueJ);
 
-    queue_push(widget_id, type, value);
+    queue_push(widget_id.data ? widget_id.data : "", widget_id.len,
+               type.data ? type.data : "", type.len,
+               value.data ? value.data : "", value.len);
 
-    (*env)->ReleaseStringUTFChars(env, widgetIdJ, widget_id);
-    (*env)->ReleaseStringUTFChars(env, typeJ, type);
-    if (fetched) {
-        /* Only release what the JVM handed out — never the "" literal.
-         * (The old test compared value with a "" literal: that compares
-         * pointers, not strings.) */
-        (*env)->ReleaseStringUTFChars(env, valueJ, fetched);
-    }
+    text_free(&widget_id);
+    text_free(&type);
+    text_free(&value);
 }
 
 /* Wake the Python thread so it can shut down. */
@@ -693,14 +877,131 @@ Java_org_pymobile_app_PythonRuntime_pythonIsInitialized(JNIEnv *env, jclass claz
     return Py_IsInitialized() ? JNI_TRUE : JNI_FALSE;
 }
 
+/* The packaged entry point, resolved to an existing file.
+ *
+ * ``pymobile.toml`` may name any module, and ``optimize = true`` ships
+ * bytecode only, so the build records the packaged name (and form) in
+ * ``assets/pymobile.properties``; Java passes it here. Older APKs name
+ * ``main.py``. Whatever the name, the file that actually exists wins: the
+ * runner used to receive a hard-coded ``main.py`` and failed with
+ * FileNotFoundError on a perfectly good APK.
+ */
+static int resolve_entry(const char *app_dir, const char *entry, char *out, size_t out_size) {
+    if (!entry || !*entry) {
+        entry = "main.py";
+    }
+    if (entry[0] == '/') {
+        snprintf(out, out_size, "%s", entry);
+    } else {
+        snprintf(out, out_size, "%s/%s", app_dir, entry);
+    }
+    if (access(out, F_OK) == 0) {
+        return 0;
+    }
+    /* optimize = true packages ``x.pyc`` without ``x.py`` (and vice versa). */
+    if (strlen(entry) > 3 && strcmp(entry + strlen(entry) - 3, ".py") == 0) {
+        snprintf(out, out_size, "%s/%sc", app_dir, entry);
+    } else if (strlen(entry) > 4 && strcmp(entry + strlen(entry) - 4, ".pyc") == 0) {
+        snprintf(out, out_size, "%s/%.*s", app_dir, (int)(strlen(entry) - 1), entry);
+    } else {
+        return -1;
+    }
+    return access(out, F_OK) == 0 ? 1 : -1;
+}
+
+/* ``globals[name] = value`` without leaking the value's reference. */
+static int set_global_string(PyObject *globals, const char *name, const char *value) {
+    PyObject *text = PyUnicode_FromString(value);
+    if (!text) {
+        return 0;
+    }
+    int ok = PyDict_SetItemString(globals, name, text) == 0;
+    Py_DECREF(text);
+    return ok;
+}
+
+/* Run the packaged entry point and report what happened.
+ *
+ * The old runner printed a traceback and still returned 0, and swallowed
+ * SystemExit entirely: MainActivity only shows its error screen on a non-zero
+ * status, so a failed startup looked like a clean exit and the user stared at
+ * the "Starting Python…" placeholder. Now SystemExit keeps its exit code
+ * (``None`` counts as 0) and any other exception returns 1 after printing.
+ */
+static int run_entry_point(const char *entry_path) {
+    PyObject *main_module = PyImport_AddModule("__main__");
+    if (!main_module) {
+        PyErr_Print();
+        return 1;
+    }
+    PyObject *globals = PyModule_GetDict(main_module);
+    PyObject *code = Py_CompileString(
+        "import runpy\n"
+        "runpy.run_path(_PYMOBILE_ENTRY, run_name='__main__')\n",
+        "<pymobile-startup>", Py_file_input);
+    if (!code) {
+        PyErr_Print();
+        return 1;
+    }
+    if (!set_global_string(globals, "_PYMOBILE_ENTRY", entry_path)) {
+        Py_DECREF(code);
+        PyErr_Print();
+        return 1;
+    }
+    PyObject *result = PyEval_EvalCode(code, globals, globals);
+    Py_DECREF(code);
+    if (result) {
+        Py_DECREF(result);
+        return 0;
+    }
+    if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
+        PyObject *type = NULL, *value = NULL, *traceback = NULL;
+        long status = 0;
+        PyErr_Fetch(&type, &value, &traceback);
+        PyErr_NormalizeException(&type, &value, &traceback);
+        if (value && value != Py_None) {
+            PyObject *exit_code = PyObject_GetAttrString(value, "code");
+            if (exit_code) {
+                if (exit_code != Py_None) {
+                    status = PyLong_AsLong(exit_code);
+                    if (PyErr_Occurred()) {
+                        /* e.g. SystemExit("message") — print and use 1. */
+                        PyErr_Clear();
+                        status = 1;
+                    }
+                }
+                Py_DECREF(exit_code);
+            } else {
+                PyErr_Clear();
+                status = 1;
+            }
+        }
+        if (value && status != 0) {
+            PyErr_Display(type, value, traceback);
+        }
+        Py_XDECREF(type);
+        Py_XDECREF(value);
+        Py_XDECREF(traceback);
+        return (int)status;
+    }
+    PyErr_Print();
+    return 1;
+}
+
 JNIEXPORT jint JNICALL
 Java_org_pymobile_app_PythonRuntime_startPython(
         JNIEnv *env, jobject obj, jstring homeJ, jstring appDirJ, jstring entryJ) {
     (void)obj;
 
-    const char *home = (*env)->GetStringUTFChars(env, homeJ, NULL);
-    const char *app_dir = (*env)->GetStringUTFChars(env, appDirJ, NULL);
-    const char *entry = (*env)->GetStringUTFChars(env, entryJ, NULL);
+    /* Paths may contain anything the user typed; they travel as UTF-8 with a
+     * length and are never pasted into a Python string literal (the old
+     * snprintf('%s') broke on a quote in the path). */
+    Utf8Text home_text = jstring_to_utf8(env, homeJ);
+    Utf8Text app_text = jstring_to_utf8(env, appDirJ);
+    Utf8Text entry_text = jstring_to_utf8(env, entryJ);
+    const char *home = home_text.data ? home_text.data : "";
+    const char *app_dir = app_text.data ? app_text.data : "";
+    const char *entry = entry_text.data ? entry_text.data : "";
 
     redirect_stdio_to_logcat();
     LOGI("starting python: home=%s app=%s entry=%s", home, app_dir, entry);
@@ -755,42 +1056,56 @@ Java_org_pymobile_app_PythonRuntime_startPython(
     q_stopped = 0;
     pthread_mutex_unlock(&q_mutex);
 
-    char code[4096];
-    snprintf(code, sizeof(code),
-             "import sys, os\n"
-             "sys.path.insert(0, '%s')\n"
-             "os.chdir('%s')\n"
-             "os.environ['ANDROID_APP_PATH'] = '%s'\n"
-             /* OpenSSL looks for its CA bundle at a compiled-in path that does
-                not exist on Android; point it at the one shipped in assets so
-                HTTPS can verify certificates. */
-             "_ca = os.path.join('%s', 'etc', 'ssl', 'cert.pem')\n"
-             "if os.path.exists(_ca):\n"
-             "    os.environ['SSL_CERT_FILE'] = _ca\n"
-             "    os.environ['REQUESTS_CA_BUNDLE'] = _ca\n",
-             app_dir, app_dir, app_dir, home);
-    if (PyRun_SimpleString(code) != 0) {
-        LOGE("failed to configure sys.path");
+    /* Bootstrap with the values injected as objects, never as source text. */
+    int rc = 1;
+    PyObject *main_module = PyImport_AddModule("__main__");
+    PyObject *globals = main_module ? PyModule_GetDict(main_module) : NULL;
+    if (!set_global_string(globals, "_PYMOBILE_APP", app_dir)
+            || !set_global_string(globals, "_PYMOBILE_HOME", home)) {
+        LOGE("failed to prepare the bootstrap namespace");
+        PyErr_Print();
+        goto cleanup;
+    }
+    PyObject *bootstrap = Py_CompileString(
+        "import os, sys\n"
+        "sys.path.insert(0, _PYMOBILE_APP)\n"
+        "os.chdir(_PYMOBILE_APP)\n"
+        "os.environ['ANDROID_APP_PATH'] = _PYMOBILE_APP\n"
+        "_ca = os.path.join(_PYMOBILE_HOME, 'etc', 'ssl', 'cert.pem')\n"
+        "if os.path.exists(_ca):\n"
+        "    os.environ['SSL_CERT_FILE'] = _ca\n"
+        "    os.environ['REQUESTS_CA_BUNDLE'] = _ca\n",
+        "<pymobile-config>", Py_file_input);
+    if (!bootstrap) {
+        PyErr_Print();
+        goto cleanup;
+    }
+    PyObject *prepared = PyEval_EvalCode(bootstrap, globals, globals);
+    Py_DECREF(bootstrap);
+    if (!prepared) {
+        PyErr_Print();
+        goto cleanup;
+    }
+    Py_DECREF(prepared);
+
+    char entry_path[4096];
+    int resolved = resolve_entry(app_dir, entry, entry_path, sizeof(entry_path));
+    if (resolved < 0) {
+        LOGE("entry point not found: %s/%s", app_dir, entry);
+        rc = 1;
+        goto cleanup;
+    }
+    if (resolved > 0) {
+        LOGI("entry point %s does not exist; running %s instead", entry, entry_path);
     }
 
-    char runner[2048];
-    snprintf(runner, sizeof(runner),
-             "import runpy, sys, traceback\n"
-             "try:\n"
-             "    runpy.run_path('%s/%s', run_name='__main__')\n"
-             "except SystemExit:\n"
-             "    pass\n"
-             "except BaseException:\n"
-             "    traceback.print_exc()\n"
-             "    sys.stderr.flush()\n",
-             app_dir, entry);
-
-    int rc = PyRun_SimpleString(runner);
+    rc = run_entry_point(entry_path);
     LOGI("python finished with rc=%d", rc);
 
-    (*env)->ReleaseStringUTFChars(env, homeJ, home);
-    (*env)->ReleaseStringUTFChars(env, appDirJ, app_dir);
-    (*env)->ReleaseStringUTFChars(env, entryJ, entry);
+cleanup:
+    text_free(&home_text);
+    text_free(&app_text);
+    text_free(&entry_text);
 
     Py_Finalize();
     return rc;

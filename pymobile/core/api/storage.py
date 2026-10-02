@@ -188,10 +188,17 @@ class Storage:
         )
 
     def save(self) -> None:
-        """Persist the store to disk atomically and under its process lock."""
+        """Persist the store to disk atomically and under its process lock.
+
+        Inside a :meth:`transaction` block the write is **deferred** to the end
+        of the outermost block, exactly like every other mutation: writing
+        straight to disk there used to push half-finished state out even when
+        the block later raised, which broke the all-or-nothing promise (a
+        reader saw the rolled-back value while memory had the original one).
+        """
         with self._lock:
             self._load()
-            self._write_locked()
+            self._persist()
 
     def _persist(self) -> None:
         """Write now, or at the end of the enclosing transaction; caller holds ``_lock``."""
@@ -265,25 +272,58 @@ class Storage:
             return _copy(self._data[key])
 
     def set(self, key: str, value: Any) -> Any:
-        """Set ``key`` atomically within this process and persist it."""
+        """Set ``key`` atomically within this process and persist it.
+
+        The write is all-or-nothing: when persisting fails (a read-only
+        directory, a full disk, a path that is a file) the in-memory value is
+        rolled back, so memory and disk never disagree and a later successful
+        write cannot silently commit the value that once failed.
+        """
         if not isinstance(key, str) or not key:
             raise ValueError("storage key must be a non-empty string")
         stored = _checked_copy(key, value)
         with self._lock:
             self._load()
-            self._data[key] = stored
-            self._persist()
+            self._apply_locked(key, stored)
             return value
 
+    def _apply_locked(self, key: str, value: Any) -> None:
+        """Set ``key`` and persist, restoring the previous state on failure.
+
+        Caller holds ``_lock``. The rollback matters because :meth:`set` used
+        to keep the new value in ``_data`` after the disk write had already
+        raised: the store then *looked* updated, the file was not, and the next
+        unrelated write committed the failed change along with it.
+        """
+        had = key in self._data
+        previous = self._data.get(key)
+        self._data[key] = value
+        try:
+            self._persist()
+        except BaseException:
+            if had:
+                self._data[key] = previous
+            else:
+                self._data.pop(key, None)
+            raise
+
     def delete(self, key: str) -> bool:
-        """Remove ``key`` and return whether it existed."""
+        """Remove ``key`` and return whether it existed.
+
+        Like :meth:`set`, the disk is written before the change is kept: a
+        failed write restores the key instead of leaving memory ahead of disk.
+        """
         with self._lock:
             self._load()
-            if key in self._data:
-                del self._data[key]
+            if key not in self._data:
+                return False
+            previous = self._data.pop(key)
+            try:
                 self._persist()
-                return True
-            return False
+            except BaseException:
+                self._data[key] = previous
+                raise
+            return True
 
     def contains(self, key: str) -> bool:
         """Whether ``key`` is present."""
@@ -306,11 +346,16 @@ class Storage:
         return self.contains(key)
 
     def clear(self) -> None:
-        """Remove every entry and persist the empty store."""
+        """Remove every entry and persist the empty store (all-or-nothing)."""
         with self._lock:
+            self._load()
+            previous = self._data
             self._data = {}
-            self._loaded = True
-            self._persist()
+            try:
+                self._persist()
+            except BaseException:
+                self._data = previous
+                raise
 
     # -- atomic sequences --------------------------------------------------
     @contextmanager
@@ -384,8 +429,7 @@ class Storage:
             # Validate before touching memory: a non-JSON result must not end
             # up in the store and break every later write of any key.
             stored = _checked_copy(key, new_value)
-            self._data[key] = stored
-            self._persist()
+            self._apply_locked(key, stored)
             return new_value
 
     def increment(self, key: str, amount: float = 1) -> float:
@@ -422,8 +466,7 @@ class Storage:
             self._load()
             if key in self._data:
                 return _copy(self._data[key])
-            self._data[key] = stored
-            self._persist()
+            self._apply_locked(key, stored)
             return _copy(stored)
 
     def keys(self) -> list[str]:

@@ -28,7 +28,7 @@ from typing import Any
 from ..core.config import ProjectConfig
 from ..errors import PyMobileError
 from ..log import get_logger
-from .backends.native import NativeBackend
+from .backends.native import DEBUG_KEY_ALIAS, NativeBackend, framework_asset_files
 from .cache import BuildCache, fingerprint_files
 from .collector import SourceSet, collect_sources
 from .icon import IconSet, prepare_icons
@@ -44,6 +44,18 @@ _log = get_logger("compiler")
 
 #: Python version of the interpreter embedded in native APKs.
 DEVICE_PYTHON = (3, 14)
+
+#: Asset extensions packaged without any configuration. Kept in sync with
+#: ``collector.collect_sources``; ``asset_suffixes`` in pymobile.toml adds to it.
+DEFAULT_ASSET_SUFFIXES = frozenset(
+    {".py", ".json", ".txt", ".toml", ".png", ".jpg", ".jpeg", ".webp", ".ttf", ".otf"}
+)
+
+#: Directories never considered when reporting files that were not packaged.
+_IGNORED_ASSET_DIRS = frozenset(
+    {".git", ".hg", ".svn", "__pycache__", "venv", ".venv", "build", "dist", ".pymobile"}
+)
+DEFAULT_EXCLUDE_PARTS = frozenset({".git", "build", "dist", "venv", ".venv", "__pycache__"})
 
 #: Names that make ``<receiver>.notify(...)`` a PyMobile notification: ``app``,
 #: ``self.app``, ``my_app``, ``app.notifications``, ``get_bridge()`` … A
@@ -405,11 +417,47 @@ class BuildPipeline:
         )
 
     def _collect(self) -> SourceSet:
-        """Gather the files that go into the APK."""
-        return collect_sources(
+        """Gather the files that go into the APK.
+
+        The packaged extension set is the collector's default plus whatever
+        ``asset_suffixes`` adds, and the files that are still left out are
+        reported: an app that reads ``assets/data.csv`` shipped an APK without
+        it and only found out on the device.
+        """
+        sources = collect_sources(
             self.config.source_path,
             self.config.entrypoint_path,
             exclude=self.config.exclude,
+            include_suffixes=DEFAULT_ASSET_SUFFIXES | {
+                str(suffix).lower() for suffix in self.config.asset_suffixes
+            },
+        )
+        self._warn_about_ignored_assets(sources)
+        return sources
+
+    def _warn_about_ignored_assets(self, sources: SourceSet) -> None:
+        """Name the extensions found in the sources that did not get packaged."""
+        packaged = {path.suffix.lower() for path in sources.files}
+        ignored: dict[str, int] = {}
+        for path in self.config.source_path.rglob("*"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(self.config.source_path)
+            if any(part in _IGNORED_ASSET_DIRS for part in relative.parts):
+                continue
+            suffix = path.suffix.lower()
+            if not suffix or suffix in packaged:
+                continue
+            if any(part in DEFAULT_EXCLUDE_PARTS for part in relative.parts):
+                continue
+            ignored[suffix] = ignored.get(suffix, 0) + 1
+        if not ignored:
+            return
+        listed = ", ".join(f"{suffix} ({count})" for suffix, count in sorted(ignored.items()))
+        self.warnings.append(
+            f"files under {self.config.source_path.name}/ were NOT packaged: {listed}. "
+            "Add the extensions you need with `asset_suffixes = ['…']` in "
+            "pymobile.toml (read them on device through the packaged app dir)."
         )
 
     def _compile_sources(self, sources: SourceSet, workdir: Path) -> list[tuple[str, Path]]:
@@ -492,11 +540,14 @@ class BuildPipeline:
         resources = {
             f"res/mipmap-{density}/icon.png": path for density, path in icons.files.items()
         }
+        entrypoint = sources.entrypoint.relative_to(sources.root).as_posix()
+        packaged = {name for name, _ in entries}
         metadata = (
             f"name={self.config.name}\n"
             f"package={self.config.package}\n"
             f"version={self.config.version}\n"
-            f"entrypoint={sources.entrypoint.relative_to(sources.root).as_posix()}\n"
+            f"entrypoint={entrypoint}\n"
+            f"entrypoint_type={'pyc' if f'{entrypoint}c' in packaged else 'py'}\n"
             f"optimize={int(self.config.optimize)}\n"
         )
         packager = ApkPackager(compress=True)
@@ -529,16 +580,23 @@ class BuildPipeline:
         cache = BuildCache(output_dir)
         fingerprint = self._fingerprint(sources)
         if self.use_cache:
-            cached = cache.is_fresh(fingerprint)
-            if cached is not None:
+            hit = cache.entry(fingerprint)
+            if hit is not None and self._cache_hit_is_usable(hit):
+                cached = Path(hit["artifact"])
                 duration = time.perf_counter() - started
                 _log.info("no changes detected; reusing %s", cached.name)
+                mode = hit.get("mode", self.build_mode())
                 return BuildResult(
                     apk=cached,
                     size=cached.stat().st_size,
                     entries=0,
                     duration=duration,
                     cached=True,
+                    # A reused native APK is still an installable APK; the
+                    # result used to take the dataclass default (native=False)
+                    # and callers/automation reported it as a preview package.
+                    native=mode.startswith("native"),
+                    icon_is_default=hit.get("icon", "1") == "1",
                     timings=list(self._timings),
                     warnings=list(self.warnings),
                 )
@@ -549,8 +607,16 @@ class BuildPipeline:
             icons: IconSet = self._stage("icons", lambda: self._icons(workdir))
 
             if self.native:
-                result = self._run_native(workdir, entries, icons, apk_path, started)
-                cache.save(fingerprint, result.apk)
+                result = self._run_native(
+                    workdir, sources, entries, icons, apk_path, started, fingerprint
+                )
+                cache.save(
+                    fingerprint,
+                    result.apk,
+                    mode=self.build_mode(),
+                    signer=self.signer_identity(),
+                    icon="1" if result.icon_is_default else "0",
+                )
                 return result
 
             manifest: str = self._stage("manifest", self._manifest)
@@ -558,7 +624,13 @@ class BuildPipeline:
                 "package", lambda: self._package(apk_path, manifest, entries, icons, sources)
             )
 
-        cache.save(fingerprint, package.path)
+        cache.save(
+            fingerprint,
+            package.path,
+            mode=self.build_mode(),
+            signer=self.signer_identity(),
+            icon="1" if icons.is_default else "0",
+        )
         duration = time.perf_counter() - started
         return BuildResult(
             apk=package.path,
@@ -571,13 +643,42 @@ class BuildPipeline:
             warnings=list(self.warnings),
         )
 
+    def _cache_hit_is_usable(self, entry: dict[str, str]) -> bool:
+        """Whether a cache entry really describes the artifact this build wants.
+
+        Two things are verified rather than assumed: the entry was produced in
+        the same mode, and — when both describe one — the signing identity
+        matches. An older cache file (written before the signer was recorded)
+        simply fails the check and the build runs for real, which is the safe
+        direction.
+        """
+        recorded_mode = entry.get("mode")
+        if recorded_mode is not None and recorded_mode != self.build_mode():
+            _log.debug(
+                "cache entry is for mode %r, this build is %r; rebuilding",
+                recorded_mode,
+                self.build_mode(),
+            )
+            return False
+        recorded_signer = entry.get("signer")
+        if recorded_signer is not None and recorded_signer != self.signer_identity():
+            _log.warning(
+                "ignoring the cached APK: it was signed as %s, this build asks for %s",
+                recorded_signer,
+                self.signer_identity(),
+            )
+            return False
+        return True
+
     def _run_native(
         self,
         workdir: Path,
+        sources: SourceSet,
         entries: list[tuple[str, Path]],
         icons: IconSet,
         apk_path: Path,
         started: float,
+        fingerprint: str = "",
     ) -> BuildResult:
         """Build a real, installable APK using the Android toolchain."""
         toolchain = self._stage("toolchain", find_toolchain)
@@ -606,6 +707,17 @@ class BuildPipeline:
                 f"({self.config.abis[0]} of {self.config.abis}); build one ABI at a time"
             )
 
+        # What the launcher has to run: recorded in assets/pymobile.properties
+        # and, for the prebuilt launcher, in a main.py bootstrap as well.
+        entrypoint_name = sources.entrypoint.relative_to(sources.root).as_posix()
+        packaged_names = {name for name, _ in entries}
+        entrypoint_type = "pyc" if f"{entrypoint_name}c" in packaged_names else "py"
+        backend.set_entrypoint(entrypoint_name, entrypoint_type)
+        # The launcher re-extracts its bundled Python when this changes, so an
+        # ``edit → build → adb install -r`` that keeps versionCode = 1 no
+        # longer leaves the previous build's app code on disk (PM-29).
+        backend.set_payload_digest(fingerprint)
+
         native_dir = self._stage("jni", lambda: backend.compile_jni(workdir))
         dex = self._stage("dex", lambda: backend.compile_java(workdir))
         self._verify_renderers(dex)
@@ -633,6 +745,42 @@ class BuildPipeline:
             warnings=list(self.warnings),
         )
 
+    def signer_identity(self) -> str:
+        """A stable description of the key this build will be signed with.
+
+        It belongs in the fingerprint, and in the cache metadata: the
+        fingerprint used to cover sources, config and framework files but
+        *not* the signer, so requesting a release keystore after a debug build
+        hit the cache and produced an APK signed with the debug certificate —
+        an artifact that lies about its signing identity, which breaks the
+        update/release flow. The keystore's content hash is used (never a
+        password), so replacing the key file behind the same path also
+        invalidates the cache.
+        """
+        if self.keystore is None:
+            return f"debug:{self.config.package}"
+        path = Path(self.keystore)
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        except OSError:
+            digest = "unreadable"
+        return f"release:{path.name}:{self.key_alias or DEBUG_KEY_ALIAS}:{digest}"
+
+    def build_mode(self) -> str:
+        """The artifact kind, recorded with the cache entry and fingerprint.
+
+        The two environment switches that change what is *inside* the APK are
+        part of it as well: ``PYMOBILE_BUILD_JAVA=1`` swaps the launcher dex and
+        ``PYMOBILE_BUILD_JNI=1`` swaps the native bridge, and a cache hit that
+        ignores them hands back an APK built from different code.
+        """
+        mode = "native" if self.native else "structural"
+        if os.environ.get("PYMOBILE_BUILD_JNI") == "1":
+            mode += "+jni"
+        if os.environ.get("PYMOBILE_BUILD_JAVA") == "1":
+            mode += "+java"
+        return mode
+
     def _fingerprint(self, sources: SourceSet) -> str:
         """Hash of every input that can change the artifact.
 
@@ -658,28 +806,44 @@ class BuildPipeline:
         config_digest = hashlib.blake2b(
             repr(sorted(self.config.to_dict().items())).encode("utf-8"), digest_size=8
         ).hexdigest()
-        mode = "native" if self.native else "structural"
-        if self.native and os.environ.get("PYMOBILE_BUILD_JNI") == "1":
-            mode += "+jni"
         from .. import __version__
 
-        return f"{mode}:{__version__}:{fingerprint_files(paths)}:{config_digest}"
+        return (
+            f"{self.build_mode()}:{__version__}:{fingerprint_files(paths)}:"
+            f"{config_digest}:{self.signer_identity()}"
+        )
 
 
 def _framework_inputs() -> list[Path]:
-    """The packaged Android files every APK is assembled from."""
+    """Every framework file a build packages into the APK.
+
+    The Android pieces (sources, JNI, launcher dex, bridge), the default
+    launcher icon, **and** the Python framework that ships as
+    ``assets/app/pymobile``: a fix in ``pymobile/core`` (a renderer change, a
+    bug fix) used to leave the fingerprint untouched, so ``build`` answered
+    "up to date" and reused an APK that did not contain the fix. The bundled
+    icon is in the same position — replacing it changed nothing in the key, so
+    a project without its own icon kept the old one from the cache. For a Java
+    flag/fork that only changes the dex, the difference in dex SHA is enough to
+    prove stale output.
+    """
     from ..resources import resource_path
 
     try:
         android = resource_path("android")
+        default_icon = resource_path("icons", "default_icon.png")
     except PyMobileError:  # an incomplete install fails later, with a hint
-        return []
-    return sorted(
-        path
-        for pattern in ("java/*.java", "jni/*.c", "prebuilt/*/*")
-        for path in android.glob(pattern)
-        if path.is_file()
-    )
+        android_files: list[Path] = []
+        icon_files: list[Path] = []
+    else:
+        android_files = [
+            path
+            for pattern in ("java/*.java", "jni/*.c", "prebuilt/*/*")
+            for path in android.glob(pattern)
+            if path.is_file()
+        ]
+        icon_files = [default_icon] if default_icon.is_file() else []
+    return sorted({*android_files, *icon_files, *framework_asset_files()})
 
 
 def build_apk(

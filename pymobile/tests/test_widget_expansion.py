@@ -162,7 +162,9 @@ class TestIcons:
         pressed: list[str] = []
         widget = IconButton("add", label="Add item", on_press=lambda: pressed.append("x"), id="add")
         app = running(widget, bridge, tmp_path)
-        node = next(item for item in walk(app.render()) if item["id"] == "add")
+        # The frame handed to the bridge carries generation-qualified ids
+        # ("3:add"); to_dict() reports the ids the application itself wrote.
+        node = next(item for item in walk(app.screen.to_dict()) if item["id"] == "add")
         assert node["props"]["label"] == "Add item"
         assert node["style"]["width"] == node["style"]["height"] == 48
         send(app, "add", "press")

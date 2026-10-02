@@ -25,6 +25,7 @@ from pymobile.compiler.backends.native import (
     NativeBackend,
     debug_keystore_path,
 )
+from pymobile.compiler.collector import SourceSet
 from pymobile.compiler.manifest import ANDROID_NS, build_manifest
 from pymobile.compiler.toolchain import Toolchain
 from pymobile.core.config import ProjectConfig
@@ -189,8 +190,11 @@ class TestPipelinePassesSigningOptions:
             key_alias="upload",
             key_password="s2",
         )
+        main = tmp_path / "main.py"
+        main.write_text("print('hi')\n", encoding="utf-8")
+        sources = SourceSet(root=tmp_path, files=(main,), entrypoint=main)
         with pytest.raises(Stop):
-            build._run_native(tmp_path, [], None, tmp_path / "a.apk", 0.0)  # type: ignore[arg-type]
+            build._run_native(tmp_path, sources, [], None, tmp_path / "a.apk", 0.0)  # type: ignore[arg-type]
         assert seen["keystore"] == tmp_path / "release.jks"
         assert seen["keystore_password"] == "s1"
         assert seen["key_alias"] == "upload"

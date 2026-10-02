@@ -485,6 +485,14 @@ class Container(Widget):
                     "Screen.refresh(). Use parent.remove(child) to detach one by hand."
                 ),
             )
+        # A live add() is checked against the screen's current ids: the
+        # initial-build check cannot see widgets added later, and duplicates
+        # silently clobber each other in the native renderer. Nothing is
+        # attached when the check fails, so a rejected add() leaves the tree
+        # exactly as it was.
+        screen = self.screen
+        if screen is not None:
+            screen._check_new_ids(child)
         child._parent = self
         self._children.append(child)
         self.invalidate()

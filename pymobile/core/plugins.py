@@ -20,6 +20,7 @@ Example::
 
 from __future__ import annotations
 
+import weakref
 from typing import TYPE_CHECKING
 
 from ..log import get_logger
@@ -34,9 +35,10 @@ _log = get_logger("plugins")
 
 class Plugin:
     """    Subclasses set ``name`` and may implement ``activate(app)`` plus optional
-    ``on_app_start(app)`` / ``on_app_stop(app)`` hooks. ``activate`` runs once
-    for every application the plugin is activated against — including a second
-    app created later in the same process.
+    ``on_app_start(app)`` / ``on_app_stop(app)`` hooks. ``activate`` runs **once
+    per (plugin, app) pair** — for every application the plugin is activated
+    against, including a second app created later in the same process, and
+    never twice for the same one.
     """
 
     #: Unique plugin name.
@@ -65,7 +67,12 @@ class PluginRegistry:
 
     def __init__(self) -> None:
         self._plugins: dict[str, Plugin] = {}
-        self._activated: dict[str, App] = {}
+        # plugin name -> every app it was activated for. A set, not a single
+        # slot: ``activate_all(A); activate_all(B); activate_all(A)`` used to
+        # activate A a second time (only the *latest* app was remembered),
+        # duplicating subscriptions and side effects. Weak references so a
+        # stopped-and-dropped app does not stay alive inside the registry.
+        self._activated: dict[str, weakref.WeakSet[App]] = {}
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -87,15 +94,26 @@ class PluginRegistry:
         return self._plugins.pop(name, None) is not None
 
     def activate_all(self, app: App) -> None:
-        """Run ``activate`` on every plugin that has not been activated for ``app``."""
+        """Run ``activate`` on every plugin that has not been activated for ``app``.
+
+        The registry is process-wide, so the same plugin can meet several
+        applications (tests, a preview shell, a reloaded app). Activation is
+        once per (plugin, app) pair: an app that was already activated for is
+        skipped even after another app has been activated in between.
+        """
         for name, plugin in self._plugins.items():
-            if self._activated.get(name) is app:
+            activated = self._activated.get(name)
+            if activated is None:
+                activated = weakref.WeakSet()
+                self._activated[name] = activated
+            if app in activated:
                 continue
             try:
                 plugin.activate(app)
-                self._activated[name] = app
             except Exception:
                 _log.exception("plugin %r failed to activate", name)
+                continue
+            activated.add(app)
 
     def on_app_start(self, app: App) -> None:
         """Dispatch the app-start hook to all plugins."""

@@ -67,14 +67,31 @@ class HttpCache:
         *,
         prefix: str = "http:",
         max_entries: int | None = DEFAULT_MAX_ENTRIES,
+        storage: Storage | None = None,
     ) -> None:
         if max_entries is not None and max_entries < 1:
             raise ValueError(f"max_entries must be >= 1 or None, got {max_entries}")
+        if storage is not None and path is not None:
+            raise ValueError("pass either path or storage=, not both")
         # Defaults to the shared app data store (keys namespaced by prefix).
-        self._storage = Storage(path) if path is not None else Storage()
+        #
+        # ``storage=`` adopts an existing :class:`Storage` *instance* instead of
+        # opening a second one on the same file: two owners of one JSON file
+        # each keep their own snapshot and lock, so the next write of either
+        # silently discards the other's changes. Handing over the instance is
+        # what makes ``HttpClient(cache=app.storage)`` safe.
+        if storage is not None:
+            self._storage = storage
+        else:
+            self._storage = Storage(path) if path is not None else Storage()
         self._prefix = prefix
         self._lock = threading.Lock()
         self._max_entries = max_entries
+
+    @property
+    def storage(self) -> Storage:
+        """The store this cache writes into (never a second handle on the file)."""
+        return self._storage
 
     @classmethod
     def at(cls, path: str | Path) -> HttpCache:
@@ -109,6 +126,7 @@ class HttpCache:
         content: bytes,
         *,
         variant: str = "",
+        charset: str = "utf-8",
     ) -> None:
         """Store a response for ``url``.
 
@@ -116,6 +134,12 @@ class HttpCache:
         used to inflate both disk and CPU for large payloads. ``Set-Cookie``
         is not stored: a session cookie has no business sitting in a cache
         file. Beyond ``max_entries`` the oldest entries are evicted.
+
+        ``charset`` records the encoding the response body was decoded with
+        (from its ``Content-Type``). Without it a cached ``iso-8859-1`` body
+        came back as ``caf?`` while the same bytes freshly fetched read
+        ``café``: the ``encoding`` field held the *payload* encoding (base64)
+        and the response decoder fell back to UTF-8.
         """
         kept_headers = {k: v for k, v in dict(headers).items() if k.lower() != "set-cookie"}
         with self._lock, self._storage.transaction() as store:
@@ -125,7 +149,10 @@ class HttpCache:
                     "status": status,
                     "headers": kept_headers,
                     "content": base64.b64encode(content).decode("ascii"),
+                    # How the body is stored in this JSON document.
                     "encoding": "base64",
+                    # How the body should be decoded as text (HTTP charset).
+                    "charset": str(charset or "utf-8"),
                     "fetched_at": time.time(),
                 },
             )

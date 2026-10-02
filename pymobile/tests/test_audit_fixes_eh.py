@@ -514,3 +514,6 @@ def test_build_fingerprint_covers_the_framework() -> None:
 
     names = {path.name for path in _framework_inputs()}
     assert {"classes.dex", "libpymobile.so", "ViewBuilder.java", "pymobile_jni.c"} <= names
+    # The bundled launcher icon too: replacing it is a change to every APK
+    # built without a custom icon, so the cache must notice it.
+    assert "default_icon.png" in names

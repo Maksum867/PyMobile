@@ -28,6 +28,24 @@ _log = get_logger("ui.screen")
 ScreenT = TypeVar("ScreenT", bound="Screen")
 
 
+def _adopt(root: Widget) -> None:
+    """Re-link the parent pointers of a built tree from its structure.
+
+    :meth:`Screen.refresh` clears the parent chain of the retired tree (that is
+    what lets a widget be attached again), and it also cleared it for every
+    node of a subtree the application kept — ``self.box = Column(...)`` built in
+    ``__init__`` and returned from ``build()``. The widgets were still in
+    ``box.children``, but ``widget.screen`` walked up a chain that ended at
+    ``None``, so ``counter.text = "new"`` after a refresh changed nothing on
+    screen and said nothing about it. Rebuilding the links from the structure
+    makes a retained subtree reactive again; a widget that is *not* part of the
+    new tree keeps no link and stays inert, which is what detached means.
+    """
+    for node in root.walk():
+        for child in node.children:
+            child._parent = node
+
+
 class Screen:
     """One full-window view.
 
@@ -147,6 +165,7 @@ class Screen:
             # to find it, so every widget in the tree can reach us.
             root._screen = self
             self._root = root
+            _adopt(root)
             self._name_widgets()
         return self._root
 
@@ -181,6 +200,31 @@ class Screen:
                 continue
             value.id = name
         self._check_unique_ids()
+
+    def _check_new_ids(self, child: Widget) -> None:
+        """Reject a live ``add()`` whose ids clash with the screen's own.
+
+        The eager check in :meth:`_name_widgets` only covers the initial build;
+        ``rows.add(Label("x", id="duplicate"))`` on a mounted screen sailed
+        through, and the native renderer patches views by id — two widgets with
+        one id clobber each other on every redraw and events are routed by
+        whichever one ``find()`` reaches first. A screen that promises to
+        diagnose duplicates has to do it for the tree as it is now, not only
+        for the tree as it was built.
+        """
+        clashes: list[str] = []
+        for node in child.walk():
+            if self.find(node.id) is not None and node.id not in clashes:
+                clashes.append(node.id)
+        if clashes:
+            raise PyMobileError(
+                f"duplicate widget id(s) in {type(self).__name__}: "
+                + ", ".join(repr(wid) for wid in clashes),
+                hint=(
+                    "This widget was added to a screen that already has an id like "
+                    "that. Give it a unique `id=`, or remove the old widget first."
+                ),
+            )
 
     def _check_unique_ids(self) -> None:
         """Verify every widget in the tree has a unique id.
@@ -435,12 +479,22 @@ class Navigator:
 
     @staticmethod
     def _discard(screen: Screen) -> None:
-        """Unmount a screen that has already been removed from the stack."""
+        """Unmount a screen that has already been removed from the stack.
+
+        Framework-owned cleanup runs in ``finally``: a raising ``on_unmount``
+        hook used to skip :meth:`Screen._cancel_subscriptions` and the
+        ``_app = None``, leaving the popped screen subscribed to the event bus
+        and holding the whole app alive. The hook's error is not swallowed —
+        it propagates to the caller, which logs it and carries on with the
+        remaining screens.
+        """
         screen._is_current = False
         screen._mounted = False
-        screen.on_unmount()
-        screen._cancel_subscriptions()
-        screen._app = None
+        try:
+            screen.on_unmount()
+        finally:
+            screen._cancel_subscriptions()
+            screen._app = None
 
     def push(self, screen: ScreenT) -> ScreenT:
         """Show ``screen`` on top of the stack."""
@@ -467,16 +521,20 @@ class Navigator:
             return None
         screen = self._stack.pop()
         screen._is_current = False
-        screen.on_hide()
-        screen._mounted = False
+        try:
+            screen.on_hide()
+        except Exception:
+            _log.exception("on_hide of %s raised; popping anyway", screen.title)
         # Run the user hook first: it is the documented place for farewell
         # work, and it must still see screen-owned subscriptions alive so
         # ``screen.on(...)`` callbacks fired from the hook are delivered.
         # Cancelling the subscriptions afterwards is safe because no later
-        # hook will run on this screen.
-        screen.on_unmount()
-        screen._cancel_subscriptions()
-        screen._app = None
+        # hook will run on this screen — and _discard() does it even when the
+        # hook itself raised.
+        try:
+            self._discard(screen)
+        except Exception:
+            _log.exception("on_unmount of %s raised; the screen was still released", screen.title)
         current = self.current
         if current is not None:
             current._is_current = True
@@ -503,8 +561,16 @@ class Navigator:
         if self._stack:
             top = self._stack.pop()
             top._is_current = False
-            top.on_hide()
-            self._discard(top)
+            try:
+                top.on_hide()
+            except Exception:
+                _log.exception("on_hide of %s raised; replacing anyway", top.title)
+            try:
+                self._discard(top)
+            except Exception:
+                _log.exception(
+                    "on_unmount of %s raised; the screen was still released", top.title
+                )
         return self._show_new(screen)
 
     def reset(self, screen: ScreenT) -> ScreenT:
@@ -532,9 +598,21 @@ class Navigator:
         current = self.current
         if current is not None:
             current._is_current = False
-            current.on_hide()
+            try:
+                current.on_hide()
+            except Exception:
+                _log.exception("on_hide of %s raised; disposing anyway", current.title)
+        # Every screen is unmounted even when one hook raises: stopping the app
+        # must not stop at the first broken on_unmount (PM-12).
         while self._stack:
-            self._discard(self._stack.pop())
+            screen = self._stack.pop()
+            try:
+                self._discard(screen)
+            except Exception:
+                _log.exception(
+                    "on_unmount of %s raised; the remaining screens were still released",
+                    screen.title,
+                )
 
     def _notify(self) -> None:
         """Tell the app that the visible screen changed."""

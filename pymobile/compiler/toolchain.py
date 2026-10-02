@@ -24,7 +24,7 @@ from pathlib import Path
 from ..errors import ConfigError
 from ..log import get_logger
 
-__all__ = ["Toolchain", "find_toolchain", "ToolchainError"]
+__all__ = ["Toolchain", "find_toolchain", "ToolchainError", "normalise_java_home"]
 
 _log = get_logger("compiler.toolchain")
 
@@ -38,6 +38,29 @@ def _first_existing(*candidates: Path | None) -> Path | None:
     for candidate in candidates:
         if candidate is not None and candidate.exists():
             return candidate
+    return None
+
+
+def normalise_java_home(candidate: Path | str | None) -> Path | None:
+    """Return the directory that really contains ``bin/javac``, or ``None``.
+
+    A macOS JDK is distributed as a bundle: ``jdk-17.0.13+11/Contents/Home/bin``
+    holds the tools, while the outer ``jdk-17.0.13+11`` holds only metadata.
+    Discovery used to return the outer directory for an *existing* install (the
+    download path normalised it, the other paths did not), so ``javac`` was
+    "not found" while the JDK sat right there. One resolver is shared by
+    JAVA_HOME, the bundled install, a fresh download and plain discovery, and
+    it insists on a real ``bin/javac`` before calling a directory a home.
+    """
+    if candidate is None:
+        return None
+    text = str(candidate)
+    path = Path(text).expanduser()
+    if (path / "bin" / "javac").exists():
+        return path
+    nested = path / "Contents" / "Home"
+    if (nested / "bin" / "javac").exists():
+        return nested
     return None
 
 
@@ -97,6 +120,20 @@ class Toolchain:
     def keytool(self) -> Path:
         """Keystore generator, used for the debug key."""
         return self._executable(self.java_home / "bin", "keytool")
+
+    @property
+    def build_tools_version(self) -> tuple[int, ...]:
+        """Selected build-tools version as ``(35, 0, 0)``; ``()`` when unknown.
+
+        Used to decide whether a flag exists (``zipalign -P`` arrived in
+        build-tools 31) instead of guessing from a failure message.
+        """
+        parts: list[int] = []
+        for chunk in self.build_tools.name.split("."):
+            if not chunk.isdigit():
+                break
+            parts.append(int(chunk))
+        return tuple(parts)
 
     def clang_for(self, abi: str) -> Path | None:
         """Return the NDK compiler matching an Android ABI, if installed."""
@@ -182,17 +219,24 @@ def _sdk_root(explicit: str | Path | None = None) -> Path | None:
 
 
 def _java_home(sdk: Path | None) -> Path | None:
-    """Locate a JDK (17+ preferred, as required by modern build-tools)."""
-    value = os.environ.get("JAVA_HOME")
-    if value and Path(value).exists():
-        return Path(value)
-    bundled = _first_existing(*sorted((Path.home() / ".andro").glob("jdk-17*"), reverse=True))
-    if bundled is not None:
-        return bundled
+    """Locate a JDK (17+ preferred, as required by modern build-tools).
+
+    Every candidate goes through :func:`normalise_java_home`, so a macOS
+    bundle (``jdk-17*/Contents/Home``) resolves to the directory that actually
+    holds ``bin/javac`` — the bundled install used to be returned un-normalised
+    and every Java step then failed.
+    """
+    resolved = normalise_java_home(os.environ.get("JAVA_HOME"))
+    if resolved is not None:
+        return resolved
+    for candidate in sorted((Path.home() / ".andro").glob("jdk-17*"), reverse=True):
+        resolved = normalise_java_home(candidate)
+        if resolved is not None:
+            return resolved
     if sdk is not None:
-        embedded = sdk.parent / "jbr"
-        if embedded.exists():
-            return embedded
+        resolved = normalise_java_home(sdk.parent / "jbr")
+        if resolved is not None:
+            return resolved
     javac = shutil.which("javac")
     if javac:
         return Path(javac).resolve().parent.parent

@@ -20,6 +20,7 @@ from pathlib import Path
 
 from ..errors import PyMobileError
 from ..log import get_logger
+from .toolchain import normalise_java_home
 
 __all__ = ["install_sdk", "default_sdk_home", "REQUIRED_PACKAGES"]
 
@@ -163,15 +164,30 @@ def _download(url: str, target: Path, description: str, expected_sha256: str) ->
     return target
 
 
+def _first_jdk_home(home: Path) -> Path | None:
+    """The newest usable JDK under ``home``, with macOS bundles normalised.
+
+    ``jdk-17.0.13+11/`` on macOS contains ``Contents/Home/bin/javac``; the old
+    code returned that outer directory from the *existing install* branch (the
+    download branch normalised it), so a second build on such a machine found
+    the JDK but then failed at every ``javac``/``keytool`` call.
+    """
+    for candidate in sorted(home.glob("jdk-17*"), reverse=True):
+        resolved = normalise_java_home(candidate)
+        if resolved is not None:
+            return resolved
+    return None
+
+
 def _ensure_jdk(home: Path) -> Path:
     """Return a JDK 17 path, downloading Temurin when necessary."""
-    existing = sorted(home.glob("jdk-17*"), reverse=True)
-    if existing:
-        return existing[0]
+    existing = _first_jdk_home(home)
+    if existing is not None:
+        return existing
 
-    java_home = os.environ.get("JAVA_HOME")
-    if java_home and (Path(java_home) / "bin" / "javac").exists():
-        return Path(java_home)
+    java_home = normalise_java_home(os.environ.get("JAVA_HOME"))
+    if java_home is not None:
+        return java_home
 
     entry = _jdk_archive_for_host()
     if entry is None:
@@ -191,12 +207,13 @@ def _ensure_jdk(home: Path) -> Path:
             tar.extractall(home, filter="data")
     archive.unlink(missing_ok=True)
 
-    found = sorted(home.glob("jdk-17*"), reverse=True)
-    if not found:
-        raise PyMobileError("JDK extraction produced no jdk-17* directory")
-    # macOS archives nest the real home inside Contents/Home.
-    nested = found[0] / "Contents" / "Home"
-    return nested if nested.exists() else found[0]
+    found = _first_jdk_home(home)
+    if found is None:
+        raise PyMobileError(
+            "JDK extraction produced no directory with bin/javac",
+            hint="Delete the cache in ~/.andro and run `pymobile setup-sdk` again.",
+        )
+    return found
 
 
 def install_sdk(

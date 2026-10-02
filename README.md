@@ -10,6 +10,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 [![Python](https://img.shields.io/pypi/pyversions/pymobile-framework.svg)](https://pypi.org/project/pymobile-framework/)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](https://github.com/Maksum867/py-mobile/issues)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Maksum867/py-mobile/blob/main/LICENSE)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow.svg)](https://buymeacoffee.com/Maksum867)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Maksum867/py-mobile/main/docs/demo.gif"
@@ -30,7 +31,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.9.0`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.9.1`) and read the
 > changelog before upgrading. What may change, and how much notice you get, is
 > written down in the
 > [versioning and deprecation policy](#versioning-and-deprecation-policy). Bug
@@ -117,6 +118,7 @@ device. No Java, no Gradle, no Android Studio.
 - [Known issues](#known-issues)
 - [Versioning and deprecation policy](#versioning-and-deprecation-policy)
 - [FAQ](#faq)
+- [Support the project](#support-the-project)
 - [Contributing](#contributing)
 
 ---
@@ -1073,15 +1075,23 @@ forget.
 
 ```python
 class Home(Screen):
+    def __init__(self) -> None:
+        super().__init__()
+        self.taps = 0                          # state belongs to the screen,
+                                               # not to the frame being built
+
     def build(self) -> Widget:
-        self.taps = 0
-        self.counter = Label("Taps: 0")        # id becomes "counter"
+        self.counter = Label(f"Taps: {self.taps}")   # id becomes "counter"
         return Column(self.counter, Button("Tap", on_press=self.on_tap))
 
     def on_tap(self) -> None:
         self.taps += 1
         self.counter.text = f"Taps: {self.taps}"    # that is the whole update
 ```
+
+`build()` runs again on every `refresh()` (and on a theme or language change),
+so anything assigned there is reset. Keep the state in `__init__` or in a model
+object and let `build()` read it — a theme switch must not zero the counter.
 
 `self.counter.text = ...` and `self.counter.set_text(...)` do the same thing.
 Every public attribute works this way — `text`, `value`, `checked`, `visible`,
@@ -1093,10 +1103,17 @@ redraw.
 label.style = Style(color=Color.ERROR, bold=True)   # redraws by itself
 ```
 
-Mutating an object in place is invisible, though — `label.style.bold = True`
-changes the `Style`, not the widget. Assign a new object, or call
-`label.invalidate()` after the in-place change. When the tree itself changed
-(rows added or removed), call `self.refresh()`.
+`Style` is frozen: `label.style.bold = True` raises `FrozenInstanceError`, and
+even for a mutable object the in-place change would be invisible — the widget
+compares the old value with the new one. Build a changed copy and assign it:
+
+```python
+from dataclasses import replace
+
+label.style = replace(label.style, bold=True)       # redraws by itself
+```
+
+When the tree itself changed (rows added or removed), call `self.refresh()`.
 
 Redraws are coalesced, so a handler that updates six widgets still produces a
 single frame. Assigning a value that has not changed renders nothing at all,
@@ -2076,7 +2093,15 @@ pip install "pymobile-framework[icons]"
 
 Without it the icon is copied unscaled; the build still succeeds. With no icon
 configured, a bundled default is used, so a build never fails over a missing
-asset.
+asset:
+
+<p align="center">
+  <img src="docs/icon.png" alt="The bundled PyMobile launcher icon" width="128">
+</p>
+
+(The PyMobile mark is also the icon of anything built with
+`pymobile init` before you replace it — `icon = "assets/icon.png"` is all it
+takes.)
 
 ---
 
@@ -2121,7 +2146,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.9.0", "platform": "android",
+# {"framework_version": "0.9.1", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 
@@ -2757,6 +2782,24 @@ Yes, under `[tool.pymobile]`. If both files exist, `pymobile.toml` wins.
 
 **Do I need Android Studio?**
 No. `pymobile setup-sdk` downloads only the command-line tools it needs.
+
+---
+
+## Support the project
+
+PyMobile is free under the MIT license and is written by one person; the
+framework, the Android layer, the documentation and the tests are hours that
+would otherwise go somewhere else. If it saved you time — or you just want it
+to keep getting better — you can buy me a coffee:
+
+<a href="https://buymeacoffee.com/Maksum867">
+  <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow.svg?style=for-the-badge"
+       alt="Buy Me a Coffee" height="32">
+</a>
+
+Money is never the only way to help: a bug report with a reproduction, a fixed
+typo, a better sentence in these docs, or a star on the repository are just as
+useful.
 
 ---
 

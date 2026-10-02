@@ -12,7 +12,6 @@ import functools
 import hashlib
 import http.client
 import json as jsonlib
-import ssl
 import threading
 import time
 import urllib.error
@@ -21,11 +20,15 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from ...errors import NetworkError
 from ...log import get_logger
+from ..api.storage import Storage
 from .cache import HttpCache
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; `ssl` is imported lazily
+    import ssl
 
 __all__ = ["HttpClient", "HttpSecurityPolicy", "Response", "HttpFuture", "DEFAULT_TIMEOUT"]
 
@@ -51,6 +54,15 @@ class HttpSecurityPolicy:
 
     require_https: bool = False
     allowed_hosts: frozenset[str] | None = None
+    #: Extra header names (lower-case, e.g. ``"x-auth-token"``) treated as
+    #: credentials: dropped on a cross-origin redirect and mixed into the
+    #: cache key. The defaults (Authorization, Cookie, Proxy-Authorization,
+    #: X-API-Key) are always included.
+    credential_headers: frozenset[str] = frozenset()
+    #: Hosts that may keep their credentials across a redirect *to another
+    #: origin*. Empty by default: forwarding a key to a host the client did
+    #: not address itself has to be an explicit, written-down decision.
+    forward_credentials_hosts: frozenset[str] = frozenset()
 
     #: Ports used when a URL does not state one, by scheme.
     _DEFAULT_PORTS: ClassVar[Mapping[str, int]] = MappingProxyType({"http": 80, "https": 443})
@@ -69,6 +81,23 @@ class HttpSecurityPolicy:
                     "allowed_hosts must not be empty; pass host names such as "
                     "['api.example.com'] or leave it as None to allow every host"
                 )
+        object.__setattr__(
+            self,
+            "credential_headers",
+            _normalise_header_names(self.credential_headers),
+        )
+        object.__setattr__(
+            self,
+            "forward_credentials_hosts",
+            frozenset(
+                host.strip().casefold() for host in self.forward_credentials_hosts if host.strip()
+            ),
+        )
+
+    @property
+    def credential_header_names(self) -> frozenset[str]:
+        """Every header name that must not cross an origin boundary."""
+        return _DEFAULT_CREDENTIAL_HEADERS | self.credential_headers
 
     def validate(self, url: str) -> None:
         parsed = urllib.parse.urlparse(url)
@@ -98,8 +127,22 @@ class HttpSecurityPolicy:
 
 
 #: Request headers that carry credentials and must not follow a redirect to
-#: another origin (urllib forwards every header by default).
-_CREDENTIAL_HEADERS = ("authorization", "cookie", "proxy-authorization")
+#: another origin (urllib forwards every header by default). ``x-api-key``
+#: belongs here: the cache already treated it as a credential when separating
+#: entries, but the redirect handler *forwarded* it, so a key handed to one
+#: host could be sent to another one the first host redirected to.
+_DEFAULT_CREDENTIAL_HEADERS: frozenset[str] = frozenset(
+    {"authorization", "cookie", "proxy-authorization", "x-api-key"}
+)
+
+
+def _normalise_header_names(names: frozenset[str] | tuple[str, ...] | list[str]) -> frozenset[str]:
+    """Lower-case header names, rejecting a bare string ("x-api-key" is iterable)."""
+    if isinstance(names, str):
+        raise TypeError(
+            "credential_headers must be a collection of header names, not a str"
+        )
+    return frozenset(str(name).strip().casefold() for name in names if str(name).strip())
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -134,13 +177,27 @@ class _PolicyRedirectHandler(urllib.request.HTTPRedirectHandler):
                 hint="Add the target host to HttpSecurityPolicy.allowed_hosts if it is trusted.",
             ) from exc
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if new is not None and _origin(newurl) != _origin(req.full_url):
-            for name in list(new.headers):
-                if name.lower() in _CREDENTIAL_HEADERS:
-                    del new.headers[name]
-            for name in list(new.unredirected_hdrs):
-                if name.lower() in _CREDENTIAL_HEADERS:
-                    del new.unredirected_hdrs[name]
+        if new is None or _origin(newurl) == _origin(req.full_url):
+            return new
+        host = (urllib.parse.urlsplit(newurl).hostname or "").casefold()
+        if host in self._policy.forward_credentials_hosts:
+            # Explicitly trusted: the request may keep its credentials even
+            # though the origin changed. Written down on purpose.
+            _log.debug("forwarding credentials to allow-listed host %s", host)
+            return new
+        names = self._policy.credential_header_names
+        dropped: list[str] = []
+        for store in (new.headers, new.unredirected_hdrs):
+            for name in list(store):
+                if name.casefold() in names:
+                    del store[name]
+                    dropped.append(name)
+        if dropped:
+            _log.debug(
+                "dropped credential headers %s on a cross-origin redirect to %s",
+                ", ".join(sorted(dropped)),
+                host,
+            )
         return new
 
 
@@ -299,6 +356,11 @@ class HttpFuture:
         ``deliver=``) the callback runs on the UI side. A standalone client
         runs it on the request's background thread — or, if the request has
         already finished, immediately on the calling thread.
+
+        An exception raised by the callback is logged either way: a callback
+        that throws after the request has already completed used to raise out
+        of ``then()`` into the caller, so the same broken callback was a
+        traceback or a log line depending on whether the response had arrived.
         """
         callback: Callable[[], None] | None = None
         with self._lock:
@@ -306,7 +368,19 @@ class HttpFuture:
                 return self
 
             def callback() -> None:
-                self._fire(on_success, on_error)
+                # Re-check at delivery time. ``cancel()`` can run after this
+                # wrapper was queued (the request finished and its callbacks
+                # were handed to the delivery queue) — the documented promise
+                # is that cancelling suppresses the callbacks, so a wrapper
+                # that is already in flight must honour it too.
+                if self._cancelled:
+                    return
+                try:
+                    self._fire(on_success, on_error)
+                except Exception:
+                    _log.exception(
+                        "unhandled exception in an HttpFuture callback for %s", self._url
+                    )
 
             if not self._done.is_set():
                 self._callbacks.append(callback)
@@ -411,10 +485,18 @@ class HttpClient:
                 "base_url must not be only whitespace; "
                 "pass \"\" for no base URL or a URL like https://api.example.com"
             )
-        # Docs historically showed ``HttpClient(cache=app.storage)``. Accept a
-        # Storage (or any object with a ``path``) and wrap it in HttpCache.
+        # Docs historically showed ``HttpClient(cache=app.storage)``. A
+        # ``Storage`` is adopted **as the same instance** (see HttpCache): the
+        # old code built a second Storage on the same file, and both owners
+        # kept their own snapshot, so the next persist of either one wiped the
+        # other's keys ("settings change loses the cache, cache write loses
+        # the settings"). Anything else with a ``path`` is a location, not an
+        # owner, and gets its own file-backed cache.
         cache = self.cache
         if cache is None or isinstance(cache, HttpCache):
+            return
+        if isinstance(cache, Storage):
+            self.cache = HttpCache(storage=cache)
             return
         path = getattr(cache, "path", cache)
         self.cache = HttpCache(path)
@@ -493,7 +575,10 @@ class HttpClient:
         final_url = self._build_url(url, params)
         # Responses fetched with different credentials are different entries:
         # otherwise one account's data would be served to the next.
-        variant = _credential_variant(self._merge_headers(kwargs.get("headers"), None))
+        variant = _credential_variant(
+            self._merge_headers(kwargs.get("headers"), None),
+            self.security.credential_headers,
+        )
         if self.cache.is_fresh(final_url, ttl, variant=variant):
             entry = self.cache.get(final_url, variant=variant)
             if entry is not None:
@@ -507,7 +592,12 @@ class HttpClient:
             raise
         if response.ok and self.cache is not None:
             self.cache.set(
-                final_url, response.status, response.headers, response.content, variant=variant
+                final_url,
+                response.status,
+                response.headers,
+                response.content,
+                variant=variant,
+                charset=response.encoding,
             )
         return response
 
@@ -594,10 +684,14 @@ class HttpClient:
         request = urllib.request.Request(url, data=body, method=method)
         for key, value in headers.items():
             request.add_header(key, value)
-        opener = urllib.request.build_opener(
-            urllib.request.HTTPSHandler(context=_ssl_context()),
-            _PolicyRedirectHandler(self.security),
-        )
+        handlers: list[Any] = [_PolicyRedirectHandler(self.security)]
+        if urllib.parse.urlsplit(url).scheme == "https":
+            # ``ssl`` is imported here and nowhere else at module level: a
+            # build packaged with --no-ssl ships no ssl module at all, and an
+            # app that never speaks HTTPS must still start offline instead of
+            # dying on an import error inside pymobile.core.net.http.
+            handlers.insert(0, urllib.request.HTTPSHandler(context=_ssl_context()))
+        opener = urllib.request.build_opener(*handlers)
         try:
             with opener.open(
                 request,
@@ -624,10 +718,7 @@ class HttpClient:
     def _to_response(url: str, status: int, headers: Mapping[str, str], content: bytes) -> Response:
         """Build a Response, honouring the charset from ``Content-Type``."""
         normalized = {key.lower(): value for key, value in headers.items()}
-        encoding = "utf-8"
-        content_type = normalized.get("content-type", "")
-        if "charset=" in content_type:
-            encoding = content_type.split("charset=", 1)[1].split(";")[0].strip() or "utf-8"
+        encoding = _charset_from_headers(normalized) or "utf-8"
         return Response(
             status=status, headers=normalized, content=content, url=url, encoding=encoding
         )
@@ -695,11 +786,18 @@ class HttpClient:
             time.sleep(self.backoff * (2 ** (attempt - 1)))
 
 
-def _credential_variant(headers: Mapping[str, str]) -> str:
-    """Fingerprint of the credentials a request carries ('' when it has none)."""
+def _credential_variant(
+    headers: Mapping[str, str], extra: frozenset[str] = frozenset()
+) -> str:
+    """Fingerprint of the credentials a request carries ('' when it has none).
+
+    ``extra`` are the policy's additional credential header names, so the
+    cache splits (and the redirect handler strips) exactly the same set.
+    """
+    names = _DEFAULT_CREDENTIAL_HEADERS | extra
     parts = sorted(
         f"{key.lower()}:{value}" for key, value in headers.items()
-        if key.lower() in _CREDENTIAL_HEADERS or key.lower() == "x-api-key"
+        if key.lower() in names
     )
     if not parts:
         return ""
@@ -711,7 +809,22 @@ def _ssl_context() -> ssl.SSLContext:
     """TLS context that prefers the packaged certifi bundle when available.
 
     Built once: loading the CA bundle on every request costs tens of ms.
+
+    ``ssl`` is imported lazily — see :meth:`HttpClient._send`. When the module
+    is absent (a ``--no-ssl`` build) the failure is reported as a targeted
+    :class:`NetworkError` at the moment an HTTPS request is attempted, rather
+    than as an ``ImportError`` while importing the framework.
     """
+    try:
+        import ssl
+    except ImportError as exc:
+        raise NetworkError(
+            "This build was packaged with --no-ssl: HTTPS is unavailable",
+            hint=(
+                "Rebuild without `no_ssl` (pymobile.toml) / `--no-ssl` so the TLS "
+                "libraries are packaged, or make the app work offline."
+            ),
+        ) from exc
     try:
         import certifi
 
@@ -738,15 +851,37 @@ def _decode_cached_body(raw: Any) -> bytes:
     return bytes(raw)
 
 
+def _charset_from_headers(headers: Mapping[str, str]) -> str:
+    """The charset named by a ``Content-Type`` header, or ``""``."""
+    for key, value in headers.items():
+        if key.lower() != "content-type":
+            continue
+        lowered = value.lower()
+        if "charset=" in lowered:
+            return value.split("charset=", 1)[1].split(";")[0].strip()
+    return ""
+
+
 def _entry_to_response(entry: dict[str, Any], url: str, *, from_cache: bool = True) -> Response:
-    """Rebuild a :class:`Response` from a cached entry, marking it as cached."""
+    """Rebuild a :class:`Response` from a cached entry, marking it as cached.
+
+    The charset is read from the entry's ``charset`` field and falls back to
+    the stored ``Content-Type`` header. It used to fall back to UTF-8 (while
+    ``encoding`` held the *payload* format, ``"base64"``), so a cached
+    ``iso-8859-1`` body decoded as ``caf\ufffd`` while the freshly fetched one
+    read ``café``.
+    """
     content = _decode_cached_body(entry.get("content", b""))
-    encoding = entry.get("encoding", "utf-8")
-    if encoding == "base64":
-        encoding = "utf-8"
+    headers = dict(entry.get("headers", {}))
+    encoding = str(entry.get("charset") or "") or _charset_from_headers(headers)
+    if not encoding:
+        # Entry written by an older version: ``encoding`` was the payload
+        # format, never the HTTP charset.
+        legacy = entry.get("encoding", "")
+        encoding = legacy if legacy and legacy != "base64" else "utf-8"
     return Response(
         status=int(entry.get("status", 0)),
-        headers=dict(entry.get("headers", {})),
+        headers=headers,
         content=content,
         url=url,
         encoding=encoding,

@@ -266,7 +266,16 @@ class TextInput(Widget):
         self._apply(value, from_ui=False)
 
     def _ui_set_value(self, value: str) -> None:
-        """Apply text typed on the device (an echo, not a programmatic change)."""
+        """Apply text typed on the device (an echo, not a programmatic change).
+
+        A disabled field takes no input: the event may have been queued before
+        the widget was disabled, or delivered by a front end that does not
+        model ``enabled`` itself (the browser preview posts raw events). The
+        public ``value`` setter still works — ``enabled`` gates the user, not
+        the program.
+        """
+        if not self.enabled:
+            return
         self._apply(value, from_ui=True)
 
     def _apply(self, value: str, *, from_ui: bool) -> None:
@@ -1026,7 +1035,12 @@ class SearchBar(Widget):
         self._apply(value, from_ui=False)
 
     def _ui_set_value(self, value: str) -> None:
-        """Apply text typed on the device (an echo, not a programmatic change)."""
+        """Apply text typed on the device (an echo, not a programmatic change).
+
+        Disabled input is refused, like :meth:`TextInput._ui_set_value`.
+        """
+        if not self.enabled:
+            return
         self._apply(value, from_ui=True)
 
     def _apply(self, value: str, *, from_ui: bool) -> None:

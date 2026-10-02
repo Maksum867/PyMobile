@@ -8,7 +8,7 @@ what will be packaged.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -152,7 +152,7 @@ def collect_sources(
     entrypoint: Path,
     *,
     exclude: Sequence[str] = (),
-    include_suffixes: Sequence[str] | None = None,
+    include_suffixes: Iterable[str] | None = None,
 ) -> SourceSet:
     """Walk ``source_dir`` and return the set of files to package.
 

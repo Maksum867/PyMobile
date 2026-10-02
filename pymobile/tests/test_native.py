@@ -514,10 +514,19 @@ class TestEventLoop:
         assert home.taps == 2
         assert home.counter.text == "2"
 
-    def test_loop_exits_when_queue_drains(self) -> None:
+    def test_loop_exit_shuts_the_app_down(self) -> None:
+        """A finished event loop means the platform closed the app (PM-10).
+
+        The loop returns when the device asks it to stop (activity destroyed);
+        it used to leave ``running`` True, ``App.current()`` pointing at the
+        dead app and every screen mounted. Here the fake queue is empty, which
+        ends the loop exactly like ``Native.stopEventLoop`` does on a device.
+        """
         app, home = self._app_with([])
         app.run(home)  # must return rather than hang
-        assert app.running
+        assert not app.running
+        assert app.current() is None
+        assert not home.mounted
 
     def test_unknown_widget_is_ignored(self) -> None:
         app, home = self._app_with([("ghost", "press", "")])
@@ -532,7 +541,10 @@ class TestEventLoop:
     def test_handler_error_does_not_break_the_loop(self) -> None:
         from pymobile import Button, Column, Screen, Widget
 
+        fired: list[int] = []
+
         def boom() -> None:
+            fired.append(1)
             raise RuntimeError("bad handler")
 
         class Broken(Screen):
@@ -541,7 +553,9 @@ class TestEventLoop:
 
         app, _ = self._app_with([("b", "press", ""), ("b", "press", "")])
         app.run(Broken())
-        assert app.running  # survived both failing presses
+        # Both queued presses were dispatched even though the handler raised
+        # every time: one failing callback does not end the loop.
+        assert len(fired) == 2
 
 
 class TestWindowsToolPaths:

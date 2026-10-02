@@ -99,6 +99,12 @@ class ProjectConfig:
     #: Leave OpenSSL, ssl.py and the CA bundle out — ~4 MB, no HTTPS.
     no_ssl: bool = False
     exclude: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDE))
+    #: Extra asset extensions to package on top of the defaults (``.py``,
+    #: ``.json``, ``.txt``, ``.toml``, images, fonts). A ``data.csv`` or a
+    #: seed ``.db`` in the source directory was silently left out of the APK:
+    #: the collector only promised "common types", and nothing said so. List
+    #: them here — ``asset_suffixes = [".csv", ".db"]`` — and they ship.
+    asset_suffixes: list[str] = field(default_factory=list)
     #: Replace :data:`DEFAULT_EXCLUDE` instead of adding to it. Only for
     #: projects that know exactly what they are doing — most users want the
     #: defaults (``build/**``, ``.git/**``, tests …) kept.
@@ -163,6 +169,12 @@ class ProjectConfig:
                 f"Invalid orientation {self.orientation!r}",
                 hint=f"Choose one of: {', '.join(_ORIENTATIONS)}",
             )
+        for suffix in self.asset_suffixes:
+            if not str(suffix).startswith(".") or len(str(suffix)) < 2:
+                raise ConfigError(
+                    f"Invalid asset suffix {suffix!r}",
+                    hint="Write extensions with a leading dot, e.g. asset_suffixes = ['.csv'].",
+                )
         unknown_abis = [abi for abi in self.abis if abi not in _ABI_CHOICES]
         if unknown_abis:
             raise ConfigError(

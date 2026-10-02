@@ -3,6 +3,210 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.9.1] — 2026-10-03
+
+### Security
+
+- **The web preview trusted the network.** `pymobile run --web` bound `0.0.0.0`
+  with no authentication, no route check and no body limit: anyone on the same
+  Wi-Fi could read the screen and post events into the running app. It now
+  binds `127.0.0.1`; exposure is an explicit `--host` opt-in that also prints a
+  warning. Every request needs a per-session token (`?t=…` in the printed URL,
+  or the `X-PMB-Token` header), only `/`, `/state` and `/event` are routed,
+  `POST /event` requires `application/json` and at most 64 KiB, unknown writes
+  answer 403/404/413/415, and the responses carry `X-Frame-Options: DENY`.
+  (PM-28)
+- **`X-API-Key` (and every other credential header) was forwarded across
+  origins** when a response redirected elsewhere. Credentials are now dropped
+  whenever the origin changes, and may only be sent to hosts listed in the new
+  `forward_credentials_hosts`; extra header names can be named through
+  `credential_headers=`, and a bare string there is a `TypeError` instead of a
+  silently misread iterable of characters. (PM-05)
+- **Signing passwords no longer appear in the process list.** `apksigner` is
+  invoked with `--ks-pass env:…` / `--key-pass env:…` instead of literal
+  arguments, and a release keystore without a password is a hard error rather
+  than a silent fallback to the debug key. (PM-17)
+
+### Fixed — build and packaging
+
+- **A cache hit could package the wrong build.** The fingerprint did not
+  mention the signing identity, so a release build could be handed the APK of
+  the debug build it was built over — and the other way round. The fingerprint
+  now covers the build mode, the signer (`<keystore>:<alias>:<sha256>`), the
+  framework inputs and the configuration digest; the cache entry records the
+  mode and signer it belongs to and is only reused when they match the request.
+  No password ever reaches the cache file. (PM-17)
+- **`BuildResult.native` was `False` for artifacts that came from the cache**,
+  so a native build reused from the cache was reported as a structural
+  preview. The cache now stores that flag along with the entry. (PM-18)
+- **A custom entry point disagreed with the packaged launcher.** `MainActivity`
+  and the JNI runner hard-coded `main.py` while the builder packaged whatever
+  `entrypoint` said, and `--optimize` (bytecode) made it worse. The single
+  source of truth is now `assets/pymobile.properties` (`entrypoint`,
+  `entrypoint_type=py|pyc`), which the launcher reads; the JNI runner falls
+  back to the `.pyc`, and paths are passed as arguments rather than spliced
+  into code. An older launcher dex without those bytes gets a generated shim
+  instead of a hard-coded name. (PM-24)
+- **The prebuilt bridges were linked for 4 KB pages** (`p_align = 0x1000`),
+  which Android 15+ refuses to map. Both `libpymobile.so` were rebuilt with
+  `-Wl,-z,max-page-size=16384` (PT_LOAD aligned to `0x4000`); the build checks
+  it with `_check_page_alignment()`, and `zipalign` now uses `-p 4 -P 16` on
+  build-tools 35+ with an `-f 16384` fallback below that. (PM-26)
+- **Reinstalling a new build with the same `versionCode` kept the old Python
+  code.** Android will reinstall over an equal version code without touching
+  the app's data, so `assets/app/main.py` from the previous build stayed in
+  place. `pymobile.properties` now carries `payload=<fingerprint>` and the
+  runtime stamps the extracted payload with `<versionCode>-<payload>`, so a
+  changed payload is re-extracted even when the version code is not bumped.
+  (PM-29)
+- **The bundled launcher icon was not part of the build fingerprint**, so
+  replacing it changed nothing in the cache key: a project without its own icon
+  could keep an "up to date" APK still carrying the old icon. The default icon
+  is now a framework input like the dex and the bridge. (PM-17 family)
+- **Assets could disappear silently.** The packaged extension set is fixed in
+  the collector, so an app reading `assets/data.csv` shipped an APK without the
+  file and only found out on the device. `asset_suffixes = [".csv", …]` extends
+  the set, and the build warns about the extensions it left out. (PM-20)
+- **`JAVA_HOME` pointing at a macOS JDK bundle was rejected**, because the JDK
+  lives in `Contents/Home`. One `normalise_java_home()` now serves `JAVA_HOME`,
+  bundled distributions, the `~/.android` discovery and `which javac`, and
+  requires a real `bin/javac`. (PM-19)
+
+### Fixed — application lifecycle and UI
+
+- **An event from the previous screen ran a destructive action on the new
+  one.** Each rendered tree now carries the generation of the screen it was
+  built from and wire ids are `"<generation>:<id>"`, so late taps are dropped
+  instead of being applied to whatever widget now owns that id. The public
+  `id` in `Screen.to_dict()` stays unqualified. (PM-14)
+- **A `disabled` text field accepted changes.** Both `TextInput` and
+  `MultiLineTextInput` (and with them the search field) took text from the
+  desktop backend and the web preview while disabled. The gate now lives in
+  `_ui_set_value()` and drops interactive events for disabled widgets in the
+  dispatcher; assigning `value` from Python still works, which is how a
+  program updates a read-only field. (PM-15)
+- **A reused plain subtree stopped reacting after `refresh()`**: the rebuilt
+  tree linked its own containers but the adopted branch kept its old parents.
+  `Screen._adopt()` restores the links from the structure. (PM-11)
+- **An exception in a user hook aborted the rest of the cleanup.** A raising
+  `on_unmount` left later screens undisposed; `dispose()`/`discard()` now run
+  under `try`/`finally` and every screen is processed. (PM-12)
+- **Duplicate explicit ids were only caught on the first build.** Adding a
+  widget with an id that already exists (from a rebuild, a dialog, a reused
+  container) silently produced two owners. `Container.add()` now runs
+  `_check_new_ids()` and raises `PyMobileError`, leaving the tree untouched.
+  (PM-13)
+- **`activate_all` remembered only the most recently registered app**; it is
+  now a `dict[str, WeakSet[App]]`, so plugin hot-reloads reach every live app
+  without keeping dead ones alive. (PM-16)
+- **`stop()` before the first `run()` skipped `jobs.shutdown()`**, leaving the
+  executor's threads behind. (PM-09)
+- **Leaving the event loop did not finish the `App`**: `running` stayed `True`,
+  so a later `stop()` was a no-op. `App` tracks `_stopped` and always runs
+  `stop()` in `finally`. (PM-10)
+
+### Fixed — HTTP, storage and jobs
+
+- **`HttpClient(cache=Storage(...))` built a second `Storage` over the same
+  file**, so settings and cache overwrote each other. `HttpCache(storage=…)`
+  now reuses the instance, and passing `path` *and* `storage` raises
+  `ValueError`. (PM-01)
+- **`transaction()` did not roll the disk back** when the body called `save()`:
+  the write went out immediately and survived the rollback. Saves inside a
+  transaction are deferred to the commit. (PM-02)
+- **`Storage.set()` left the value in memory when the disk write failed**,
+  serving a value that would vanish on restart; the in-memory copy is now
+  rolled back too. (PM-03)
+- **A cached response lost its charset**: a `iso-8859-1` page came back as
+  UTF-8 garbage. The encoding travels with the cached entry. (PM-04)
+- **`cancel()` did not stop a callback that was already queued for delivery**:
+  `HttpFuture` and `JobHandle` re-check cancellation when the callback runs.
+  (PM-06)
+- **`then()` handled an exception differently before and after completion**
+  (raised vs logged). One policy now: the failure is logged and reported
+  through the future, never thrown into an unrelated caller. (PM-07)
+- **Duplicate named repeating jobs lost their tracking**, so they could not be
+  cancelled any more. `JobManager._track()` keeps one live job per name and
+  cancels the previous one with a warning. (PM-08)
+- **`--no-ssl` broke even offline apps**: `core/net/http.py` imported `ssl` at
+  module import, so a build without OpenSSL raised before doing anything.
+  The import is lazy, `NetworkError` points at the flag, and the APK ships
+  without `libssl`/`libcrypto` while the CA bundle is written to
+  `assets/python/etc/ssl/cert.pem` for the parts that do need TLS. (PM-23)
+
+### Fixed — Android runtime and JNI
+
+- **Modified UTF-8 came in as mojibake or crashed.** `GetStringUTFChars`
+  returns Modified UTF-8, which is not Unicode and breaks on emoji, Lone
+  surrogates and embedded NUL: the Python side saw `UnicodeDecodeError`. The
+  bridge now converts UTF-16 ↔ UTF-8 itself (`jstring_to_utf8` /
+  `utf8_to_jstring`, invalid sequences become U+FFFD) in both directions, the
+  event queue carries byte lengths and `Py_BuildValue("(s#s#s#)")` passes them
+  to Python, so a string may contain NUL. (PM-25)
+- **A startup error was reported as success.** A failing entry point returned
+  0 from the JNI runner, so the process looked healthy and the user saw an
+  empty screen with no error. `run_entry_point()` keeps the code of
+  `SystemExit`, turns any other exception into exit code 1 with a traceback in
+  logcat, and `MainActivity` shows an error placeholder instead of the empty
+  first screen. (PM-27)
+- **`started = True` survived a failed runtime preparation**, so a retry after
+  a failed extraction or import did nothing. `PythonRuntime` is a state
+  machine (`IDLE`/`PREPARING`/`RUNNING`/`FAILED`) that can be retried after a
+  recoverable failure. (PM-30)
+- **`py_next_event` could report "no more events" on a spurious wake**: the
+  condition wait was wrapped in `if`, not `while`, so a wake-up without a
+  queued event ended the loop. It is a predicate loop now, and `ETIMEDOUT`
+  exits cleanly instead of being ignored. (S-1)
+- **The native event queue was unbounded.** A busy UI thread could grow the
+  queue without limit; `MAX_PENDING_EVENTS` (1024) now drops the oldest event
+  and logs it, so the UI thread never blocks on a stuck consumer. (S-2)
+
+### Fixed — documentation
+
+- The README counter example reset its state inside `build()`, which the
+  framework itself calls on every refresh — the counter went back to zero.
+  State lives in `__init__` and `build()` only reads it. (PM-21)
+- The README suggested mutating a `Style` in place, which is a frozen
+  dataclass and raises `FrozenInstanceError`; the example now uses
+  `dataclasses.replace()`. (PM-22)
+
+### Added
+
+- `asset_suffixes` in `pymobile.toml` — extra file extensions to package
+  (PM-20), with a warning that names the extensions that were skipped.
+- `pymobile run --web --host HOST` — explicit opt-in for exposing the preview
+  beyond loopback, with a warning and a session token (PM-28).
+- `WebPreview(host=…, port=…, token=…)`, `HttpClient(credential_headers=…,
+  forward_credentials_hosts=…)`, `Storage`/`HttpCache` sharing (PM-05,
+  PM-01, PM-28).
+- Regression tests: `pymobile/tests/test_audit_platform_fixes.py` (disabled
+  inputs, cache identity, build metadata, asset suffixes, launcher and JNI
+  sources, shipped artifacts, web-preview security, JDK discovery) and
+  `pymobile/tests/test_jni_utf8.py`, a host harness that compiles the real
+  bridge and checks emoji, Cyrillic, combining marks and U+0000 both ways.
+
+### Changed
+
+- **The default launcher icon is the PyMobile mark** (an indigo gradient, a
+  phone glyph with a `>_` prompt and the wordmark) instead of the stock Android
+  robot. It is still only the fallback: `icon = "assets/icon.png"` in
+  `pymobile.toml` overrides it, and `pymobile build --icon logo.png` per run.
+- `App.stop()` is now idempotent and always runs after the loop (PM-09,
+  PM-10); `BuildResult.native` describes the artifact rather than the code
+  path (PM-18); `Screen.to_dict()` keeps the public ids it documented (PM-14).
+- The single build cache file stores metadata (mode, signer, icon, payload)
+  alongside the fingerprint (PM-17, PM-18, PM-29).
+- `pymobile.properties` inside the APK gained `payload=…` next to
+  `entrypoint`, `entrypoint_type` and `optimize` (PM-24, PM-29).
+- `zipalign` is called with `-P 16` where the build tools understand it and
+  with the `16384` alignment argument otherwise; the fallback is silent apart
+  from a debug log (PM-26).
+- A release build that names a keystore but no password now raises
+  `PyMobileError` instead of quietly signing with the debug key; the
+  per-app debug keystore keeps living in
+  `~/.pymobile/keystores/<package>-debug.jks` (`PYMOBILE_KEYSTORE_DIR` moves
+  it, which is what CI wants) (PM-17).
+
 ## [0.9.0] — 2026-10-01
 
 ### Added

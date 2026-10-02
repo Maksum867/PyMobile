@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from pymobile.core.bridge import StubBridge, reset_bridge, set_bridge
+from pymobile.core.bridge import StubBridge, active_bridge, reset_bridge, set_bridge
 from pymobile.core.config import ProjectConfig
 
 
@@ -17,6 +17,20 @@ def _isolated_debug_keystores(
 ) -> None:
     """Keep debug keys created by native builds out of the real ~/.pymobile."""
     monkeypatch.setenv("PYMOBILE_KEYSTORE_DIR", str(tmp_path_factory.mktemp("keystores")))
+
+
+@pytest.fixture(autouse=True)
+def _restore_active_bridge() -> Iterator[None]:
+    """Leave the process-wide bridge selection exactly as the test found it.
+
+    Tests that install a :class:`~pymobile.core.bridge.WebBridge` used to leak
+    it into every later test in the same pytest process: ``pymobile run`` then
+    picked the web bridge up, and a test asserting on the console output failed
+    — but only when those files ran together.
+    """
+    previous = active_bridge()
+    yield
+    set_bridge(previous)
 
 
 @pytest.fixture

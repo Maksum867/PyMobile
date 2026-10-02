@@ -57,7 +57,14 @@ def fingerprint_files(paths: Iterable[Path]) -> str:
 
 @dataclass(slots=True)
 class BuildCache:
-    """Reads and writes the build fingerprint file."""
+    """Reads and writes the build fingerprint file.
+
+    Besides the fingerprint, an entry records **metadata** about the artifact —
+    the build mode and the signing identity. Without it a cache hit could only
+    guess: a reused native APK was reported as ``native=False`` (``BuildResult``
+    default), so a release command that hit the cache described its output as a
+    structural preview package.
+    """
 
     directory: Path
 
@@ -76,26 +83,34 @@ class BuildCache:
             return {}
         return {str(k): str(v) for k, v in data.items() if k != "version"}
 
-    def save(self, fingerprint: str, artifact: Path) -> None:
-        """Record the fingerprint of a successful build."""
+    def save(self, fingerprint: str, artifact: Path, **metadata: str) -> None:
+        """Record the fingerprint and metadata of a successful build."""
         self.directory.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "version": _CACHE_VERSION,
+        payload: dict[str, object] = {
+            "version": _CACHE_VERSION,  # int on purpose: it is a schema number
             "fingerprint": fingerprint,
             "artifact": str(artifact),
+            **{key: str(value) for key, value in metadata.items()},
         }
         try:
             self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except OSError as exc:  # pragma: no cover - disk issues
             _log.debug("could not write build cache: %s", exc)
 
+    def entry(self, fingerprint: str) -> dict[str, str] | None:
+        """The stored entry when it matches ``fingerprint`` and the file is there."""
+        data = self.load()
+        if data.get("fingerprint") != fingerprint:
+            return None
+        artifact = Path(data.get("artifact", ""))
+        if not artifact.exists():
+            return None
+        return {**data, "artifact": str(artifact)}
+
     def is_fresh(self, fingerprint: str) -> Path | None:
         """Return the cached artifact when it matches ``fingerprint``."""
-        entry = self.load()
-        if entry.get("fingerprint") != fingerprint:
-            return None
-        artifact = Path(entry.get("artifact", ""))
-        return artifact if artifact.exists() else None
+        found = self.entry(fingerprint)
+        return Path(found["artifact"]) if found is not None else None
 
     def clear(self) -> None:
         """Remove the cache file."""

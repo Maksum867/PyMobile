@@ -47,6 +47,31 @@ WAKE_EVENT = "__wake__"
 #: feedback loop, and the loop is stopped and reported instead of spinning.
 _MAX_DEFERRED_FRAMES = 8
 
+#: Event kinds that act on a widget the user pointed at (as opposed to system
+#: events such as ``back`` or ``locale``).
+_INTERACTIVE_EVENT_KINDS = frozenset(
+    {
+        "press",
+        "long_press",
+        "change",
+        "select",
+        "toggle",
+        "search",
+        "increment",
+        "decrement",
+        "swipe",
+        "refresh",
+        "load_more",
+    }
+)
+
+#: Widget ids travel to a front end qualified with the frame generation —
+#: ``"3:button-1"`` — and come back the same way. The token is what lets an
+#: event from a screen that is no longer displayed be recognised and dropped:
+#: automatic ids restart per screen, so the Delete button of a dialog and the
+#: Open button of the menu it replaced are both ``button-1`` (PM-14).
+_WIRE_ID = re.compile(r"^(?P<generation>\d+):(?P<widget>.*)$")
+
 __all__ = ["App"]
 
 _log = get_logger("app")
@@ -236,6 +261,14 @@ class App:
         self._log_file = log_file
         self._running = False
         self._ever_started = False
+        #: True once stop() ran; stop() releases resources for good, so such an
+        #: app cannot be started again (see run()).
+        self._stopped = False
+        #: Bumped every time a different screen is shown. Widget ids are
+        #: qualified with it on the way out and checked on the way in, so an
+        #: event that was queued by the previous screen cannot act on a widget
+        #: of the current one (PM-14).
+        self._generation = 0
         self.auto_render = auto_render
         self._render_scheduled = False
         self._render_depth = 0
@@ -349,11 +382,16 @@ class App:
         which keeps previews and tests non-blocking.
         """
         global _current
-        if self._ever_started and not self._running:
+        if self._stopped:
             # stop() shuts the dispatcher, the job manager and the event
             # subscriptions down for good. Running again used to work just
             # enough to look alive: navigation and timers fine, the first
             # run_job() raising "JobManager has been shut down".
+            #
+            # The same finality now applies to stop() *before* the first run:
+            # repeat_job() created a live worker, stop() skipped
+            # jobs.shutdown() (it returned early) and the app was neither
+            # running nor cleaned up.
             raise PyMobileError(
                 "The application has already been stopped",
                 hint=(
@@ -404,6 +442,18 @@ class App:
                     _log.exception("error handling %s on %s", kind, widget_id)
         finally:
             self._loop_thread = None
+            # The loop ends when the platform tears the activity down (or a
+            # preview window closes). The app then *is* over: leaving
+            # ``running`` True kept App.current() pointing at a dead app whose
+            # screens were never unmounted and whose subscriptions never
+            # released. Desktop bridges without next_event() never reach this
+            # method, so previews are unaffected.
+            if self._running:
+                _log.info("event loop finished; shutting the application down")
+                try:
+                    self.stop()
+                except Exception:
+                    _log.exception("cleanup after the event loop failed")
         _log.info("event loop finished")
 
     # -- running code on the UI thread ------------------------------------
@@ -463,6 +513,10 @@ class App:
 
     def _handle_ui_event(self, widget_id: str, kind: str, value: str) -> None:
         """Apply one UI event to the widget it belongs to."""
+        resolved = self._resolve_wire_id(widget_id)
+        if resolved is None:
+            return
+        widget_id = resolved
         if kind == "back":
             if self.navigator.depth > 1:
                 self.pop()
@@ -491,8 +545,14 @@ class App:
             "ui event %s on %s (type=%s) value=%r", kind, widget_id, type(widget).__name__, value
         )
 
-        if kind in ("press", "long_press", "change", "select", "toggle", "search",
-                    "increment", "decrement", "swipe", "refresh", "load_more"):
+        if kind in _INTERACTIVE_EVENT_KINDS:
+            # A disabled widget does not react — including to an event that was
+            # queued while it was still enabled, and to a front end that does
+            # not honour `enabled` itself (the browser preview). Programmatic
+            # changes (widget.value = ...) stay allowed.
+            if not getattr(widget, "enabled", True):
+                _log.debug("ignoring %s for the disabled %s", kind, widget_id)
+                return
             # Composite widgets (Form, TabView, Card ...) mark themselves with
             # ``_gates_events``: disabling them disables everything inside.
             ancestor = widget.parent
@@ -583,19 +643,36 @@ class App:
             self._snackbar._retire()
             self._snackbar = None
         self.dispatcher.close()
+        # Always: an app that never ran can still have started repeating jobs
+        # (app.repeat_job() before run()), and those used to survive stop()
+        # because the early return below skipped this line.
+        self.jobs.shutdown()
+        self._stopped = True
         if not self._running:
             return
         self._running = False
-        self._unsubscribe_language()
-        self.navigator.dispose()
-        self.jobs.shutdown()
-        _plugin_registry.on_app_stop(self)
-        with _current_lock:
-            if _current is self:
-                _current = None
-        self.events.emit("app:stop", source=self.name)
-        self.events.clear()
-        _log.info("stopped %s", self.name)
+        try:
+            self._unsubscribe_language()
+        except Exception:  # a broken listener must not block the teardown
+            _log.exception("releasing the language listener failed")
+        try:
+            self.navigator.dispose()
+        except Exception:
+            # Navigator.dispose() isolates per-screen hook failures; this is
+            # the last safety net so a user hook can never abort stop().
+            _log.exception("a screen hook failed while the app was stopping")
+        finally:
+            try:
+                _plugin_registry.on_app_stop(self)
+            finally:
+                with _current_lock:
+                    if _current is self:
+                        _current = None
+                try:
+                    self.events.emit("app:stop", source=self.name)
+                finally:
+                    self.events.clear()
+                _log.info("stopped %s", self.name)
 
     # -- ui ----------------------------------------------------------------
     def render(self) -> dict[str, Any] | None:
@@ -611,6 +688,12 @@ class App:
         returns ``None``; the frame that is already in flight is drawn again
         when it finishes. Without that, ``build()`` ran inside itself until the
         interpreter raised ``RecursionError``.
+
+        The returned frame is exactly what the bridge receives, widget ids
+        included: they are qualified with the current frame generation
+        (``"3:button-1"``) so that an event coming back from a front end can be
+        matched to the screen it was captured on. Use :meth:`Screen.to_dict`
+        for the tree with plain ids.
         """
         with self._ui_lock:
             if self._rendering:
@@ -642,6 +725,45 @@ class App:
             finally:
                 self._rendering = False
 
+    def _resolve_wire_id(self, widget_id: str) -> str | None:
+        """Translate a front-end widget id; ``None`` when the event is stale.
+
+        Ids the framework sends out are qualified with the current frame
+        generation (``"3:button-1"``). An id that comes back carrying an older
+        generation refers to a screen that is no longer displayed — acting on
+        it is how a queued tap on the menu's Open button ended up pressing the
+        dialog's Delete button, both ``button-1``. An id with no token at all
+        (an old front end, a unit test calling ``handle_ui_event`` by hand) is
+        trusted as current, which keeps the public API and the test driver
+        working as before.
+        """
+        match = _WIRE_ID.match(widget_id or "")
+        if match is None:
+            return widget_id
+        generation = int(match.group("generation"))
+        if generation != self._generation:
+            _log.debug(
+                "dropping an event for %r: it belongs to frame %d, frame %d is on screen",
+                match.group("widget"),
+                generation,
+                self._generation,
+            )
+            return None
+        return match.group("widget")
+
+    def _qualify_ids(self, node: dict[str, Any]) -> None:
+        """Tag every widget id in a serialised frame with its generation (in place)."""
+        prefix = f"{self._generation}:"
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            identifier = current.get("id")
+            if isinstance(identifier, str) and identifier:
+                current["id"] = prefix + identifier
+            children = current.get("children")
+            if isinstance(children, list):
+                stack.extend(child for child in children if isinstance(child, dict))
+
     def _render_locked(self) -> dict[str, Any] | None:
         # Drain updates queued by background work before serialising the tree.
         # Renderer bridges own the final platform-thread hand-off.
@@ -660,6 +782,11 @@ class App:
             if bar is not None and bar.visible:
                 tree["snackbar"] = bar.to_dict()
             self._check_widget_types(tree)
+            # Qualify the ids the front end will echo back (see _resolve_wire_id).
+            # Kept out of ``to_dict()``/``app:render``: those report the ids the
+            # application wrote.
+            self._qualify_ids(tree)
+            tree["generation"] = self._generation
             payload = tree
             if getattr(self.bridge, "accepts_theme", False):
                 # The device renderer paints its own defaults (text, surfaces,
@@ -1014,6 +1141,9 @@ class App:
         """Re-render whenever the navigator changes the visible screen."""
         if screen is None:
             return
+        # A different screen is on display: every id rendered before this
+        # moment belongs to a retired frame and must not resolve in this one.
+        self._generation += 1
         if not self._running:
             if self._ever_started:
                 raise PyMobileError(

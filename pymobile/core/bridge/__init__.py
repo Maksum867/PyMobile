@@ -24,6 +24,7 @@ __all__ = [
     "GuiBridge",
     "WebBridge",
     "get_bridge",
+    "active_bridge",
     "set_bridge",
     "reset_bridge",
 ]
@@ -49,6 +50,15 @@ def get_bridge() -> Bridge:
             candidate = StubBridge()
         _active = candidate
         _log.debug("bridge selected: %s", _active.name)
+    return _active
+
+
+def active_bridge() -> Bridge | None:
+    """The bridge installed right now, or ``None`` when none was selected yet.
+
+    Unlike :func:`get_bridge` this never *creates* one, so tooling and tests
+    can save and restore the selection without a side effect.
+    """
     return _active
 
 

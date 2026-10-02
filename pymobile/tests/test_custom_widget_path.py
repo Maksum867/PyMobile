@@ -331,6 +331,7 @@ class TestBuildChecks:
         """Wired into ``_run_native``: after the dex stage, before anything is packaged."""
         write(tmp_path, "main.py", BAR_CHART)
         calls: list[str] = []
+        entrypoints: list[tuple[str, str]] = []
 
         class FakeToolchain:
             def verify(self, **_: Any) -> None:
@@ -339,6 +340,16 @@ class TestBuildChecks:
         class FakeBackend:
             def __init__(self, *_: Any, **__: Any) -> None:
                 self.warnings: list[str] = []
+
+            def set_entrypoint(self, name: str, kind: str) -> None:
+                # The launcher has to know what to run: a custom entry point
+                # from the TOML and/or the bytecode-only form.
+                entrypoints.append((name, kind))
+
+            def set_payload_digest(self, digest: str) -> None:
+                # Recorded in the APK so the launcher re-extracts its bundled
+                # Python when the packaged content changes.
+                entrypoints.append((digest[:8], "digest"))
 
             def compile_jni(self, workdir: Path) -> Path:
                 calls.append("jni")
@@ -360,6 +371,8 @@ class TestBuildChecks:
         with pytest.raises(ConfigError, match="BarChart"):
             BuildPipeline(ProjectConfig(root=tmp_path), use_cache=False, native=True).run()
         assert calls == ["verify", "jni", "dex"]
+        assert entrypoints[0] == ("main.py", "py")
+        assert entrypoints[1][1] == "digest" and entrypoints[1][0]
 
 
 # --------------------------------------------------------------------------

@@ -1,0 +1,14 @@
+# Funding links for PyMobile — the source of the "Sponsor" button on the
+# repository header (Settings → General → Features → Sponsorships).
+#
+# Replace `your-handle` with the part after the slash in your Buy Me a Coffee
+# page URL: https://buymeacoffee.com/your-handle -> your-handle
+#
+# One username per platform, and up to four `custom` links:
+#   https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+
+buy_me_a_coffee: maksum867
+
+# The same page through a plain URL works too and is useful when the platform
+# key above is not recognised by GitHub yet (uncomment to enable):
+# custom: ["https://buymeacoffee.com/your-handle"]

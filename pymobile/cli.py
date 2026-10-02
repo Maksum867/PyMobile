@@ -291,11 +291,16 @@ def _run_web(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> in
 
     preview = WebPreview(app, host=args.host, port=args.port)
     bridge.attach(preview)
-    _out.ok(f"{config.name} is running at {browser_url(args.host, preview.port)}")
-    if args.host in ("0.0.0.0", "::", "[::]"):
-        _out.info(
-            f"listening on all interfaces ({args.host}); open the loopback "
-            "address above in this machine's browser, or the LAN IP from other devices"
+    _out.ok(f"{config.name} is running at {browser_url(args.host, preview.port, preview.token)}")
+    if preview.exposed:
+        # Network exposure is opt-in, and the warning says what it means: the
+        # port can read the app's state and press its widgets, so the session
+        # token (already part of the printed URL) is mandatory.
+        _out.warn(
+            f"listening on {args.host}: the preview is reachable from the network. "
+            "It requires the session token in the URL above; treat that URL as a "
+            "secret and use an SSH tunnel (--host 127.0.0.1) when you only need "
+            "it locally."
         )
     _out.info("press Ctrl+C to stop")
     with contextlib.suppress(KeyboardInterrupt):  # Ctrl+C is how you stop it
@@ -948,8 +953,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--port", type=int, default=8765, help="port for --web (default: 8765)")
     run.add_argument(
         "--host",
-        default="0.0.0.0",
-        help="interface for --web (default: 0.0.0.0, reachable over SSH)",
+        default="127.0.0.1",
+        help=(
+            "interface for --web (default: 127.0.0.1, this machine only). Any "
+            "other value exposes the preview to the network and requires its "
+            "session token"
+        ),
     )
     run.set_defaults(func=cmd_run)
 

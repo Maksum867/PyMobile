@@ -14,10 +14,11 @@ the preview cannot drift from the real renderer.
 from __future__ import annotations
 
 import json
+import secrets
 import threading
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from ...log import get_logger
 from .contract import text_value
@@ -29,6 +30,69 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = ["WebPreview", "render_html", "serve"]
 
 _log = get_logger("ui.web")
+
+#: Interfaces that are only reachable from this machine. A preview bound to
+#: one of them is a private developer window; anything else is a service on the
+#: network and gets the full policy below.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "[::1]", ""})
+
+#: Largest accepted /event body. The widget protocol is tiny; a multi-megabyte
+#: body is either a mistake or an attempt to make the server allocate it.
+MAX_EVENT_BYTES = 64 * 1024
+
+#: A rejected request is answered without using its body, but the bytes are
+#: already in the socket. A client that is still sending then sees the
+#: connection reset instead of the status line (Windows: WinError 10053), so
+#: the body is consumed first — bounded, so a lying ``Content-Length`` cannot
+#: make the preview read forever.
+DRAIN_LIMIT = 8 * 1024 * 1024
+DRAIN_CHUNK = 64 * 1024
+
+
+class _Readable(Protocol):
+    """What draining needs: ``BinaryIO`` refuses ``BufferedIOBase.read``."""
+
+    def read(self, size: int = ..., /) -> bytes | None: ...  # pragma: no cover
+
+
+def _drain_body(rfile: _Readable, length: int, limit: int = DRAIN_LIMIT) -> int:
+    """Read and discard an unused request body; return how much was consumed.
+
+    Stops at ``limit`` bytes or at end of file, whichever comes first.
+    """
+    remaining = min(max(length, 0), limit)
+    consumed = 0
+    while remaining > 0:
+        chunk = rfile.read(min(DRAIN_CHUNK, remaining))
+        if not chunk:
+            break
+        consumed += len(chunk)
+        remaining -= len(chunk)
+    return consumed
+
+
+def _is_loopback(host: str) -> bool:
+    """Whether ``host`` names this machine only (wildcards do not)."""
+    text = (host or "").strip()
+    return text in LOOPBACK_HOSTS or text.startswith("127.")
+
+
+def browser_url(host: str, port: int, token: str = "") -> str:
+    """A URL a human can actually open in a browser.
+
+    ``0.0.0.0`` and ``::`` are *bind* addresses ("listen on every interface");
+    they are not destinations — Windows browsers refuse them outright with
+    ``ERR_ADDRESS_INVALID``. Point humans at loopback instead, and keep the
+    wildcard bind for containers, SSH tunnels and LAN devices.
+
+    The session token travels in the query string, so the address printed on
+    the terminal is the one that works; opening the bare host without it is
+    refused when the preview is exposed.
+    """
+    if host in ("0.0.0.0", "::", "[::]"):
+        host = "127.0.0.1"
+    suffix = f"/?t={token}" if token else ""
+    return f"http://{host}:{port}{suffix}"
 
 _PAGE = """<!doctype html>
 <html lang="en">
@@ -106,12 +170,22 @@ _PAGE = """<!doctype html>
 <script>
 {extra_script}
 let version = {version};
+const token = {token_literal};
 const scrolled = {{}};
+function url(path, params) {{
+  const query = new URLSearchParams(params || {{}});
+  if (token) query.set('t', token);
+  const text = query.toString();
+  return text ? path + '?' + text : path;
+}}
 async function send(id, kind, value) {{
-  const r = await fetch('/event', {{
-    method: 'POST', headers: {{'Content-Type': 'application/json'}},
+  const r = await fetch(url('/event'), {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json', 'X-PMB-Token': token}},
     body: JSON.stringify({{id, kind, value}})
   }});
+  if (r.status !== 200) {{ document.getElementById('status').textContent =
+      'refused (' + r.status + ')'; return; }}
   apply(await r.json());
 }}
 function applyChrome(chrome) {{
@@ -163,7 +237,7 @@ function apply(state) {{
   }}
 }}
 async function poll() {{
-  try {{ apply(await (await fetch('/state?v=' + version)).json()); }}
+  try {{ apply(await (await fetch(url('/state', {{v: version}}))).json()); }}
   catch (e) {{ document.getElementById('status').textContent = 'disconnected'; }}
   setTimeout(poll, 400);
 }}
@@ -235,17 +309,7 @@ def _alignment(value: str | None) -> str:
     }.get(value or "", "flex-start")
 
 
-def browser_url(host: str, port: int) -> str:
-    """A URL a human can actually open in a browser.
 
-    ``0.0.0.0`` and ``::`` are *bind* addresses ("listen on every interface");
-    they are not destinations — Windows browsers refuse them outright with
-    ``ERR_ADDRESS_INVALID``. Point humans at loopback instead, and keep the
-    wildcard bind for containers, SSH tunnels and LAN devices.
-    """
-    if host in ("0.0.0.0", "::", "[::]"):
-        host = "127.0.0.1"
-    return f"http://{host}:{port}"
 
 
 def _js_value(value: str) -> str:
@@ -668,12 +732,42 @@ def render_html(node: dict[str, Any]) -> str:
 
 
 class WebPreview:
-    """Serves an application to a browser and feeds interactions back."""
+    """Serves an application to a browser and feeds interactions back.
 
-    def __init__(self, app: App, *, host: str = "0.0.0.0", port: int = 8765) -> None:
+    The preview runs an HTTP server that can read the app's state and trigger
+    its widgets, so **where it listens** is a security decision:
+
+    * the default is loopback (``127.0.0.1``) — reachable only from this
+      machine, which is what a preview is for;
+    * binding to another interface (``--host 0.0.0.0``) is an explicit opt-in
+      and switches on the session token: every request must carry it, the page
+      hands it to its own JavaScript, and requests from another origin are
+      refused. Without that, anyone able to reach the port could read the
+      screen and press its buttons.
+    * a ``--host`` that is not the default prints a warning saying so.
+
+    Unknown routes are refused (the handler used to accept a POST to *any*
+    path), the body of an event is size-limited, and only ``application/json``
+    is accepted for events.
+    """
+
+    def __init__(
+        self,
+        app: App,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 8765,
+        token: str | None = None,
+    ) -> None:
         self.app = app
         self.host = host
         self.port = port
+        self.exposed = not _is_loopback(host)
+        #: Session token. Generated whenever the preview leaves loopback; a
+        #: loopback preview does not need one and stays click-to-open.
+        self.token = token or (secrets.token_urlsafe(18) if self.exposed else "")
+        if self.token and token is None:
+            _log.info("preview token generated for the exposed preview")
         self._tree: dict[str, Any] = {}
         self._status = ""
         self._version = 0
@@ -750,6 +844,8 @@ class WebPreview:
             title=escape(state["title"]),
             body=state["body"],
             version=state["version"],
+            # json.dumps, not repr: the value is going inside JavaScript.
+            token_literal=json.dumps(self.token),
             extra_script=EXTRA_SCRIPT,
             **self._theme_vars(),
         )
@@ -789,6 +885,36 @@ class WebPreview:
             self._server.server_close()
             self._server = None
 
+    def _route(self, raw_path: str) -> tuple[str, dict[str, list[str]]]:
+        """Split a request target into (path, query)."""
+        from urllib.parse import parse_qs, urlsplit
+
+        parts = urlsplit(raw_path)
+        return parts.path.rstrip("/") or "/", parse_qs(parts.query)
+
+    def _authorised(self, path: str, query: dict[str, list[str]], headers: Any) -> bool:
+        """Whether a request may be served.
+
+        A loopback preview is private and needs no token (a local tool, a
+        test). An exposed one requires the token, in the query string (that is
+        how the browser gets it from the printed URL) or in ``X-PMB-Token``
+        (scripts). A request that states a different ``Origin`` is refused
+        even with a valid token: a page on another site must not be able to
+        drive this app through the user's browser.
+        """
+        if not self.token:
+            return True
+        origin = headers.get("Origin")
+        if origin:
+            host = headers.get("Host", "")
+            if origin.rstrip("/") != f"http://{host}":
+                _log.debug("refusing a request from origin %s", origin)
+                return False
+        supplied = (query.get("t") or [""])[0] or headers.get("X-PMB-Token", "")
+        if not secrets.compare_digest(supplied, self.token):
+            return False
+        return path in ("/", "/state", "/event")
+
     def _build_server(self) -> ThreadingHTTPServer:
         preview = self
 
@@ -798,27 +924,111 @@ class WebPreview:
             def log_message(self, *args: Any) -> None:
                 """Silence the default per-request stderr logging."""
 
-            def _reply(self, body: bytes, content_type: str) -> None:
-                self.send_response(200)
+            def _reply(
+                self,
+                body: bytes,
+                content_type: str,
+                status: int = 200,
+                extra: dict[str, str] | None = None,
+            ) -> None:
+                self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
+                # A preview must never be embedded by another page.
+                self.send_header("X-Frame-Options", "DENY")
+                for name, value in (extra or {}).items():
+                    self.send_header(name, value)
                 self.end_headers()
-                self.wfile.write(body)
+                if self.command != "HEAD":
+                    self.wfile.write(body)
 
-            def do_GET(self) -> None:
-                if self.path.startswith("/state"):
+            def _discard_body(self) -> None:
+                """Consume a body the handler is not going to use.
+
+                Rejecting a request without reading its body leaves those bytes
+                in the socket; the client is still sending and loses the status
+                line to a connection reset (WinError 10053 on Windows). Reading
+                them first makes the error visible, and closing after the reply
+                keeps a half-read request from being parsed as a new one.
+                """
+                if self.command in ("GET", "HEAD"):
+                    self.close_connection = True
+                    return
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > 0:
+                    _drain_body(self.rfile, length)
+                self.close_connection = True
+
+            def _reject(self, body: bytes, status: int) -> None:
+                """Answer with an error, having first consumed the body."""
+                self._discard_body()
+                self._reply(body, "text/plain; charset=utf-8", status=status)
+
+            def _forbidden(self) -> None:
+                message = (
+                    "Refused: this preview was started with a session token.\n"
+                    "Open the URL printed by `pymobile run --web` (it carries "
+                    "?t=…), or pass the token in the X-PMB-Token header.\n"
+                ).encode()
+                self._reply(message, "text/plain; charset=utf-8", status=403)
+
+            def _not_found(self, path: str) -> None:
+                body = f"No such route: {path}\n".encode()
+                self._reply(body, "text/plain; charset=utf-8", status=404)
+
+            def do_GET(self) -> None:  # required name of the http.server API
+                path, query = preview._route(self.path)
+                if path not in ("/", "/state"):
+                    self._not_found(path)
+                    return
+                if not preview._authorised(path, query, self.headers):
+                    self._forbidden()
+                    return
+                if path == "/state":
                     payload = json.dumps(preview.state()).encode("utf-8")
                     self._reply(payload, "application/json; charset=utf-8")
                     return
                 self._reply(preview.page().encode("utf-8"), "text/html; charset=utf-8")
 
-            def do_POST(self) -> None:
+            def do_POST(self) -> None:  # required name of the http.server API
+                path, query = preview._route(self.path)
+                # The handler used to accept a POST to *any* path and run the
+                # event it carried. Only /event is an event.
+                if path != "/event":
+                    self._discard_body()
+                    self._not_found(path)
+                    return
+                if not preview._authorised(path, query, self.headers):
+                    self._discard_body()
+                    self._forbidden()
+                    return
+                content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip()
+                if content_type and content_type != "application/json":
+                    self._reject(b"Content-Type must be application/json\n", 415)
+                    return
                 length = int(self.headers.get("Content-Length") or 0)
+                if length > MAX_EVENT_BYTES:
+                    self._reject(
+                        f"event body larger than {MAX_EVENT_BYTES} bytes\n".encode(), 413
+                    )
+                    return
                 try:
                     event = json.loads(self.rfile.read(length) or b"{}")
-                except json.JSONDecodeError:
-                    event = {}
+                except (json.JSONDecodeError, ValueError):
+                    self._reply(
+                        b"event body is not valid JSON\n",
+                        "text/plain; charset=utf-8",
+                        status=400,
+                    )
+                    return
+                if not isinstance(event, dict):
+                    self._reply(
+                        b"event body must be a JSON object\n",
+                        "text/plain; charset=utf-8",
+                        status=400,
+                    )
+                    return
                 preview.dispatch(
                     str(event.get("id", "")),
                     str(event.get("kind", "")),
@@ -834,8 +1044,12 @@ class WebPreview:
         return server
 
 
-def serve(app: App, *, host: str = "0.0.0.0", port: int = 8765) -> WebPreview:
-    """Serve ``app`` in a browser, blocking until interrupted."""
+def serve(app: App, *, host: str = "127.0.0.1", port: int = 8765) -> WebPreview:
+    """Serve ``app`` in a browser, blocking until interrupted.
+
+    Binds loopback by default; pass ``host="0.0.0.0"`` explicitly to serve the
+    LAN (the preview then requires its session token).
+    """
     preview = WebPreview(app, host=host, port=port)
     preview.serve_forever()
     return preview

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import struct
 import subprocess
 import zipfile
 from dataclasses import dataclass
@@ -31,9 +32,21 @@ from ..manifest import build_manifest
 from ..packager import FIXED_TIMESTAMP
 from ..toolchain import Toolchain
 
-__all__ = ["NativeBackend", "NativeBuildResult"]
+__all__ = [
+    "NativeBackend",
+    "NativeBuildResult",
+    "elf_load_alignments",
+    "framework_asset_files",
+    "ANDROID_16KB_PAGE_ALIGN",
+]
 
 _log = get_logger("compiler.native")
+
+#: Android 15+ devices may run with 16 KB memory pages (and Google Play
+#: requires 16 KB support from 2025). A native library whose ``PT_LOAD``
+#: segments are only 4 KB aligned cannot be mapped there, whatever
+#: ``zipalign`` says: ZIP alignment and ELF alignment are checked separately.
+ANDROID_16KB_PAGE_ALIGN = 0x4000
 
 #: Default keystore used for debug builds.
 DEBUG_KEYSTORE_NAME = "pymobile-debug.jks"
@@ -62,6 +75,72 @@ _DESKTOP_ONLY_FRAMEWORK = (
     "core/ui/preview.py",
     "core/ui/extras_preview.py",
 )
+
+
+def framework_asset_files() -> list[Path]:
+    """Every framework file that is packaged into an APK, sorted.
+
+    Shared by the asset collector and by the build fingerprint: a framework
+    change (a renderer fix in ``pymobile/core``) must invalidate a cached APK
+    exactly like an application change does, or ``build`` keeps answering
+    "up to date" with the old code inside.
+    """
+    package_root = Path(__file__).resolve().parent.parent.parent
+    files: list[Path] = []
+    for path in package_root.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(package_root)
+        parts = relative.parts
+        if any(part in ("__pycache__", "tests") for part in parts):
+            continue
+        if path.suffix in (".pyc", ".pyo"):
+            continue
+        posix = relative.as_posix()
+        if any(
+            posix.startswith(item) if item.endswith("/") else posix == item
+            for item in _DESKTOP_ONLY_FRAMEWORK
+        ):
+            continue
+        files.append(path)
+    return sorted(files)
+
+
+def elf_load_alignments(path: Path) -> tuple[int, ...]:
+    """``p_align`` of every ``PT_LOAD`` segment of an ELF file.
+
+    The 16 KB page-size requirement is about the ELF *program headers*, and it
+    was verified on the shipped bridge: both prebuilt libraries now have
+    ``p_align = 0x4000`` (16 KB), matching the official CPython runtime
+    libraries they link against. Reading the headers here keeps that a build
+    gate rather than a FAQ entry — an APK that ships a 4 KB-aligned bridge
+    installs and then cannot start on a 16 KB-page device.
+    """
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ()
+    if len(data) < 64 or data[:4] != b"\x7fELF":
+        return ()
+    if data[5] != 1:  # big-endian: no Android ABI uses it
+        return ()
+    is64 = data[4] == 2
+    if is64:
+        e_phoff = struct.unpack_from("<Q", data, 32)[0]
+        e_phentsize, e_phnum = struct.unpack_from("<HH", data, 54)
+    else:
+        e_phoff = struct.unpack_from("<I", data, 28)[0]
+        e_phentsize, e_phnum = struct.unpack_from("<HH", data, 42)
+    alignments: list[int] = []
+    for index in range(e_phnum):
+        start = e_phoff + index * e_phentsize
+        header = data[start : start + e_phentsize]
+        if len(header) < e_phentsize:
+            break
+        if struct.unpack_from("<I", header, 0)[0] != 1:  # PT_LOAD
+            continue
+        alignments.append(struct.unpack_from("<Q" if is64 else "<I", header, 48 if is64 else 28)[0])
+    return tuple(alignments)
 
 
 def debug_keystore_path(package: str) -> Path:
@@ -215,6 +294,82 @@ class NativeBackend:
         self.abi = abi
         #: Non-fatal problems worth surfacing to the user.
         self.warnings: list[str] = []
+        #: True when the packaged launcher dex is used.
+        self._prebuilt_dex = False
+        #: Whether that dex reads assets/pymobile.properties (see
+        #: :meth:`_use_prebuilt_dex`). An ancient launcher calls "main.py"
+        #: unconditionally, so it needs a generated bootstrap.
+        self._prebuilt_dex_reads_metadata = True
+        #: Assets that are generated rather than copied from a file:
+        #: ``assets/pymobile.properties`` and the entry-point bootstrap.
+        self._extra_assets: dict[str, bytes] = {}
+        #: Entry point as declared in pymobile.toml, and how it was packaged.
+        self._entrypoint = "main.py"
+        self._entrypoint_type = "py"
+        #: Build fingerprint, recorded in the APK so the launcher re-extracts
+        #: its payload when the content changes (see ``set_payload_digest``).
+        self._payload_digest = ""
+
+    # -- 0. entry point ----------------------------------------------------
+    def set_payload_digest(self, digest: str) -> None:
+        """Record the build fingerprint the launcher uses as an install stamp.
+
+        ``PythonRuntime`` extracts its Python payload once per versionCode.
+        ``edit → build → adb install -r`` keeps versionCode at 1, so the APK
+        was replaced and the old application files stayed on disk behind a
+        successful reinstall (PM-29). The digest makes the stamp change
+        whenever the packaged content does.
+        """
+        self._payload_digest = digest[:32]
+
+    def set_entrypoint(self, name: str, entrypoint_type: str = "py") -> None:
+        """Record what the launcher must run, and in which form it was packaged.
+
+        ``assets/pymobile.properties`` describes it to the launcher; the
+        metadata used to exist only in structural builds, so a native APK with
+        ``entrypoint = "startup.py"`` shipped the file and then ran
+        ``main.py`` — which was not in the archive at all.
+        """
+        self._entrypoint = name
+        self._entrypoint_type = entrypoint_type
+
+    def _asset_metadata(self) -> bytes:
+        """The ``pymobile.properties`` payload written into the APK."""
+        return (
+            f"name={self.config.name}\n"
+            f"package={self.config.package}\n"
+            f"version={self.config.version}\n"
+            f"entrypoint={self._entrypoint}\n"
+            f"entrypoint_type={self._entrypoint_type}\n"
+            f"payload={self._payload_digest}\n"
+            f"optimize={int(self.config.optimize)}\n"
+        ).encode()
+
+    #: Bootstrap written to ``assets/app/main.py`` when the launcher packaged
+    #: in this APK can only run ``main.py`` (the prebuilt dex), while the
+    #: project uses a custom entry point or ships bytecode only.
+    _LAUNCHER_SHIM = """# Generated by PyMobile for the packaged launcher, which runs main.py.
+# Declared entry point: %(entry)s (%(kind)s).
+import os
+import runpy
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ENTRY = os.path.join(_HERE, %(entry_literal)s)
+
+if os.path.exists(_ENTRY):
+    runpy.run_path(_ENTRY, run_name="__main__")
+else:
+    # optimize = true ships bytecode only.
+    import importlib.machinery
+    import importlib.util
+
+    _loader = importlib.machinery.SourcelessFileLoader("__main__", _ENTRY + "c")
+    _spec = importlib.util.spec_from_loader("__main__", _loader)
+    _module = importlib.util.module_from_spec(_spec)
+    sys.modules["__main__"] = _module
+    _loader.exec_module(_module)
+"""
 
     # -- 1. native library -------------------------------------------------
     def compile_jni(self, workdir: Path) -> Path:
@@ -233,15 +388,49 @@ class NativeBackend:
         want_source_build = os.environ.get("PYMOBILE_BUILD_JNI") == "1"
         if not want_source_build or self.toolchain.clang_for(self.abi) is None:
             self._use_prebuilt_bridge(output_dir, libdir)
+            self._check_page_alignment(output_dir / "libpymobile.so")
             return output_dir
 
         try:
-            return self._compile_jni_with_ndk(workdir, output_dir, libdir)
+            result = self._compile_jni_with_ndk(workdir, output_dir, libdir)
         except PyMobileError as error:
             self.warnings.append(f"falling back to the prebuilt JNI bridge: {error}")
             _log.warning("NDK build failed, using the prebuilt bridge: %s", error)
             self._use_prebuilt_bridge(output_dir, libdir)
+            self._check_page_alignment(output_dir / "libpymobile.so")
             return output_dir
+        self._check_page_alignment(result / "libpymobile.so")
+        return result
+
+    def _check_page_alignment(self, library: Path) -> None:
+        """Report a ``libpymobile.so`` that is not ready for 16 KB pages.
+
+        The shipped bridges are linked with 16 KB load segments, so this is a
+        gate rather than a routine complaint: it fires for a bridge built by an
+        older release, for a source build made with a pre-r27 NDK, or for a
+        user-supplied binary. Such an APK installs but the library will not map
+        on a device configured with 16 KB memory pages, so the build says so
+        instead of shipping an artifact that dies at startup. Fix: rebuild with
+        ``PYMOBILE_BUILD_JNI=1`` and a current NDK.
+        """
+        alignments = elf_load_alignments(library)
+        if not alignments:
+            return
+        smallest = min(alignments)
+        if smallest >= ANDROID_16KB_PAGE_ALIGN:
+            _log.debug("%s is 16 KB page aligned (%#x)", library.name, smallest)
+            return
+        message = (
+            f"{library.name} ({self.abi}) has ELF load segments aligned to "
+            f"{smallest:#x}, not 0x4000: on Android devices with 16 KB memory "
+            "pages the library cannot be mapped. Rebuild the bridge from source "
+            "with a current NDK (PYMOBILE_BUILD_JNI=1; `pymobile setup-sdk "
+            "--with-ndk`) to get a 16 KB-ready APK — zipalign alone does not "
+            "change ELF program headers."
+        )
+        if message not in self.warnings:
+            self.warnings.append(message)
+        _log.warning("%s", message)
 
     def _use_prebuilt_bridge(self, output_dir: Path, libdir: Path) -> None:
         """Copy the packaged ``libpymobile.so`` and the interpreter libraries."""
@@ -294,6 +483,12 @@ class NativeBackend:
                 "-shared",
                 "-fPIC",
                 "-O2",
+                # 16 KB page support: link the load segments on 16 KB
+                # boundaries so the library can be mapped on devices that run
+                # with 16 KB memory pages (NDK r27+ defaults to this, older
+                # toolchains do not).
+                "-Wl,-z,max-page-size=16384",
+                "-Wl,-z,common-page-size=16384",
                 f"-I{include}",
                 str(source),
                 f"-L{libdir}",
@@ -323,12 +518,14 @@ class NativeBackend:
         if not want_source_build or not self.toolchain.javac.exists():
             return self._use_prebuilt_dex(workdir)
         try:
-            return self._compile_java_from_source(workdir)
+            result = self._compile_java_from_source(workdir)
         except PyMobileError as error:
             detail = f" {error.hint}" if error.hint else ""
             self.warnings.append(f"falling back to the prebuilt dex:{detail}")
             _log.warning("java build failed, using the prebuilt dex: %s", error)
             return self._use_prebuilt_dex(workdir)
+        self._prebuilt_dex = False
+        return result
 
     def _use_prebuilt_dex(self, workdir: Path) -> Path:
         """Copy the packaged launcher dex into the work directory.
@@ -345,6 +542,15 @@ class NativeBackend:
         target = workdir / "dex" / "classes.dex"
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(prebuilt, target)
+        #: The shipped launcher reads assets/pymobile.properties (entry point,
+        #: form it was packaged in, payload stamp), so no bootstrap is needed.
+        #: A dex from an older release does not, and for it the entry-point
+        #: shim below is generated; probing the bytes is the only way to tell
+        #: them apart, and it costs one scan of a 100 KB file.
+        self._prebuilt_dex_reads_metadata = b"pymobile.properties" in target.read_bytes()
+        self._prebuilt_dex = True
+        if not self._prebuilt_dex_reads_metadata:
+            _log.debug("the packaged launcher dex predates the metadata lookup")
         _log.debug("using the prebuilt launcher dex")
         return target
 
@@ -520,29 +726,59 @@ class NativeBackend:
 
         # Bundle the framework itself: the app imports `pymobile` on device.
         assets.update(self._framework_assets())
+
+        # Metadata the launcher reads (structural builds always had it; a
+        # native APK did not, so the launcher could not know the entry point).
+        self._extra_assets["assets/pymobile.properties"] = self._asset_metadata()
+        shim = self._entrypoint_shim(sources)
+        if shim is not None:
+            self._extra_assets["assets/app/main.py"] = shim
         return assets
+
+    def _entrypoint_shim(self, sources: list[tuple[str, Path]]) -> bytes | None:
+        """A ``main.py`` bootstrap for launchers that can only run ``main.py``.
+
+        The prebuilt launcher calls ``main.py`` and nothing else, so a project
+        with ``entrypoint = "startup.py"`` (or one packaged as bytecode only)
+        used to install an APK that raised ``FileNotFoundError`` on start. A
+        generated bootstrap forwards to the declared entry point; it is left
+        out when the project ships its own ``main.py`` (that file is the
+        app's, not ours) and the situation is reported instead.
+        """
+        needs_shim = self._entrypoint != "main.py" or self._entrypoint_type != "py"
+        if not self._prebuilt_dex or not needs_shim:
+            return None
+        if self._prebuilt_dex_reads_metadata:
+            # The packaged launcher runs whatever assets/pymobile.properties
+            # declares, which is why the file is written above.
+            return None
+        if any(name == "main.py" for name, _ in sources):
+            self.warnings.append(
+                "the packaged launcher runs main.py, and this project ships its own "
+                f"main.py as a module: the declared entry point ({self._entrypoint}) "
+                "will not be used until the launcher is rebuilt from source "
+                "(PYMOBILE_BUILD_JAVA=1)."
+            )
+            return None
+        _log.debug(
+            "adding a main.py bootstrap for the declared entry point %s", self._entrypoint
+        )
+        return (
+            self._LAUNCHER_SHIM
+            % {
+                "entry": self._entrypoint,
+                "kind": self._entrypoint_type,
+                "entry_literal": repr(self._entrypoint),
+            }
+        ).encode("utf-8")
 
     def _framework_assets(self) -> dict[str, Path]:
         """Map the installed ``pymobile`` package into the APK assets."""
         package_root = Path(__file__).resolve().parent.parent.parent
-        assets: dict[str, Path] = {}
-        for path in package_root.rglob("*"):
-            if not path.is_file():
-                continue
-            relative = path.relative_to(package_root)
-            parts = relative.parts
-            if any(part in ("__pycache__", "tests") for part in parts):
-                continue
-            if path.suffix in (".pyc", ".pyo"):
-                continue
-            posix = relative.as_posix()
-            if any(
-                posix.startswith(item) if item.endswith("/") else posix == item
-                for item in _DESKTOP_ONLY_FRAMEWORK
-            ):
-                continue
-            assets[f"assets/app/pymobile/{posix}"] = path
-        return assets
+        return {
+            f"assets/app/pymobile/{path.relative_to(package_root).as_posix()}": path
+            for path in framework_asset_files()
+        }
 
     # -- 6. package --------------------------------------------------------
     def package(
@@ -590,12 +826,11 @@ class NativeBackend:
                 )
             for name, path in sorted(assets.items()):
                 archive.writestr(entry(name), path.read_bytes())
+            for name, payload in sorted(self._extra_assets.items()):
+                archive.writestr(entry(name), payload)
 
         aligned = workdir / "aligned.apk"
-        _run(
-            [self.toolchain.zipalign, "-f", "-p", "4", staged, aligned],
-            step="zipalign",
-        )
+        self._align(staged, aligned)
 
         keystore = self.keystore or self._ensure_debug_keystore(workdir)
         if self._release_keystore and not self._keystore_password_given:
@@ -632,6 +867,55 @@ class NativeBackend:
             },
         )
         return output
+
+    def _align(self, staged: Path, aligned: Path) -> None:
+        """Page-align the archive for 16 KB-page devices when possible.
+
+        Two shapes of the tool exist, and both are now exercised:
+
+        * build-tools 35+ understand ``zipalign -p 4 -P 16`` — 4 KB entries and
+          uncompressed shared libraries on 16 KB boundaries, exactly what the
+          Android guidance asks for;
+        * older releases have no ``-P`` at all (``zipalign -f -p 4 -P 16`` fails
+          with "unknown flag"), and the documented pre-guidance workaround is
+          the alignment argument itself: ``zipalign -f 16384``. Only stored
+          entries are padded, so in practice that is ``resources.arsc`` and the
+          (few) shared libraries.
+
+        The ELF side of the requirement is checked separately — see
+        :meth:`_check_page_alignment`.
+        """
+        version = self.toolchain.build_tools_version
+        modern: list[str | Path] = [
+            self.toolchain.zipalign,
+            "-f",
+            "-p",
+            "4",
+            "-P",
+            "16",
+            staged,
+            aligned,
+        ]
+        if version >= (35,) or not version:
+            try:
+                _run(modern, step="zipalign")
+                return
+            except PyMobileError:
+                if version:  # the version promised the flag: a real failure
+                    raise
+                _log.debug("this zipalign has no -P 16; using the 16384 alignment argument")
+        # No ``-p``: it pins shared libraries to the 4 KB page size, which is
+        # the very thing being fixed here.
+        _run([self.toolchain.zipalign, "-f", "16384", staged, aligned], step="zipalign")
+        # Measured on build-tools 34.0.0: this puts every stored entry —
+        # ``resources.arsc`` and every ``lib/<abi>/*.so`` — on 16 KB
+        # boundaries, so the artifact is equivalent to the modern flag for
+        # everything a 16 KB-page device loads. Only a debug note, then, and
+        # not a warning: nothing is wrong with the output.
+        _log.debug(
+            "zipalign %s: page alignment done through the alignment argument",
+            ".".join(str(part) for part in version) or "unknown version",
+        )
 
     def _ensure_debug_keystore(self, workdir: Path) -> Path:
         """Create (once) the app's debug keystore outside the build directory.
