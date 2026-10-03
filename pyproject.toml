@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pymobile-framework"
-version = "0.9.1"
+version = "0.9.2"
 description = "A small, fast and extensible Python framework for building Android applications."
 readme = "README.md"
 requires-python = ">=3.10"

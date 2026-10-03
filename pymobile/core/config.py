@@ -47,11 +47,14 @@ RUNTIME_MIN_SDK = 24
 #: ``pymobile.toml`` **adds** to these instead of replacing them: a project
 #: that lists one pattern of its own used to lose ``build/**`` and ship the
 #: previous APK (or anything else sitting in the output directory) inside the
-#: new one.
+#: new one. ``*.md`` is documentation, not app data — it keeps the
+#: scaffolded ``README.md`` out of the APK so a fresh project builds with no
+#: "not packaged" warning.
 DEFAULT_EXCLUDE: tuple[str, ...] = (
     "**/__pycache__/**",
     "**/*.pyc",
     "**/*.pyo",
+    "*.md",
     "**/tests/**",
     "tests/**",
     "**/test_*.py",
@@ -211,12 +214,14 @@ class ProjectConfig:
     def apk_name(self) -> str:
         """File name of the produced APK.
 
-        Names written in a non-Latin script would be stripped to nothing by the
-        ASCII filter, so the last package segment is used instead of a generic
-        ``app`` — ``Нотатки`` (com.example.notes) yields ``notes-0.1.0.apk``.
+        Names written in a non-Latin script strip to nothing under the ASCII
+        filter — and so do names whose Latin residue is digits only,
+        ``Нотатки 2`` (com.example.notes) strips to ``2`` — so the last
+        package segment is used instead of a generic or digit-only file name:
+        both yield ``notes-0.1.0.apk``.
         """
         safe = re.sub(r"[^A-Za-z0-9._-]+", "-", self.name).strip("-.").lower()
-        if not safe:
+        if not re.search(r"[a-z]", safe):
             safe = self.package.rsplit(".", 1)[-1]
         # An emulator build must not be mistaken for (or overwrite) the phone
         # APK: it is suffixed with its ABI. The arm64 name is unchanged.

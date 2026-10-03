@@ -247,6 +247,27 @@ class TestAssetSuffixes:
         build._collect()
         assert any(".csv" in warning for warning in build.warnings)
 
+    def test_scaffolded_project_builds_without_asset_warnings(self, tmp_path: Path) -> None:
+        # Regression: `pymobile init` + `pymobile build` used to warn about
+        # the scaffolded README.md right away, and listing "*.md" in exclude
+        # did not silence the warning.
+        from pymobile.compiler.scaffold import create_project
+        from pymobile.core.config import load_config
+
+        create_project(tmp_path, "My App")
+        build = BuildPipeline(load_config(tmp_path), use_cache=False)
+        build._collect()
+        assert not any("NOT packaged" in warning for warning in build.warnings)
+
+    def test_user_exclude_patterns_silence_the_warning(self, tmp_path: Path) -> None:
+        # Regression: exclude patterns in pymobile.toml used to be ignored by
+        # the "not packaged" warning entirely.
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "secret.csv").write_text("a,b\n", encoding="utf-8")
+        build = BuildPipeline(_project(tmp_path, exclude=["data/**"]), use_cache=False)
+        build._collect()
+        assert not any("NOT packaged" in warning for warning in build.warnings)
+
 
 # --------------------------------------------------------------------------
 # Launcher sources: entry point, status, extraction stamp (PM-24/27/29/30)

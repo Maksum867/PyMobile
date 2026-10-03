@@ -77,6 +77,15 @@ class TestDerivedPaths:
         config = ProjectConfig(name="Нотатки", package="com.example.notes", version="1.0")
         assert config.apk_name == "notes-1.0.apk"
 
+    def test_apk_name_falls_back_when_only_digits_remain(self) -> None:
+        # "Нотатки 2" strips to the bare digit "2" under the ASCII filter —
+        # a digit-only file name is no better than no name, so the package
+        # segment is used there too.
+        config = ProjectConfig(name="Нотатки 2", package="com.example.notes", version="1.0")
+        assert config.apk_name == "notes-1.0.apk"
+        config = ProjectConfig(name="2048", version="1.0")
+        assert config.apk_name == "app-1.0.apk"
+
     def test_apk_name_never_starts_with_a_dot(self) -> None:
         config = ProjectConfig(name=".hidden", package="com.example.app")
         assert not config.apk_name.startswith(".")

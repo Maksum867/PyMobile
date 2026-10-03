@@ -509,6 +509,19 @@ class TestScaffold:
         assert slugify("Скарбничка") == "skarbnychka"
         assert default_package("My App") == "org.pymobile.myapp"
 
+    def test_slugify_with_mixed_scripts_and_digits(self) -> None:
+        # Regression: the ASCII fast path used to skip transliteration
+        # whenever a digit was present ("Мій додаток 2" -> "2"), and NFKD ran
+        # before the transliteration table, so "Йогурт" became "yohurt".
+        assert slugify("Мій додаток 2") == "miidodatok2"
+        assert slugify("Йогурт") == "iohurt"
+        # A slug must not start with a digit: Java package segments require a
+        # letter first, so "2048" used to produce a package that
+        # ConfigError: Invalid package name rejected on the first build.
+        assert slugify("2048") == "app2048"
+        assert slugify("123 App") == "app123app"
+        assert default_package("Мій додаток 2") == "org.pymobile.miidodatok2"
+
     def test_render_keeps_unknown_placeholders(self) -> None:
         assert render("{{a}}-{{b}}", {"a": "1"}) == "1-{{b}}"
 

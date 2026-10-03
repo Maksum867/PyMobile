@@ -85,4 +85,4 @@ Thumbs.db
 .DS_Store
 pymobile-demo/
 PYPI_INSTRUCTIONS.md
-tools/
+sync_readme_version.py

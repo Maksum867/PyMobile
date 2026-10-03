@@ -55,7 +55,6 @@ DEFAULT_ASSET_SUFFIXES = frozenset(
 _IGNORED_ASSET_DIRS = frozenset(
     {".git", ".hg", ".svn", "__pycache__", "venv", ".venv", "build", "dist", ".pymobile"}
 )
-DEFAULT_EXCLUDE_PARTS = frozenset({".git", "build", "dist", "venv", ".venv", "__pycache__"})
 
 #: Names that make ``<receiver>.notify(...)`` a PyMobile notification: ``app``,
 #: ``self.app``, ``my_app``, ``app.notifications``, ``get_bridge()`` … A
@@ -436,8 +435,19 @@ class BuildPipeline:
         return sources
 
     def _warn_about_ignored_assets(self, sources: SourceSet) -> None:
-        """Name the extensions found in the sources that did not get packaged."""
-        packaged = {path.suffix.lower() for path in sources.files}
+        """Name the extensions found in the sources that did not get packaged.
+
+        Files matching ``exclude`` (the defaults plus the project's own
+        patterns) are skipped: a ``README.md`` the project deliberately keeps
+        out of the APK is not a problem to report. Suffixes are compared
+        against the allowed set (defaults + ``asset_suffixes``), not against
+        what happened to be collected.
+        """
+        from .collector import _is_excluded
+
+        allowed_suffixes = DEFAULT_ASSET_SUFFIXES | {
+            str(suffix).lower() for suffix in self.config.asset_suffixes
+        }
         ignored: dict[str, int] = {}
         for path in self.config.source_path.rglob("*"):
             if not path.is_file():
@@ -445,10 +455,10 @@ class BuildPipeline:
             relative = path.relative_to(self.config.source_path)
             if any(part in _IGNORED_ASSET_DIRS for part in relative.parts):
                 continue
-            suffix = path.suffix.lower()
-            if not suffix or suffix in packaged:
+            if _is_excluded(relative, self.config.exclude):
                 continue
-            if any(part in DEFAULT_EXCLUDE_PARTS for part in relative.parts):
+            suffix = path.suffix.lower()
+            if not suffix or suffix in allowed_suffixes:
                 continue
             ignored[suffix] = ignored.get(suffix, 0) + 1
         if not ignored:

@@ -87,19 +87,32 @@ def slugify(name: str) -> str:
     ASCII names keep their letters and digits only (``My Cool App!`` →
     ``mycoolapp``). Names written in another script are transliterated so
     ``Скарбничка`` becomes ``skarbnychka`` instead of the generic ``app``.
+
+    The step order matters: Cyrillic is transliterated *before* NFKD, because
+    NFKD decomposes ``й`` into ``и`` + combining breve and the table would
+    then read it as ``и`` (``y``) instead of ``й`` (``i``). And a slug that
+    would start with a digit gets an ``app`` prefix, because a Java package
+    segment must begin with a letter (``Мій додаток 2`` → ``miidodatok2``,
+    ``2048`` → ``app2048``).
     """
     import unicodedata
 
-    lowered = name.lower()
-    slug = re.sub(r"[^a-z0-9]+", "", lowered)
-    if slug:
-        return slug
-    transliterated = unicodedata.normalize("NFKD", lowered).translate(_CYRILLIC)
-    ascii_only = unicodedata.normalize("NFKD", transliterated).encode("ascii", "ignore").decode(
-        "ascii"
+    # Transliterate first, before NFKD can decompose «й»/«ї» into
+    # base letters + a diacritic mark the table would misread.
+    transliterated = name.lower().translate(_CYRILLIC)
+    # Then drop the diacritics from whatever Latin is left (é → e).
+    ascii_only = (
+        unicodedata.normalize("NFKD", transliterated)
+        .encode("ascii", "ignore")
+        .decode("ascii")
     )
     slug = re.sub(r"[^a-z0-9]+", "", ascii_only)
-    return slug or "app"
+    if not slug:
+        return "app"
+    # A package segment cannot start with a digit (see _PACKAGE_RE in core).
+    if slug[0].isdigit():
+        return f"app{slug}"
+    return slug
 
 
 def default_package(name: str) -> str:

@@ -3,6 +3,60 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.9.2] — 2026-10-03
+
+### Fixed
+
+- **Cyrillic names mixed with digits broke the scaffold.** `slugify()` stripped
+  everything outside `a-z0-9` first and returned early when anything was left,
+  so `Мій додаток 2` collapsed to `2` and transliteration never ran. It now
+  transliterates first and strips afterwards, so the same name becomes
+  `miidodatok2`.
+- **Digit-leading names produced an invalid Android package.** `default_package()`
+  used `org.pymobile.2048` for a project named `2048` (and `org.pymobile.123app`
+  for `123 App`); the first build after `pymobile init` then died with
+  `ConfigError: Invalid package name`, because a package segment must start with
+  a letter. A slug that would start with a digit now gets an `app` prefix
+  (`2048` → `org.pymobile.app2048`).
+- **`й` transliterated as `y`.** The NFKD normalization ran before the Cyrillic
+  table, decomposing `й` into `и` + combining breve, which the table then read
+  as `и` — so `Йогурт` became `yohurt`. Transliteration now runs first and
+  `Йогурт` correctly becomes `iohurt`.
+- **`pymobile init && pymobile build` warned about files `exclude` already
+  covered.** `_warn_about_ignored_assets()` never consulted the project's
+  `exclude` patterns (only a hard-coded list of directory names) and compared
+  suffixes against the files that happened to be packaged instead of the
+  allowed set — so a fresh project warned about its own `README.md`, and adding
+  `*.md` to `exclude` did not silence it. Excluded files are now skipped through
+  the collector's gitignore-style matcher, and the warning is raised only for
+  extensions outside `DEFAULT_ASSET_SUFFIXES | asset_suffixes`.
+- **APK file names reduced to bare digits.** A project named `Нотатки 2` stripped
+  to `2` under the ASCII filter, producing `2-0.1.0.apk`. `apk_name` now falls
+  back to the last package segment whenever the sanitized name contains no Latin
+  letter — `Нотатки 2` (com.example.notes) yields `notes-0.1.0.apk`, same as
+  `Нотатки`.
+- **The scaffolded `main.py` disagreed with the README quick start.** The
+  template's `on_tap` used `self.counter.set_text(...)` while the documentation
+  shows `self.counter.text = ...`; the template now uses the property, so the
+  first app created with `pymobile init` matches the README line for line.
+
+### Changed
+
+- Markdown files are excluded from the APK by default: `*.md` joined
+  `DEFAULT_EXCLUDE` and the scaffolded `pymobile.toml`, so a fresh project builds
+  with zero warnings (a README is documentation, not app data).
+- The alpha banner in `README.md` now says 0.9.x instead of the stale 0.8.x, and
+  the `#WAT-03` row ("`pymobile watch` ignores saves on some tmpfs and overlayfs
+  mounts") was removed from Known issues — the watcher already catches those
+  saves through content-hash change detection.
+
+### Added
+
+- Regression tests for all of the above: Cyrillic-plus-digit slugs, digit-leading
+  packages, digit-residue APK names, warning-free builds of scaffolded projects,
+  and `exclude` patterns silencing the "not packaged" warning
+  (`test_compiler.py`, `test_config.py`, `test_audit_platform_fixes.py`).
+
 ## [0.9.1] — 2026-10-03
 
 ### Security

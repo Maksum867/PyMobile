@@ -35,6 +35,7 @@ strip_debug = true    # strip docstrings and asserts (-OO)
 exclude = [
     "**/__pycache__/**",
     "**/*.pyc",
+    "*.md",
     "tests/**",
     "docs/**",
     ".git/**",

@@ -10,7 +10,6 @@ Write a declarative UI, run one command, install the APK on your phone.
 [![Python](https://img.shields.io/pypi/pyversions/pymobile-framework.svg)](https://pypi.org/project/pymobile-framework/)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](https://github.com/Maksum867/py-mobile/issues)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Maksum867/py-mobile/blob/main/LICENSE)
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow.svg)](https://buymeacoffee.com/Maksum867)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Maksum867/py-mobile/main/docs/demo.gif"
@@ -21,7 +20,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 
 > ### ⚠️ Alpha software — known bugs, actively being fixed
 >
-> PyMobile is at **0.8.x** and is still in alpha. It builds and signs real,
+> PyMobile is at **0.9.x** and is still in alpha. It builds and signs real,
 > installable APKs today, but the API can change between minor releases and
 > there are known bugs. I am actively working on them: fixes ship in
 > every release — see the
@@ -31,7 +30,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.9.1`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.9.2`) and read the
 > changelog before upgrading. What may change, and how much notice you get, is
 > written down in the
 > [versioning and deprecation policy](#versioning-and-deprecation-policy). Bug
@@ -2146,7 +2145,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.9.1", "platform": "android",
+# {"framework_version": "0.9.2", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 
@@ -2620,17 +2619,10 @@ four renderers (`ViewBuilder.java` + a rebuilt `classes.dex`, `web.py`, `gui.py`
 
 ## Known issues
 
-Open items we are tracking, with the workaround in place until they are fixed.
-The full list lives in
-[GitHub Issues](https://github.com/Maksum867/py-mobile/issues); these are the
-ones most likely to bite a new user.
-
-| Symptom | Workaround | Tracked under |
-| --- | --- | --- |
-| `pymobile watch` ignores saves on some tmpfs and overlayfs mounts (coarse mtime granularity) | Use `pymobile watch --interval 0.1` to poll more aggressively, or run from a real filesystem | [#WAT-03] |
-
-Report a new issue with a reproducer (`main.py` + `pymobile.toml`) and the
-device or platform. Bug reports with a regression test land faster.
+There are currently no open known issues. If you hit something new, report
+it on [GitHub Issues](https://github.com/Maksum867/py-mobile/issues) with a
+reproducer (`main.py` + `pymobile.toml`) and the device or platform. Bug
+reports with a regression test land faster.
 
 ---
 
@@ -2782,24 +2774,6 @@ Yes, under `[tool.pymobile]`. If both files exist, `pymobile.toml` wins.
 
 **Do I need Android Studio?**
 No. `pymobile setup-sdk` downloads only the command-line tools it needs.
-
----
-
-## Support the project
-
-PyMobile is free under the MIT license and is written by one person; the
-framework, the Android layer, the documentation and the tests are hours that
-would otherwise go somewhere else. If it saved you time — or you just want it
-to keep getting better — you can buy me a coffee:
-
-<a href="https://buymeacoffee.com/Maksum867">
-  <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow.svg?style=for-the-badge"
-       alt="Buy Me a Coffee" height="32">
-</a>
-
-Money is never the only way to help: a bug report with a reproduction, a fixed
-typo, a better sentence in these docs, or a star on the repository are just as
-useful.
 
 ---
 
