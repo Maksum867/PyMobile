@@ -873,7 +873,7 @@ else:
 
         Two shapes of the tool exist, and both are now exercised:
 
-        * build-tools 35+ understand ``zipalign -p 4 -P 16`` — 4 KB entries and
+        * build-tools 35+ understand ``zipalign -f -P 16 4`` — 4-byte entries and
           uncompressed shared libraries on 16 KB boundaries, exactly what the
           Android guidance asks for;
         * older releases have no ``-P`` at all (``zipalign -f -p 4 -P 16`` fails
@@ -895,17 +895,30 @@ else:
             staged,
             aligned,
         ]
+        modern_error: PyMobileError | None = None
         if version >= (35,) or not version:
             try:
                 _run(modern, step="zipalign")
                 return
-            except PyMobileError:
+            except PyMobileError as exc:
                 if version:  # the version promised the flag: a real failure
                     raise
-                _log.debug("this zipalign has no -P 16; using the 16384 alignment argument")
+                modern_error = exc
+                _log.debug("zipalign -P 16 failed; trying the 16384 alignment argument")
         # No ``-p``: it pins shared libraries to the 4 KB page size, which is
         # the very thing being fixed here.
-        _run([self.toolchain.zipalign, "-f", "16384", staged, aligned], step="zipalign")
+        try:
+            _run([self.toolchain.zipalign, "-f", "16384", staged, aligned], step="zipalign")
+        except PyMobileError as exc:
+            if modern_error is None:
+                raise
+            raise PyMobileError(
+                "zipalign failed with both shapes (-P 16 4 and 16384)",
+                hint=(
+                    f"-P 16 4: {modern_error}\n{modern_error.hint or ''}\n"
+                    f"16384: {exc}\n{exc.hint or ''}"
+                ),
+            ) from exc
         # Measured on build-tools 34.0.0: this puts every stored entry —
         # ``resources.arsc`` and every ``lib/<abi>/*.so`` — on 16 KB
         # boundaries, so the artifact is equivalent to the modern flag for

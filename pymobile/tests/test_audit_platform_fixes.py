@@ -663,6 +663,58 @@ class TestZipAlignPageSizeFlag:
         assert len(seen) == 2, seen
         assert "-P" in seen[0] and "-P" not in seen[1]
 
+    @pytest.mark.parametrize("version", ["34.0.0", "37.0.0", "beta"])
+    def test_alignment_failures_preserve_diagnostics(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: str
+    ) -> None:
+        import pymobile.compiler.backends.native as native_module
+        from pymobile.errors import PyMobileError
+
+        errors: list[PyMobileError] = []
+
+        def fail(command: list[Any], **_: Any) -> str:
+            shape = "modern" if "-P" in command else "legacy"
+            error = PyMobileError(f"{shape} failed", hint=f"{shape} diagnostic")
+            errors.append(error)
+            raise error
+
+        monkeypatch.setattr(native_module, "_run", fail)
+        backend = self._backend(tmp_path, version)
+        with pytest.raises(PyMobileError) as caught:
+            backend._align(tmp_path / "in.apk", tmp_path / "out.apk")
+        if version == "beta":
+            assert len(errors) == 2
+            assert caught.value.__cause__ is errors[1]
+            for error in errors:
+                assert str(error) in caught.value.hint
+                assert error.hint in caught.value.hint
+        else:
+            assert len(errors) == 1
+            assert caught.value is errors[0]
+
+    @pytest.mark.parametrize("modern_succeeds", [True, False])
+    def test_an_unknown_version_can_succeed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, modern_succeeds: bool
+    ) -> None:
+        import pymobile.compiler.backends.native as native_module
+        from pymobile.errors import PyMobileError
+
+        seen: list[list[Any]] = []
+
+        def run(command: list[Any], **_: Any) -> str:
+            seen.append(command)
+            if "-P" in command and not modern_succeeds:
+                raise PyMobileError("unsupported flag")
+            return "ok"
+
+        monkeypatch.setattr(native_module, "_run", run)
+        backend = self._backend(tmp_path, "beta")
+        backend._align(tmp_path / "in.apk", tmp_path / "out.apk")
+        assert len(seen) == (1 if modern_succeeds else 2)
+        assert "-P" in seen[0]
+        if not modern_succeeds:
+            assert seen[1][2] == "16384"
+
 
 # --------------------------------------------------------------------------
 # Documentation that disagreed with the code (PM-21, PM-22)
