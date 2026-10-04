@@ -160,6 +160,8 @@ class Widget:
         "_props",
         "_screen",
         "_explicit_id",
+        "_animate_visibility",
+        "_animation_duration_ms",
     )
 
     def __init__(
@@ -169,13 +171,25 @@ class Widget:
         style: Style | None = None,
         visible: bool = True,
         enabled: bool = True,
+        animate_visibility: bool = False,
+        animation_duration_ms: int = 220,
         **props: Any,
     ) -> None:
         self._explicit_id = id is not None
         self.id = id or auto_id(type(self).__name__.lower())
         self.style = style or Style()
+        if not isinstance(animate_visibility, bool):
+            raise TypeError("animate_visibility must be a bool")
+        if (
+            isinstance(animation_duration_ms, bool)
+            or not isinstance(animation_duration_ms, int)
+            or not 0 <= animation_duration_ms <= 5000
+        ):
+            raise ValueError("animation_duration_ms must be an int from 0 to 5000")
         self._visible = visible
         self._enabled = enabled
+        self._animate_visibility = animate_visibility
+        self._animation_duration_ms = animation_duration_ms
         self._parent: Widget | None = None
         self._screen: Screen | None = None
         self._props: WidgetProps = {}
@@ -317,6 +331,32 @@ class Widget:
             self.invalidate()
 
     @property
+    def animate_visibility(self) -> bool:
+        """Whether visibility changes fade/scale on Android (default: false)."""
+        return self._animate_visibility
+
+    @animate_visibility.setter
+    def animate_visibility(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError("animate_visibility must be a bool")
+        if value != self._animate_visibility:
+            self._animate_visibility = value
+            self.invalidate()
+
+    @property
+    def animation_duration_ms(self) -> int:
+        """Duration of this widget's visibility animation, from 0 to 5000 ms."""
+        return self._animation_duration_ms
+
+    @animation_duration_ms.setter
+    def animation_duration_ms(self, value: int) -> None:
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 5000:
+            raise ValueError("animation_duration_ms must be an int from 0 to 5000")
+        if value != self._animation_duration_ms:
+            self._animation_duration_ms = value
+            self.invalidate()
+
+    @property
     def enabled(self) -> bool:
         """Whether the widget reacts to input."""
         return self._enabled
@@ -387,6 +427,11 @@ class Widget:
             style = {}
         if style:
             node["style"] = style
+        if self._animate_visibility:
+            node["animation"] = {
+                "visibility": "fade_scale",
+                "duration_ms": self._animation_duration_ms,
+            }
         children = []
         for child in self.children:
             try:

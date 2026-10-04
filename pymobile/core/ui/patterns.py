@@ -191,6 +191,11 @@ class FormField(_Pattern):
         on_change: Callable[[str], None] | None = None,
         **kwargs: Any,
     ) -> None:
+        if name is None:
+            raise TypeError(
+                "FormField needs a field name as its first argument, e.g. "
+                "FormField('email', label='Email'); label= is display text, not the form key."
+            )
         if not isinstance(name, str) or not name.strip():
             raise ValueError("a form field needs a non-empty name")
         if isinstance(rules, (str, bytes)):
@@ -276,6 +281,12 @@ class FormField(_Pattern):
             self.on_change(value)
 
     def validate(self) -> bool:
+        """Mark the field touched, update :attr:`error`, and return valid/invalid.
+
+        This returns a bool, not a list of messages. Read ``field.error`` for
+        this field's message, or ``form.errors`` for a mapping of all invalid
+        field names to their first message.
+        """
         errors = Validator({self.name: self.rules}).validate({self.name: self.value})
         self._touched = True
         self.set_error(errors.get(self.name))
@@ -509,7 +520,7 @@ Tabs = TabView
 
 
 class ExpansionPanel(_Pattern):
-    """An expandable section; animations are intentionally not part of this API."""
+    """An expandable section with an optional native fade/scale transition."""
 
     __slots__ = ("title", "_expanded", "on_toggle", "_header", "_content")
 
@@ -518,13 +529,24 @@ class ExpansionPanel(_Pattern):
         title: str,
         *content: Widget,
         expanded: bool = False,
+        animated: bool = True,
+        animation_duration_ms: int = 220,
         on_toggle: Callable[[bool], None] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(spacing=8, **kwargs)
         self.title, self._expanded, self.on_toggle = str(title), bool(expanded), on_toggle
+        if not isinstance(animated, bool):
+            raise TypeError("animated must be a bool")
         self._header = Button("", on_press=self.toggle, id=f"{self.id}:header")
-        self._content = Column(*content, spacing=8, id=f"{self.id}:content", visible=self._expanded)
+        self._content = Column(
+            *content,
+            spacing=8,
+            id=f"{self.id}:content",
+            visible=self._expanded,
+            animate_visibility=animated,
+            animation_duration_ms=animation_duration_ms,
+        )
         self._sync()
         self._replace((self._header, self._content), notify=False)
 

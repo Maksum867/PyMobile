@@ -325,6 +325,8 @@ final class ViewBuilder {
     private final WeakHashMap<View, String> imageSources = new WeakHashMap<>();
     private final WeakHashMap<View, Integer> inputRevisions = new WeakHashMap<>();
     private final WeakHashMap<View, double[]> sliderScales = new WeakHashMap<>();
+    /** Last requested visibility for nodes opting into a native visibility animation. */
+    private final WeakHashMap<View, Boolean> animatedVisibilityTargets = new WeakHashMap<>();
 
     /** Paging state of a List: more rows exist / the row count last requested. */
     private static final class ListState {
@@ -523,18 +525,24 @@ final class ViewBuilder {
                 view = buildLabel(props);
                 break;
             default:
-                // A type without a branch above has no native renderer. This
-                // used to build an empty Label, so the widget vanished from the
-                // phone with no error to explain it (and the Python previews,
-                // which print "<BarChart>", looked fine). Draw a labelled
-                // placeholder instead and log the type, so a missing case here
-                // is visible on the device as well.
-                view = buildUnknown(type, props);
+                // Project-local implementations follow the WidgetRenderer
+                // contract and are found automatically from java/. The generic
+                // registry keeps custom Java out of the installed package.
+                view = CustomWidgetRegistry.build(context, type, id, props);
+                if (view == null) {
+                    // Keep a visible diagnostic rather than silently dropping
+                    // an unknown widget on the floor.
+                    view = buildUnknown(type, props);
+                }
                 break;
         }
 
         view.setEnabled(enabled);
         view.setVisibility(visible ? View.VISIBLE : View.GONE);
+        JSONObject animation = node.optJSONObject("animation");
+        if (animation != null && "fade_scale".equals(animation.optString("visibility", ""))) {
+            animatedVisibilityTargets.put(view, visible);
+        }
         applyStyle(view, style);
         if ("Dialog".equals(type)) {
             // The anchor never takes space: the dialog shows in its own window.
@@ -549,6 +557,34 @@ final class ViewBuilder {
         // instead of rebuilding the screen (which loses scroll and focus).
         view.setTag(id);
         return view;
+    }
+
+    /** Fade and slightly scale a view when an opted-in widget changes visibility. */
+    private void animateVisibility(final View view, boolean visible, int duration) {
+        view.animate().cancel();
+        int millis = Math.max(0, Math.min(duration, 5000));
+        if (millis == 0) {
+            view.setAlpha(1f);
+            view.setScaleY(1f);
+            view.setVisibility(visible ? View.VISIBLE : View.GONE);
+            return;
+        }
+        view.setPivotY(0f);
+        if (visible) {
+            view.setVisibility(View.VISIBLE);
+            view.setAlpha(0f);
+            view.setScaleY(0.96f);
+            view.animate().alpha(1f).scaleY(1f).setDuration(millis).start();
+        } else {
+            view.animate().alpha(0f).scaleY(0.96f).setDuration(millis).withEndAction(new Runnable() {
+                @Override
+                public void run() {
+                    view.setVisibility(View.GONE);
+                    view.setAlpha(1f);
+                    view.setScaleY(1f);
+                }
+            }).start();
+        }
     }
 
     private View buildVector(String kind, String id, JSONObject props) {
@@ -2536,7 +2572,23 @@ final class ViewBuilder {
         }
 
         view.setEnabled(node.optBoolean("enabled", true));
-        view.setVisibility(node.optBoolean("visible", true) ? View.VISIBLE : View.GONE);
+        boolean visible = node.optBoolean("visible", true);
+        JSONObject animation = node.optJSONObject("animation");
+        boolean animateVisibility = animation != null
+                && "fade_scale".equals(animation.optString("visibility", ""));
+        if (animateVisibility) {
+            Boolean target = animatedVisibilityTargets.get(view);
+            if (target == null) {
+                animatedVisibilityTargets.put(view, visible);
+                view.setVisibility(visible ? View.VISIBLE : View.GONE);
+            } else if (target.booleanValue() != visible) {
+                animatedVisibilityTargets.put(view, visible);
+                animateVisibility(view, visible, animation.optInt("duration_ms", 220));
+            }
+        } else {
+            animatedVisibilityTargets.remove(view);
+            view.setVisibility(visible ? View.VISIBLE : View.GONE);
+        }
 
         // Re-apply style (background, padding, elevation, ...) so theme switches
         // and styling changes are reflected without a full rebuild.
@@ -2548,6 +2600,9 @@ final class ViewBuilder {
         // makes the caller rebuild the ENTIRE screen — closing the keyboard,
         // resetting scroll and losing widget state on every render.
 
+        if (CustomWidgetRegistry.hasRenderer(type)) {
+            return CustomWidgetRegistry.update(view, type, id, props);
+        }
         if ("Icon".equals(type) || "IconButton".equals(type) || "Chart".equals(type)) {
             if (!(view instanceof AdvancedViews.VectorView)
                     || !type.equals(((AdvancedViews.VectorView) view).kind)) return false;

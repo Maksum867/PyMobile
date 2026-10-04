@@ -81,6 +81,13 @@ class List(Container):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
+        if isinstance(item_count, bool) or not isinstance(item_count, int):
+            raise TypeError(
+                "List is a lazy, data-driven list: pass item_count as an int and "
+                "builder(index)=...; for a few prebuilt children use Column(...), "
+                "optionally inside ScrollView(...). Example: "
+                "List(item_count=len(items), builder=lambda i: ListTile(items[i]))"
+            )
         if item_count < 0:
             raise ValueError("item_count must not be negative")
         if spacing < 0:

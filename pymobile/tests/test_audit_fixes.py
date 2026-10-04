@@ -1,8 +1,8 @@
 """Regression tests for the Android shell, build, storage and HTTP audit fixes.
 
-The Java renderer cannot run on the desktop, so its fixes are checked the same
-way the rest of the suite checks Java: by the structure of the sources, and by
-the prebuilt ``classes.dex`` actually containing the code that ships.
+The Java renderer cannot run on the desktop, so its behavior is checked through
+source structure and the DEX symbols in the reusable prebuilt fallback. Native
+builds compile the current Java sources by default when the Android SDK exists.
 """
 
 from __future__ import annotations
@@ -392,20 +392,16 @@ class TestViewBuilderStructure:
 
 
 class TestPrebuiltDex:
-    """The dex in the wheel is what runs on phones without a JDK/NDK.
-
-    It had not been rebuilt since v0.3.0: every fix to ViewBuilder.java was
-    invisible on a device and 20 widget types fell back to a plain view.
-    """
+    """The architecture-neutral dex remains a usable low-level fallback."""
 
     dex = PREBUILT_DEX.read_bytes()
 
-    def test_every_widget_type_is_compiled_in(self) -> None:
+    def test_fallback_dex_contains_every_builtin_widget_type(self) -> None:
         source = (JAVA_DIR / "ViewBuilder.java").read_text(encoding="utf-8")
         cases = sorted(set(re.findall(r'case "([A-Za-z]+)":', source)))
         assert cases
         missing = [kind for kind in cases if kind.encode() not in self.dex]
-        assert not missing, f"prebuilt classes.dex is stale; rebuild it: {missing}"
+        assert not missing, f"prebuilt fallback dex is missing built-in types: {missing}"
 
     def test_renderer_fixes_are_compiled_in(self) -> None:
         for symbol in (b"setTheme", b"applyListTile", b"syncDialog", b"applySliderScale"):

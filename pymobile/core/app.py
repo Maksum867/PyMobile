@@ -236,8 +236,20 @@ class App:
         version: str = "",
         package: str = "",
         log_file: str | None = None,
+        transition: str | None = "fade",
+        transition_duration_ms: int = 220,
     ) -> None:
+        if transition not in (None, "none", "fade", "slide", "scale"):
+            raise ValueError("transition must be one of: none, fade, slide, scale")
+        if (
+            isinstance(transition_duration_ms, bool)
+            or not isinstance(transition_duration_ms, int)
+            or not 0 <= transition_duration_ms <= 2000
+        ):
+            raise ValueError("transition_duration_ms must be an int from 0 to 2000")
         self.name = name
+        self.transition = "none" if transition is None else transition
+        self.transition_duration_ms = transition_duration_ms
         self.version = version or "0.1.0"
         self.package = package or _package_from_project() or "org.pymobile.app"
         self.bridge: Bridge = bridge or get_bridge()
@@ -269,6 +281,10 @@ class App:
         #: event that was queued by the previous screen cannot act on a widget
         #: of the current one (PM-14).
         self._generation = 0
+        #: Metadata for the next native screen swap; consumed by one render only.
+        self._pending_navigation: dict[str, Any] | None = None
+        self._last_visible_screen: Screen | None = None
+        self._last_visible_depth = 0
         self.auto_render = auto_render
         self._render_scheduled = False
         self._render_depth = 0
@@ -781,6 +797,11 @@ class App:
             bar = self._snackbar
             if bar is not None and bar.visible:
                 tree["snackbar"] = bar.to_dict()
+            native_navigation = (
+                self._pending_navigation
+                if getattr(self.bridge, "native_widgets", False)
+                else None
+            )
             self._check_widget_types(tree)
             # Qualify the ids the front end will echo back (see _resolve_wire_id).
             # Kept out of ``to_dict()``/``app:render``: those report the ids the
@@ -788,11 +809,25 @@ class App:
             self._qualify_ids(tree)
             tree["generation"] = self._generation
             payload = tree
+            if getattr(self.bridge, "native_widgets", False):
+                # Keep Android-only transport metadata out of screen.to_dict()
+                # and app:render while still sending it to the native renderer.
+                # The manifest label remains the build-time launcher fallback.
+                payload = {**payload, "app_title": self.name}
+                if native_navigation is not None:
+                    # A marker forces Android to replace the screen even when
+                    # the transition itself is explicitly disabled.
+                    payload["navigation"] = dict(native_navigation)
             if getattr(self.bridge, "accepts_theme", False):
                 # The device renderer paints its own defaults (text, surfaces,
                 # selected tabs …) from the palette; previews ignore it.
-                payload = {**tree, "theme": {**self._theme.as_dict(), "dark": self._theme.is_dark}}
+                payload = {
+                    **payload,
+                    "theme": {**self._theme.as_dict(), "dark": self._theme.is_dark},
+                }
             self.bridge.render(payload)
+            if native_navigation is not None:
+                self._pending_navigation = None
         self.events.emit("app:render", source=screen.title, tree=tree)
         return tree
 
@@ -1157,6 +1192,16 @@ class App:
                 "Navigation happened before App.run()",
                 hint="Call app.run(FirstScreen()) to start the application.",
             )
+        depth = self.navigator.depth
+        previous = self._last_visible_screen
+        if previous is not None and previous is not screen:
+            self._pending_navigation = {
+                "type": self.transition,
+                "duration_ms": self.transition_duration_ms,
+                "reverse": depth < self._last_visible_depth,
+            }
+        self._last_visible_screen = screen
+        self._last_visible_depth = depth
         self.events.emit("screen:change", source=screen.title)
         self.render()
 

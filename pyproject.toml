@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pymobile-framework"
-version = "0.9.2"
+version = "0.9.3"
 description = "A small, fast and extensible Python framework for building Android applications."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -54,11 +54,11 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Maksum867/py-mobile"
-Documentation = "https://github.com/Maksum867/py-mobile/blob/main/README.md"
-Source = "https://github.com/Maksum867/py-mobile/tree/main/pymobile"
-Changelog = "https://github.com/Maksum867/py-mobile/blob/main/CHANGELOG.md"
-Issues = "https://github.com/Maksum867/py-mobile/issues"
+Homepage = "https://github.com/Maksum867/PyMobile"
+Documentation = "https://github.com/Maksum867/PyMobile/blob/main/README.md"
+Source = "https://github.com/Maksum867/PyMobile/tree/main/pymobile"
+Changelog = "https://github.com/Maksum867/PyMobile/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Maksum867/PyMobile/issues"
 
 [project.scripts]
 pymobile = "pymobile.cli:main"

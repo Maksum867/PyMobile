@@ -1,8 +1,8 @@
 """Tests for the native APK backend, toolchain discovery and runtime cache.
 
-The heavy end-to-end build needs the Android SDK/NDK, so it is skipped unless a
-real toolchain is present. Everything that can be checked without it — path
-resolution, error messages, asset selection — is tested unconditionally.
+The heavy end-to-end build needs the Android SDK, JDK and build-tools; the NDK
+is optional because the JNI bridge is prebuilt. It is skipped unless the SDK is
+present. All device-free checks run unconditionally.
 """
 
 from __future__ import annotations
@@ -108,7 +108,7 @@ class TestToolchainDiscovery:
         with pytest.raises(ToolchainError) as info:
             toolchain.verify()
         message = str(info.value)
-        # d8/javac are optional now: prebuilt artifacts cover them.
+        # This low-level verifier leaves Java compilation optional unless the caller requests it.
         for tool in ("aapt2", "zipalign", "apksigner"):
             assert tool in message
 
@@ -665,7 +665,7 @@ class TestJdkArchives:
 
 
 class TestPrebuiltArtifacts:
-    """The packaged prebuilts let users build APKs without the NDK or a JDK."""
+    """The packaged native bridge and launcher dex remain available as fallbacks."""
 
     @requires_prebuilt_so
     def test_prebuilts_are_packaged(self) -> None:
@@ -729,7 +729,7 @@ class TestPrebuiltArtifacts:
 
 
 class TestToolchainRequirements:
-    """The NDK and javac must be optional, everything else mandatory."""
+    """The NDK is optional; callers can request javac/d8 when needed."""
 
     def _toolchain(self, tmp_path: Path) -> Toolchain:
         bt = tmp_path / "bt"
@@ -796,11 +796,11 @@ class TestSdkPackages:
 
 
 class TestBuildRobustness:
-    """Regression: a failing d8/javac must never break the build.
+    """A failed framework Java build can use the packaged launcher fallback.
 
     Reported on Windows as `d8 failed (exit 1) ... NullPointerException` while
-    dexing an anonymous inner class. Since the launcher dex is identical for
-    every app, the prebuilt one is now used by default.
+    dexing an anonymous inner class. Project overlays are stricter: they never
+    fall back because that would silently omit the app's renderer.
     """
 
     import sys
@@ -828,6 +828,7 @@ class TestBuildRobustness:
             (bt / f"aapt2{ext}").write_text("", encoding="utf-8")
             (bt / f"zipalign{ext}").write_text("", encoding="utf-8")
             (bt / f"apksigner{ext}").write_text("", encoding="utf-8")
+            (bt / f"d8{ext}").write_text("", encoding="utf-8")
 
         (tmp_path / "j.jar").write_text("", encoding="utf-8")
 
@@ -841,23 +842,96 @@ class TestBuildRobustness:
             ProjectConfig(root=tmp_path, package="com.example.a"), toolchain, tmp_path
         )
 
-    def test_prebuilt_used_even_when_javac_exists(
+    def test_framework_java_build_is_attempted_by_default(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Without an opt-in, the toolchain must not be invoked at all."""
+        """The current MainActivity/ViewBuilder sources must reach normal APKs."""
         monkeypatch.delenv("PYMOBILE_BUILD_JAVA", raising=False)
 
+        def observe(*args: object, **kwargs: object) -> None:
+            raise AssertionError("source build attempted")
+
+        monkeypatch.setattr("pymobile.compiler.backends.native._run", observe)
+        with pytest.raises(AssertionError, match="source build attempted"):
+            self._backend(tmp_path).compile_java(tmp_path / "work")
+
+    def test_prebuilt_can_be_explicitly_selected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PYMOBILE_BUILD_JAVA", "0")
+
         def explode(*args: object, **kwargs: object) -> None:
-            raise AssertionError("javac/d8 must not run by default")
+            raise AssertionError("the explicit prebuilt path must not invoke javac/d8")
 
         monkeypatch.setattr("pymobile.compiler.backends.native._run", explode)
         dex = self._backend(tmp_path).compile_java(tmp_path / "work")
         assert dex.exists()
 
+    def test_project_renderer_is_included_in_the_automatic_source_build(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        renderer = (
+            tmp_path
+            / "java"
+            / "org"
+            / "pymobile"
+            / "app"
+            / "widgets"
+            / "GaugeRenderer.java"
+        )
+        renderer.parent.mkdir(parents=True)
+        renderer.write_text(
+            "package org.pymobile.app.widgets; class GaugeRenderer {}", encoding="utf-8"
+        )
+        backend = self._backend(tmp_path)
+        calls: list[str] = []
+
+        def fake_run(command: list[object], *, step: str, **kwargs: object) -> str:
+            calls.append(step)
+            if step == "javac":
+                source_files = [Path(item) for item in command if str(item).endswith(".java")]
+                expected = tmp_path / "work" / "java" / renderer.relative_to(tmp_path / "java")
+                assert expected in source_files
+            elif step == "d8":
+                output = Path(command[command.index("--output") + 1])
+                (output / "classes.dex").write_bytes(b"dex\n035\0")
+            return ""
+
+        monkeypatch.setattr("pymobile.compiler.backends.native._run", fake_run)
+        dex = backend.compile_java(tmp_path / "work")
+
+        assert dex.read_bytes() == b"dex\n035\0"
+        assert calls == ["javac", "jar", "d8"]
+
+    def test_project_overlay_errors_never_fall_back_to_a_stale_dex(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        renderer = (
+            tmp_path
+            / "java"
+            / "org"
+            / "pymobile"
+            / "app"
+            / "widgets"
+            / "GaugeRenderer.java"
+        )
+        renderer.parent.mkdir(parents=True)
+        renderer.write_text("broken java", encoding="utf-8")
+        monkeypatch.setenv("PYMOBILE_BUILD_JAVA", "0")
+
+        def fail(*args: object, **kwargs: object) -> None:
+            raise PyMobileError("javac rejected the project renderer")
+
+        monkeypatch.setattr("pymobile.compiler.backends.native._run", fail)
+        with pytest.raises(
+            PyMobileError, match="could not compile the project Java overlay"
+        ):
+            self._backend(tmp_path).compile_java(tmp_path / "work")
+
     def test_source_build_failure_falls_back(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An opt-in build that fails must degrade, not abort."""
+        """A framework-only compile failure still degrades to the packaged dex."""
         monkeypatch.setenv("PYMOBILE_BUILD_JAVA", "1")
 
         def fail(*args: object, **kwargs: object) -> None:

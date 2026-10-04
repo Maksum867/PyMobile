@@ -1,9 +1,10 @@
 """Automatic Android SDK/NDK provisioning.
 
-Native builds need ~4 GB of Google tooling. Asking a Python developer to
-install Android Studio is a poor first experience, so ``pymobile setup-sdk``
-fetches exactly the packages required — command-line tools, platform,
-build-tools and NDK — into a private directory.
+Native builds need Android platform/build tools and JDK 17; the prebuilt JNI
+bridge means the NDK is optional. Asking a Python developer to install Android
+Studio is a poor first experience, so ``pymobile setup-sdk`` fetches only the
+required packages into a private directory. The emulator and its system image
+are a separate, optional multi-gigabyte download.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from ..errors import PyMobileError
 from ..log import get_logger
 from .toolchain import normalise_java_home
 
-__all__ = ["install_sdk", "default_sdk_home", "REQUIRED_PACKAGES"]
+__all__ = ["install_sdk", "default_sdk_home", "REQUIRED_PACKAGES", "EMULATOR_PACKAGES"]
 
 _log = get_logger("compiler.sdk")
 
@@ -30,10 +31,18 @@ _log = get_logger("compiler.sdk")
 MINIMAL_PACKAGES = (
     "platforms;android-35",
     "build-tools;35.0.0",
+    "platform-tools",  # adb for installing/debugging APKs on a phone or emulator
 )
 
 #: Adds the NDK, needed only to rebuild the native bridge from source (~2 GB).
 REQUIRED_PACKAGES = (*MINIMAL_PACKAGES, "ndk;27.3.13750724")
+
+#: Optional full emulator image. This is a multi-gigabyte download and needs
+#: host hardware acceleration (KVM/Hypervisor.framework/Windows Hypervisor).
+EMULATOR_PACKAGES = (
+    "emulator",
+    "system-images;android-35;google_apis;x86_64",
+)
 
 # URL plus a pinned SHA-256. A host without a pinned hash is deliberately
 # refused instead of extracting an unauthenticated developer toolchain.
@@ -221,16 +230,21 @@ def install_sdk(
     *,
     packages: tuple[str, ...] = MINIMAL_PACKAGES,
     with_ndk: bool = False,
+    with_emulator: bool = False,
 ) -> Path:
     """Install the Android toolchain and return the SDK root.
 
-    Defaults to the minimal set; pass ``with_ndk=True`` to also fetch the NDK,
-    which is only required for rebuilding the native bridge.
+    The default set includes ``adb`` but uses the shipped JNI bridge, so it
+    does not download the NDK. ``with_ndk=True`` adds the bridge toolchain;
+    ``with_emulator=True`` downloads an x86_64 emulator and Android 35 Google
+    APIs image (several additional GB). The two extras can be combined.
 
     Safe to re-run: existing downloads and packages are reused.
     """
     if with_ndk:
         packages = REQUIRED_PACKAGES
+    if with_emulator:
+        packages = tuple(dict.fromkeys((*packages, *EMULATOR_PACKAGES)))
     root = Path(home) if home else default_sdk_home()
     root.mkdir(parents=True, exist_ok=True)
     sdk = root / "sdk"

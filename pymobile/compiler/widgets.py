@@ -1,16 +1,12 @@
-"""Custom widget types: find them, check the renderer, write the Java branch.
+"""Custom widget discovery, project scaffolding, and renderer checks.
 
-A widget with a ``type_name`` of its own is a Python class *and* a branch in
-``ViewBuilder.java``, compiled into ``classes.dex``. The Python half is easy; the
-other half used to be discovered on the phone, where a type with no branch drew
-nothing. This module is the build-time answer:
-
-* :func:`scan_custom_widgets` finds the project's own widget classes and its
-  ``register_widget_type()`` declarations;
-* :func:`dex_has_case` asks the ``classes.dex`` that is about to be packaged
-  whether it knows a type, so the build can stop instead of shipping a hole;
-* :func:`java_branch` writes the ``case`` and the ``build…`` method to paste into
-  ``ViewBuilder.java`` — what ``pymobile widget-java`` prints.
+A custom widget has a Python definition and, when it is native, a Java
+renderer in ``classes.dex``. ``pymobile widget add`` scaffolds the Python class
+and a project-local ``WidgetRenderer`` implementation under ``java/``; native
+builds compile that overlay without touching the installed package. The module
+also scans widget declarations, verifies the resulting dex, and retains
+:func:`java_branch` as a guide for framework contributors who edit the shared
+``ViewBuilder.java``.
 """
 
 from __future__ import annotations
@@ -31,8 +27,10 @@ __all__ = [
     "MissingRendererError",
     "WidgetProp",
     "dex_has_case",
+    "dex_has_class",
     "java_branch",
     "parse_props",
+    "scaffold_widget_sources",
     "scan_custom_widgets",
 ]
 
@@ -211,6 +209,21 @@ def dex_has_case(dex: bytes, type_name: str) -> bool:
     return type_name.encode("utf-8") in dex
 
 
+def dex_has_class(dex: bytes, class_name: str) -> bool:
+    """Whether a dex string table contains a Java class descriptor.
+
+    This is used for the project-local renderer convention
+    ``org.pymobile.app.widgets.<Type>Renderer``. Checking the descriptor (not
+    just the widget name) proves the plugin class itself was compiled into the
+    APK that is about to be signed.
+    """
+    if not class_name or not class_name.isascii():
+        return False
+    descriptor = "L" + class_name.replace(".", "/") + ";"
+    encoded = descriptor.encode("ascii")
+    return _uleb128(len(descriptor)) + encoded + b"\0" in dex
+
+
 # --------------------------------------------------------------------------
 # the Java branch
 # --------------------------------------------------------------------------
@@ -218,7 +231,10 @@ _TYPE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 _PROP_KINDS = ("str", "int", "float", "bool", "list")
 #: Attributes every ``Widget`` already has; a prop of that name would clobber them.
 _WIDGET_RESERVED = frozenset(
-    {"id", "style", "visible", "enabled", "parent", "children", "screen", "type_name", "props"}
+    {
+        "id", "style", "visible", "enabled", "parent", "children", "screen",
+        "type_name", "props", "on_press",
+    }
 )
 #: Locals of ``build()`` / ``updateNode()`` a generated variable must not shadow.
 _RESERVED_LOCALS = frozenset(
@@ -332,14 +348,14 @@ class JavaBranch:
             f"{_indent(self.update)}\n\n"
             "5) Your app: say the branch exists, so no warning is printed for the type\n\n"
             f"{_indent(self.register)}\n\n"
-            "6) Rebuild the launcher dex. The packaged classes.dex only knows the built-in\n"
-            "   widgets, and `pymobile build --native` stops when it lacks your type:\n\n"
-            "       PYMOBILE_BUILD_JAVA=1 pymobile build --native\n"
-            '       (PowerShell: $env:PYMOBILE_BUILD_JAVA = "1")\n\n'
-            "   That needs the Android SDK (`pymobile setup-sdk`) and edits the framework's\n"
-            "   ViewBuilder.java, so work from a source checkout or a virtualenv you own.\n"
-            "   To skip Java altogether, build the widget from existing ones\n"
-            "   (Row, Column, ProgressBar, Expanded …) — see the README, *Extending*.\n"
+            "6) Rebuild the launcher dex. A native build compiles framework Java sources\n"
+            "   by default and stops if the resulting dex has no branch for your type:\n\n"
+            "       pymobile build --native\n\n"
+            "   This manual route changes the shared ViewBuilder.java in your source\n"
+            "   checkout. For an ordinary app-local widget, `pymobile widget add TYPE`\n"
+            "   creates an isolated Java renderer under your project's java/ directory.\n"
+            "   To skip Java altogether, compose from existing widgets (Row, Column,\n"
+            "   ProgressBar, Expanded …) — see the README, *Extending*.\n"
         )
 
 
@@ -432,3 +448,139 @@ private View {method}(final String id, JSONObject props) {{
         ),
         register=register,
     )
+
+
+def scaffold_widget_sources(type_name: str, props: Sequence[WidgetProp] = ()) -> tuple[str, str]:
+    """Return a ready-to-import Python widget and its project-local Java renderer.
+
+    The generated Python class is registered as soon as it is imported; the
+    Java source implements :class:`org.pymobile.app.WidgetRenderer` in the
+    ``java/`` project overlay. Native builds discover, compile and fingerprint
+    it automatically — no installed-package edits or environment switches.
+    """
+    branch = java_branch(type_name, props)
+    fields = tuple(props)
+    annotations = {
+        "str": "str",
+        "int": "int",
+        "float": "float",
+        "bool": "bool",
+        "list": "list[object]",
+    }
+    parameters = ",\n        ".join(
+        f"{prop.name}: {annotations[prop.kind]} = {prop.default}"
+        for prop in fields
+    )
+    if parameters:
+        signature = (
+            f"        {parameters},\n"
+            "        *,\n"
+            "        on_press: Callable[[], None] | None = None,\n"
+            "        **kwargs: Any,"
+        )
+    else:
+        signature = (
+            "        *,\n"
+            "        on_press: Callable[[], None] | None = None,\n"
+            "        **kwargs: Any,"
+        )
+    assignments = "\n".join(
+        f"        self.{prop.name} = list({prop.name})" if prop.kind == "list"
+        else f"        self.{prop.name} = {prop.name}"
+        for prop in fields
+    )
+    entries = "\n".join(
+        f'            "{prop.name}": list(self.{prop.name}),' if prop.kind == "list"
+        else f'            "{prop.name}": self.{prop.name},'
+        for prop in fields
+    )
+    python = (
+        "from collections.abc import Callable\n"
+        "from typing import Any\n\n"
+        "from pymobile import Widget, register_widget_type\n\n\n"
+        f"class {type_name}(Widget):\n"
+        f'    type_name = "{type_name}"\n\n'
+        "    def __init__(\n"
+        "        self,\n"
+        f"{signature}\n"
+        "    ) -> None:\n"
+        "        super().__init__(**kwargs)\n"
+        f"{assignments + chr(10) if assignments else ''}"
+        "        if on_press is not None and not callable(on_press):\n"
+        "            raise TypeError(\"on_press must be callable or None\")\n"
+        "        self.on_press = on_press\n\n"
+        "    def props(self) -> dict[str, Any]:\n"
+        "        return {\n"
+        "            **super().props(),\n"
+        f"{entries + chr(10) if entries else ''}"
+        "        }\n\n"
+        "    def press(self) -> None:\n"
+        "        if self.enabled and self.on_press is not None:\n"
+        "            self.on_press()\n\n\n"
+        f'register_widget_type("{type_name}")\n'
+    )
+
+    reads = "\n".join("        " + prop.read for prop in fields)
+    shown: list[str] = []
+    for prop in fields:
+        if prop.kind == "str":
+            shown.append(
+                f'        if (!{prop.variable}.isEmpty()) '
+                f'label.append("\\n{prop.name}=").append({prop.variable});'
+            )
+        elif prop.kind == "list":
+            shown.append(
+                f'        if ({prop.variable} != null) '
+                f'label.append("\\n{prop.name}=").append({prop.variable});'
+            )
+        else:
+            shown.append(
+                f'        label.append("\\n{prop.name}=").append({prop.variable});'
+            )
+    java = (
+        "package org.pymobile.app.widgets;\n\n"
+        "import android.content.Context;\n"
+        "import android.graphics.Color;\n"
+        "import android.util.TypedValue;\n"
+        "import android.view.View;\n"
+        "import android.widget.TextView;\n\n"
+        "import org.json.JSONArray;\n"
+        "import org.json.JSONObject;\n"
+        "import org.pymobile.app.Native;\n"
+        "import org.pymobile.app.WidgetRenderer;\n\n"
+        f"/** Starter native renderer for the PyMobile {type_name} widget. */\n"
+        f"public final class {type_name}Renderer implements WidgetRenderer {{\n"
+        f'    @Override public String typeName() {{ return "{type_name}"; }}\n\n'
+        "    @Override\n"
+        "    public View create(Context context, final String id, JSONObject props) {\n"
+        "        TextView view = new TextView(context);\n"
+        "        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);\n"
+        "        view.setTextColor(Color.DKGRAY);\n"
+        "        bind(view, props);\n"
+        "        view.setOnClickListener(new View.OnClickListener() {\n"
+        "            @Override public void onClick(View view) {\n"
+        '                Native.dispatchEvent(id, "press", "");\n'
+        "            }\n"
+        "        });\n"
+        "        return view;\n"
+        "    }\n\n"
+        "    @Override\n"
+        "    public boolean update(View view, String id, JSONObject props) {\n"
+        "        if (!(view instanceof TextView)) return false;\n"
+        "        bind((TextView) view, props);\n"
+        "        return true;\n"
+        "    }\n\n"
+        "    private void bind(TextView view, JSONObject props) {\n"
+        f"{reads + chr(10) if reads else ''}"
+        f'        StringBuilder label = new StringBuilder("{type_name}");\n'
+        f"{chr(10).join(shown) + chr(10) if shown else ''}"
+        "        // TODO: replace this labelled starter view with your Android view.\n"
+        "        view.setText(label.toString());\n"
+        "    }\n"
+        "}\n"
+    )
+    # Keep the variable referenced to make an accidental future divergence
+    # from java_branch() visible to static checks rather than to a user.
+    if branch.type_name != type_name:  # pragma: no cover - defensive
+        raise AssertionError("generated Python and Java widget names diverged")
+    return python, java

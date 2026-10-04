@@ -1,7 +1,8 @@
 """Command line interface.
 
 Sub-commands: ``init``, ``build``, ``run``, ``watch``, ``preview``, ``info``,
-``clean``, ``widget-java``, ``setup-sdk``, ``doctor``.
+``clean``, ``widget add``, ``widget-java``, ``setup-sdk``, ``emulator``,
+``install``, ``doctor``.
 Every command returns an exit code; :func:`main` is the console-script entry
 point declared in ``pyproject.toml``.
 
@@ -195,7 +196,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     _out.field("apk", result.apk)
     _out.field("icon", "default" if result.icon_is_default else config.icon)
     if result.native:
-        _out.field("install", f"adb install -r {result.apk.name}")
+        _out.field("install", f"{_invocation()} install {result.apk}")
         if config.abis and config.abis[0] == "x86_64":
             _out.hint("x86_64 build: for the Android Studio emulator, not for a phone")
     if args.verbose:
@@ -229,7 +230,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             "The app rendered nothing.",
             hint="Make sure the entry point calls App(...).run(SomeScreen()).",
         )
-    print(render_ascii(tree, title=config.name))
+    from .core.app import App
+
+    app = App.current()
+    print(render_ascii(tree, title=app.name if app is not None else config.name))
     _out.hint("use --gui for a clickable window")
     return 0
 
@@ -259,9 +263,9 @@ def _run_gui(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> in
             hint="Make sure it calls App(...).run(SomeScreen()) before returning.",
         )
 
-    _out.ok(f"{config.name} is running — close the window to stop")
+    _out.ok(f"{app.name} is running — close the window to stop")
     try:
-        preview = GuiPreview(app, title=config.name)
+        preview = GuiPreview(app, title=app.name)
         bridge.attach(preview)
         preview.run()
     except Exception as error:  # pragma: no cover - display problems
@@ -291,7 +295,7 @@ def _run_web(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> in
 
     preview = WebPreview(app, host=args.host, port=args.port)
     bridge.attach(preview)
-    _out.ok(f"{config.name} is running at {browser_url(args.host, preview.port, preview.token)}")
+    _out.ok(f"{app.name} is running at {browser_url(args.host, preview.port, preview.token)}")
     if preview.exposed:
         # Network exposure is opt-in, and the warning says what it means: the
         # port can read the app's state and press its widgets, so the session
@@ -370,24 +374,25 @@ def _reload(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> Non
         return
 
     elapsed = (time.perf_counter() - started) * 1000
+    from .core.app import App
+
+    app = App.current()
+    display_title = app.name if app is not None else config.name
     if args.png and getattr(args, "text", False):
         render_png(tree, args.png)
         _out.ok(f"wrote {args.png} in {elapsed:.0f} ms")
     elif args.png:
-        from .core.app import App
-
-        app = App.current()
         render_mockup(
             tree,
             args.png,
             theme=app.theme if app is not None else None,
-            title=config.name,
+            title=display_title,
             assets=config.source_path,
         )
         elapsed = (time.perf_counter() - started) * 1000
         _out.ok(f"wrote {args.png} in {elapsed:.0f} ms")
     else:
-        print(render_ascii(tree, show_ids=args.ids, title=config.name))
+        print(render_ascii(tree, show_ids=args.ids, title=display_title))
         _out.ok(f"rendered in {elapsed:.0f} ms")
 
 
@@ -597,6 +602,7 @@ def cmd_preview(args: argparse.Namespace) -> int:
     app = App.current()
     if requested_theme and app is not None:
         app.set_theme(requested_theme)
+    display_title = app.name if app is not None else config.name
 
     _navigate(args)
 
@@ -621,13 +627,13 @@ def cmd_preview(args: argparse.Namespace) -> int:
             width=width,
             height=height,
             theme=theme,
-            title=config.name,
+            title=display_title,
             assets=config.source_path,
         )
         _out.ok(f"wrote a mockup of the screen to {path}")
         _out.hint("an approximation: fonts and system colours differ between phones")
     else:
-        print(render_ascii(tree, show_ids=args.ids, title=config.name))
+        print(render_ascii(tree, show_ids=args.ids, title=display_title))
     return 0
 
 
@@ -690,13 +696,61 @@ def cmd_widget_java(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_widget_add(args: argparse.Namespace) -> int:
+    """Scaffold a Python widget with an automatically compiled Java renderer."""
+    import re
+
+    from .compiler.widgets import parse_props, scaffold_widget_sources
+
+    config = _load(args)
+    python_source, java_source = scaffold_widget_sources(
+        args.type_name,
+        parse_props(args.prop),
+    )
+    module_name = re.sub(r"(?<!^)(?=[A-Z])", "_", args.type_name).lower()
+    python_dir = config.source_path / "widgets"
+    python_file = python_dir / f"{module_name}.py"
+    package_init = python_dir / "__init__.py"
+    java_file = (
+        config.root
+        / "java"
+        / "org"
+        / "pymobile"
+        / "app"
+        / "widgets"
+        / f"{args.type_name}Renderer.java"
+    )
+    collisions = [path for path in (python_file, java_file) if path.exists()]
+    if collisions:
+        raise PyMobileError(
+            "widget files already exist: " + ", ".join(str(path) for path in collisions),
+            hint="Choose another widget type name or move the existing files first.",
+        )
+
+    python_dir.mkdir(parents=True, exist_ok=True)
+    if not package_init.exists():
+        package_init.write_text('"""Project-local PyMobile widgets."""\n', encoding="utf-8")
+    python_file.write_text(python_source, encoding="utf-8")
+    java_file.parent.mkdir(parents=True, exist_ok=True)
+    java_file.write_text(java_source, encoding="utf-8")
+    _out.ok(f"created native widget {args.type_name}")
+    _out.field("python", python_file.relative_to(config.root))
+    _out.field("renderer", java_file.relative_to(config.root))
+    _out.info(f"import it with: from widgets.{module_name} import {args.type_name}")
+    _out.info("then run: pymobile build --native (the java/ overlay is compiled automatically)")
+    return 0
+
+
 def cmd_setup_sdk(args: argparse.Namespace) -> int:
     """Download and install the Android toolchain."""
     from .compiler.sdk_installer import default_sdk_home, install_sdk
 
-    target_path = Path(args.path) if args.path else default_sdk_home()
+    target_path = Path(args.path).expanduser() if args.path else default_sdk_home()
     with_ndk = getattr(args, "with_ndk", False)
-    size = "~2.7 GB" if with_ndk else "~800 MB"
+    with_emulator = getattr(args, "with_emulator", False)
+    size = "~4 GB" if with_ndk and with_emulator else (
+        "~3.5 GB" if with_emulator else "~2.7 GB" if with_ndk else "~900 MB"
+    )
 
     # Check whether the SDK directory already exists and has cached content
     already_installed = target_path.exists() and any(target_path.iterdir())
@@ -708,8 +762,14 @@ def cmd_setup_sdk(args: argparse.Namespace) -> int:
 
     if not with_ndk:
         _out.info("using the prebuilt native bridge; pass --with-ndk to build it from source")
+    if with_emulator:
+        _out.info("installing the x86_64 emulator and API 35 system image (no NDK required)")
 
-    sdk = install_sdk(Path(args.path) if args.path else None, with_ndk=with_ndk)
+    sdk = install_sdk(
+        target_path if args.path else None,
+        with_ndk=with_ndk,
+        with_emulator=with_emulator,
+    )
 
     if already_installed:
         _out.ok(f"toolchain verified: {sdk}")
@@ -720,7 +780,231 @@ def cmd_setup_sdk(args: argparse.Namespace) -> int:
     if not os.environ.get("ANDROID_HOME"):
         _out.hint(f"optional: {_export_command('ANDROID_HOME', sdk)}")
 
-    _ = default_sdk_home
+    return 0
+
+
+_DEFAULT_AVD_NAME = "pymobile-api35-x86_64"
+_DEFAULT_EMULATOR_IMAGE = "system-images;android-35;google_apis;x86_64"
+
+
+def _sdk_root_for_device(args: argparse.Namespace) -> Path:
+    """Find the SDK for adb/emulator commands without requiring build tools."""
+    explicit = getattr(args, "sdk", None)
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    for name in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+        value = os.environ.get(name)
+        if value:
+            return Path(value).expanduser().resolve()
+    from .compiler.sdk_installer import default_sdk_home
+
+    return default_sdk_home() / "sdk"
+
+
+def _sdk_executable(root: Path, relative: str, name: str) -> Path:
+    """Return an SDK tool or fail with a command that installs it."""
+    suffixes = (".bat", ".cmd", ".exe", "") if platform.system() == "Windows" else ("",)
+    for suffix in suffixes:
+        candidate = root / relative / f"{name}{suffix}"
+        if candidate.is_file():
+            return candidate
+    on_path = shutil.which(name)
+    if on_path:
+        return Path(on_path)
+    raise PyMobileError(
+        f"Android SDK tool {name} was not found",
+        hint=(
+            "Run `pymobile setup-sdk` for adb, or `pymobile setup-sdk --with-emulator` "
+            "for the emulator and x86_64 system image."
+        ),
+    )
+
+
+def _device_environment(root: Path) -> dict[str, str]:
+    """Set SDK/JDK variables for tools like avdmanager launched by subprocess."""
+    environment = {
+        **os.environ,
+        "ANDROID_HOME": str(root),
+        "ANDROID_SDK_ROOT": str(root),
+    }
+    if not environment.get("JAVA_HOME"):
+        from .compiler.sdk_installer import _first_jdk_home, default_sdk_home
+
+        for home in (root.parent, default_sdk_home()):
+            jdk = _first_jdk_home(home)
+            if jdk is not None:
+                environment["JAVA_HOME"] = str(jdk)
+                environment["PATH"] = (
+                    f"{jdk / 'bin'}{os.pathsep}{environment.get('PATH', '')}"
+                )
+                break
+    return environment
+
+
+def _create_avd(root: Path, name: str) -> None:
+    import subprocess
+
+    avdmanager = _sdk_executable(root, "cmdline-tools/latest/bin", "avdmanager")
+    command = [
+        str(avdmanager),
+        "create",
+        "avd",
+        "--name",
+        name,
+        "--package",
+        _DEFAULT_EMULATOR_IMAGE,
+        "--force",
+    ]
+    completed = subprocess.run(
+        command,
+        input="no\n",
+        capture_output=True,
+        text=True,
+        env=_device_environment(root),
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise PyMobileError(
+            f"could not create Android virtual device {name!r}",
+            hint=(
+                detail[-800:]
+                or "Install the emulator image with `pymobile setup-sdk --with-emulator`."
+            ),
+        )
+    _out.ok(f"created Android virtual device {name}")
+
+
+def cmd_emulator(args: argparse.Namespace) -> int:
+    """Create, list, or start the optional local Android emulator."""
+    import subprocess
+
+    root = _sdk_root_for_device(args)
+    action = args.emulator_action
+    name = getattr(args, "name", _DEFAULT_AVD_NAME)
+    if action == "create":
+        _create_avd(root, name)
+        return 0
+
+    emulator = _sdk_executable(root, "emulator", "emulator")
+    if action == "list":
+        completed = subprocess.run(
+            [str(emulator), "-list-avds"],
+            capture_output=True,
+            text=True,
+            env=_device_environment(root),
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise PyMobileError(
+                "could not list Android virtual devices", hint=completed.stderr.strip()
+            )
+        print(completed.stdout, end="")
+        return 0
+
+    listed = subprocess.run(
+        [str(emulator), "-list-avds"],
+        capture_output=True,
+        text=True,
+        env=_device_environment(root),
+        check=False,
+    )
+    if listed.returncode != 0:
+        raise PyMobileError("could not query Android virtual devices", hint=listed.stderr.strip())
+    if name not in listed.stdout.splitlines():
+        _out.info(f"creating the default virtual device {name}")
+        _create_avd(root, name)
+    command = [str(emulator), "-avd", name, "-no-snapshot"]
+    if getattr(args, "no_window", False):
+        command.append("-no-window")
+    if getattr(args, "no_audio", False):
+        command.append("-no-audio")
+    _out.info(f"starting {name} — close the emulator window or press Ctrl+C to stop")
+    emulator_process = subprocess.run(command, env=_device_environment(root), check=False)
+    if emulator_process.returncode != 0:
+        raise PyMobileError(
+            f"emulator exited with code {emulator_process.returncode}",
+            hint=(
+                "Check host virtualization support; on Linux, enable KVM for hardware acceleration."
+            ),
+        )
+    return 0
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    """Install a built APK on a connected phone or local emulator with adb."""
+    import subprocess
+
+    config = _load(args)
+    if getattr(args, "abi", None):
+        config.abis = [args.abi]
+        config.validate()
+    if args.apk:
+        apk = Path(args.apk).expanduser()
+        if not apk.is_absolute():
+            candidates = ((Path.cwd() / apk).resolve(), (config.root / apk).resolve())
+            apk = next(
+                (candidate for candidate in candidates if candidate.is_file()),
+                candidates[0],
+            )
+    else:
+        apk = config.output_path / config.apk_name
+    if not apk.is_file():
+        command = "pymobile build --native"
+        if getattr(args, "abi", None):
+            command += f" --abi {args.abi}"
+        raise PyMobileError(
+            f"APK not found: {apk}",
+            hint=f"Build it first with `{command}` or pass an APK path to `pymobile install`.",
+        )
+
+    root = _sdk_root_for_device(args)
+    adb = _sdk_executable(root, "platform-tools", "adb")
+    environment = _device_environment(root)
+    devices = subprocess.run(
+        [str(adb), "devices"], capture_output=True, text=True, env=environment, check=False
+    )
+    if devices.returncode != 0:
+        raise PyMobileError("adb could not list devices", hint=devices.stderr.strip())
+    connected = [
+        line.split()[0]
+        for line in devices.stdout.splitlines()[1:]
+        if len(line.split()) >= 2 and line.split()[1] == "device"
+    ]
+    device = getattr(args, "device", None)
+    if device is None:
+        if not connected:
+            raise PyMobileError(
+                "no Android phone or emulator is connected to adb",
+                hint=(
+                    "Start one with `pymobile emulator start` (after `pymobile setup-sdk "
+                    "--with-emulator`) or connect a phone with USB debugging enabled."
+                ),
+            )
+        if len(connected) > 1:
+            raise PyMobileError(
+                "more than one Android device is connected",
+                hint="Pass `--device SERIAL`; available devices: " + ", ".join(connected),
+            )
+        device = connected[0]
+    completed = subprocess.run(
+        [str(adb), "-s", device, "install", "-r", str(apk)],
+        capture_output=True,
+        text=True,
+        env=environment,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise PyMobileError(
+            f"adb could not install {apk.name} on {device}",
+            hint=(
+                detail[-800:]
+                or "Check that the APK ABI matches the device/emulator and storage is available."
+            ),
+        )
+    result = (completed.stdout or "").strip()
+    _out.ok(f"installed {apk.name} on {device}" + (f" — {result}" if result else ""))
     return 0
 
 
@@ -872,7 +1156,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pymobile",
         description="Build Android applications with Python.",
-        epilog="Docs: https://github.com/Maksum867/py-mobile",
+        epilog="Docs: https://github.com/Maksum867/PyMobile",
         parents=[common],
     )
     parser.add_argument("--version", action="version", version=f"pymobile {__version__}")
@@ -1021,6 +1305,24 @@ def build_parser() -> argparse.ArgumentParser:
     clean = sub.add_parser("clean", help="remove build artifacts", parents=[common])
     clean.set_defaults(func=cmd_clean)
 
+    widget_group = sub.add_parser("widget", help="create project-local custom widgets")
+    widget_actions = widget_group.add_subparsers(dest="widget_action", required=True)
+    widget_add = widget_actions.add_parser(
+        "add",
+        help="generate a Python widget and project-local Android renderer",
+        parents=[common],
+    )
+    widget_add.add_argument("type_name", metavar="TYPE", help="custom type name, e.g. BarChart")
+    widget_add.add_argument(
+        "-p",
+        "--prop",
+        action="append",
+        default=[],
+        metavar="NAME[:TYPE]",
+        help="widget prop; TYPE is str (default), int, float, bool or list; repeat as needed",
+    )
+    widget_add.set_defaults(func=cmd_widget_add)
+
     widget = sub.add_parser(
         "widget-java",
         help="print the ViewBuilder.java branch for a custom widget type",
@@ -1050,7 +1352,76 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also download the NDK (~2 GB), only needed to rebuild the native bridge",
     )
+    setup.add_argument(
+        "--with-emulator",
+        action="store_true",
+        help="also download the x86_64 emulator and API 35 image (several extra GB; no NDK)",
+    )
     setup.set_defaults(func=cmd_setup_sdk)
+
+    install = sub.add_parser(
+        "install",
+        help="install a built APK on a connected Android device/emulator",
+        parents=[common],
+    )
+    install.add_argument(
+        "apk",
+        nargs="?",
+        help="APK path (default: this project's configured build output)",
+    )
+    install.add_argument(
+        "--abi",
+        choices=("arm64-v8a", "x86_64"),
+        help="choose the matching configured APK",
+    )
+    install.add_argument(
+        "--device",
+        metavar="SERIAL",
+        help="adb device serial (auto-picks if exactly one is connected)",
+    )
+    install.add_argument(
+        "--sdk",
+        metavar="PATH",
+        help="Android SDK root (otherwise ANDROID_HOME / ~/.andro/sdk)",
+    )
+    install.set_defaults(func=cmd_install)
+
+    emulator = sub.add_parser(
+        "emulator",
+        help="manage a local Android emulator (optional multi-GB download)",
+    )
+    emulator_actions = emulator.add_subparsers(dest="emulator_action", required=True)
+    emulator_create = emulator_actions.add_parser(
+        "create", help="create the default x86_64 virtual device"
+    )
+    emulator_create.add_argument(
+        "--name",
+        default=_DEFAULT_AVD_NAME,
+        help=f"AVD name (default: {_DEFAULT_AVD_NAME})",
+    )
+    emulator_create.add_argument("--sdk", metavar="PATH", help="Android SDK root")
+    emulator_create.set_defaults(func=cmd_emulator)
+    emulator_list = emulator_actions.add_parser(
+        "list", help="list existing Android virtual devices"
+    )
+    emulator_list.add_argument("--sdk", metavar="PATH", help="Android SDK root")
+    emulator_list.set_defaults(func=cmd_emulator)
+    emulator_start = emulator_actions.add_parser(
+        "start", help="start a virtual device; creates it if missing"
+    )
+    emulator_start.add_argument(
+        "--name",
+        default=_DEFAULT_AVD_NAME,
+        help=f"AVD name (default: {_DEFAULT_AVD_NAME})",
+    )
+    emulator_start.add_argument("--sdk", metavar="PATH", help="Android SDK root")
+    emulator_start.add_argument(
+        "--no-window",
+        action="store_true",
+        help="run headless (useful on CI with acceleration)",
+    )
+    emulator_start.add_argument("--no-audio", action="store_true", help="disable audio output")
+    emulator_start.set_defaults(func=cmd_emulator)
 
     doctor = sub.add_parser("doctor", help="check the environment", parents=[common])
     doctor.set_defaults(func=cmd_doctor)

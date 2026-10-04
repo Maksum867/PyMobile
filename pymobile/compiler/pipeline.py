@@ -36,7 +36,13 @@ from .manifest import build_manifest
 from .packager import ApkPackager, PackageResult
 from .runtime import ensure_runtime
 from .toolchain import find_toolchain
-from .widgets import CustomWidgets, MissingRendererError, dex_has_case, scan_custom_widgets
+from .widgets import (
+    CustomWidgets,
+    MissingRendererError,
+    dex_has_case,
+    dex_has_class,
+    scan_custom_widgets,
+)
 
 __all__ = ["BuildPipeline", "BuildResult", "StageTiming", "build_apk"]
 
@@ -371,9 +377,11 @@ class BuildPipeline:
             self.warnings.append(
                 f"custom widget type(s) with no renderer: {names} — on Android a node "
                 "whose type has no branch in ViewBuilder.java is drawn as a placeholder, "
-                "not as your widget. Build the widget from existing ones, or add the Java "
-                f"branch (`pymobile widget-java {unknown[0]}` writes it) and confirm it "
-                "with register_widget_type(<name>)."
+                "not as your widget. Easiest: `pymobile widget add "
+                f"{unknown[0]}` creates a Python widget and a project-local Java renderer. "
+                "The older `pymobile widget-java "
+                f"{unknown[0]}` command still prints a manual ViewBuilder.java guide. "
+                "Declare custom renderers with register_widget_type(<name>)."
             )
         if self.native and found.preview_only:
             names = ", ".join(repr(name) for name in sorted(found.preview_only))
@@ -385,19 +393,22 @@ class BuildPipeline:
     def _verify_renderers(self, dex: Path) -> None:
         """Stop a native build whose ``classes.dex`` cannot draw the app's widgets.
 
-        The packaged dex only knows the built-in widget types. A project that
-        adds a type — and registers it, or not — but never adds the Java branch
-        and rebuilds the dex (``PYMOBILE_BUILD_JAVA=1``) used to produce an APK
-        in which that widget quietly is not there. The dex that is about to be
-        packaged is asked directly, so a stale prebuilt one, a forgotten rebuild
-        and a typo in the ``case`` label are all caught here, before the APK is
-        signed.
+        A project renderer can be an explicit legacy branch in ViewBuilder.java
+        or a ``<Type>Renderer`` implementation in the project's Java overlay.
+        The dex that is about to be packaged is asked directly, so a stale
+        prebuilt launcher, a missing class and a typo in the renderer name are
+        all caught before the APK is signed.
         """
         wanted = self._custom_widgets.android
         if not wanted:
             return
         data = dex.read_bytes()
-        missing = sorted(name for name in wanted if not dex_has_case(data, name))
+        missing = sorted(
+            name
+            for name in wanted
+            if not dex_has_case(data, name)
+            and not dex_has_class(data, f"org.pymobile.app.widgets.{name}Renderer")
+        )
         if not missing:
             return
         names = ", ".join(repr(name) for name in missing)
@@ -407,11 +418,12 @@ class BuildPipeline:
             "that would go into this APK has no branch for them, so on the phone they "
             "would be drawn as a placeholder instead of your widget",
             hint=(
-                f"`pymobile widget-java {first}` prints the Java branch; add it to "
-                "ViewBuilder.java and rebuild the dex with PYMOBILE_BUILD_JAVA=1 pymobile "
-                "build --native. Or compose the widget from existing ones (Row, Column, "
-                f"ProgressBar …), or mark it preview-only: register_widget_type({first!r}, "
-                "android=False)."
+                f"Recommended: `pymobile widget add {first}` creates a Python class and "
+                "project-local java/ renderer; the next normal `pymobile build --native` "
+                "compiles it automatically, no environment switch or NDK. The legacy "
+                f"`pymobile widget-java {first}` guide is still available for a manual "
+                "ViewBuilder.java branch. You can also compose from existing widgets or "
+                f"mark it preview-only: register_widget_type({first!r}, android=False)."
             ),
         )
 
@@ -692,9 +704,15 @@ class BuildPipeline:
     ) -> BuildResult:
         """Build a real, installable APK using the Android toolchain."""
         toolchain = self._stage("toolchain", find_toolchain)
-        # The NDK is optional: without it the packaged prebuilt JNI bridge is
-        # used, which saves users a 2 GB download.
-        toolchain.verify(require_ndk=False)
+        # The NDK is optional: the prebuilt JNI bridge works for both ABIs.
+        # A project-local Java renderer additionally needs javac and d8; the
+        # source is compiled automatically and never falls back to a stale dex.
+        project_java = self.config.root / "java"
+        has_project_java = project_java.is_dir() and any(project_java.rglob("*.java"))
+        toolchain.verify(
+            require_ndk=False,
+            require_javac=has_project_java or os.environ.get("PYMOBILE_BUILD_JAVA") != "0",
+        )
 
         runtime = self._stage("runtime", lambda: ensure_runtime(self.config.abis[0]))
         backend = NativeBackend(
@@ -779,16 +797,22 @@ class BuildPipeline:
     def build_mode(self) -> str:
         """The artifact kind, recorded with the cache entry and fingerprint.
 
-        The two environment switches that change what is *inside* the APK are
-        part of it as well: ``PYMOBILE_BUILD_JAVA=1`` swaps the launcher dex and
-        ``PYMOBILE_BUILD_JNI=1`` swaps the native bridge, and a cache hit that
-        ignores them hands back an APK built from different code.
+        Java source builds are the default so framework fixes reach the APK;
+        ``PYMOBILE_BUILD_JAVA=0`` explicitly selects the prebuilt dex unless a
+        project overlay is present. ``PYMOBILE_BUILD_JNI=1`` opts into building
+        the bridge from source. These artifact choices belong in the cache key.
         """
         mode = "native" if self.native else "structural"
         if os.environ.get("PYMOBILE_BUILD_JNI") == "1":
             mode += "+jni"
-        if os.environ.get("PYMOBILE_BUILD_JAVA") == "1":
+        project_java = self.config.root / "java"
+        has_project_java = project_java.is_dir() and any(project_java.rglob("*.java"))
+        if self.native and (
+            has_project_java or os.environ.get("PYMOBILE_BUILD_JAVA") != "0"
+        ):
             mode += "+java"
+        elif self.native:
+            mode += "+prebuilt-java"
         return mode
 
     def _fingerprint(self, sources: SourceSet) -> str:
@@ -810,6 +834,9 @@ class BuildPipeline:
         renderer) kept answering "up to date" with an APK built by the old one.
         """
         paths = list(sources.files) + _framework_inputs()
+        project_java = self.config.root / "java"
+        if project_java.is_dir():
+            paths.extend(path for path in project_java.rglob("*.java") if path.is_file())
         icon = self.config.icon_path
         if icon is not None and icon.exists():
             paths.append(icon)

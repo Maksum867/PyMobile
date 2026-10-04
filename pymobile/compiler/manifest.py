@@ -27,9 +27,16 @@ _ORIENTATION_MAP = {
 class ManifestBuilder:
     """Turns a :class:`~pymobile.core.config.ProjectConfig` into a manifest."""
 
-    def __init__(self, config: ProjectConfig, *, activity: str = "org.kivy.android.PythonActivity"):
+    def __init__(
+        self,
+        config: ProjectConfig,
+        *,
+        activity: str = "org.kivy.android.PythonActivity",
+        app_name: str | None = None,
+    ):
         self.config = config
         self.activity = activity
+        self.app_name = app_name if app_name is not None else config.name
 
     def _attr(self, element: ET.Element, name: str, value: str) -> None:
         """Set an ``android:`` namespaced attribute."""
@@ -55,7 +62,7 @@ class ManifestBuilder:
             self._attr(node, "name", permission)
 
         application = ET.SubElement(manifest, "application")
-        self._attr(application, "label", config.name)
+        self._attr(application, "label", self.app_name)
         self._attr(application, "icon", "@mipmap/icon")
         # Backups copy the private store (tokens, personal data) off the
         # device; opt in with `allow_backup = true`.
@@ -67,7 +74,7 @@ class ManifestBuilder:
 
         activity = ET.SubElement(application, "activity")
         self._attr(activity, "name", self.activity)
-        self._attr(activity, "label", config.name)
+        self._attr(activity, "label", self.app_name)
         self._attr(activity, "exported", "true")
         self._attr(activity, "launchMode", "singleTask")
         self._attr(activity, "screenOrientation", _ORIENTATION_MAP[config.orientation])
@@ -106,9 +113,10 @@ def build_manifest(
     *,
     pretty: bool = True,
     activity: str = "org.kivy.android.PythonActivity",
+    app_name: str | None = None,
 ) -> str:
     """Convenience wrapper around :class:`ManifestBuilder`.
 
     ``activity`` selects the launcher class; the native backend passes its own.
     """
-    return ManifestBuilder(config, activity=activity).to_xml(pretty=pretty)
+    return ManifestBuilder(config, activity=activity, app_name=app_name).to_xml(pretty=pretty)

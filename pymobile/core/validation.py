@@ -508,6 +508,15 @@ class Validator:
         if callable(rule):
             return rule
         if isinstance(rule, str):
+            if ":" in rule:
+                name, _separator, argument = rule.partition(":")
+                if name in _ARGUMENT_RULES:
+                    parsed: object = int(argument) if argument.isdecimal() else argument
+                    raise ValueError(
+                        f"validation rule {rule!r} uses colon syntax; rules with an argument "
+                        f"must be a one-key mapping, e.g. {{{name!r}: {parsed!r}}}, "
+                        f"not {rule!r}"
+                    )
             lookup: dict[str, ValidatorFn] = {
                 "required": required,
                 "optional": optional,

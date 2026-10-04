@@ -36,6 +36,8 @@ from datetime import date, datetime, time
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Any
 
+from ..deprecation import warn_deprecated
+
 __all__ = [
     "format_number",
     "format_percent",
@@ -840,6 +842,24 @@ def _current_language() -> str:
     return translations.language
 
 
+def _language_argument(language: str | None, locale_alias: str | None) -> str | None:
+    """Resolve the old ``locale=`` spelling while keeping ``language=`` canonical."""
+    if locale_alias is None:
+        return language
+    if language is not None:
+        raise TypeError("pass either language= or locale=, not both")
+    if not isinstance(locale_alias, str):
+        raise TypeError(f"locale= must be a language tag string, got {type(locale_alias).__name__}")
+    warn_deprecated(
+        "locale=",
+        "language=",
+        since="0.9.3",
+        removal="1.0.0",
+        stacklevel=3,
+    )
+    return locale_alias
+
+
 def _locale(language: str | None) -> _Locale:
     """The formats of ``language`` (``uk``, ``en-GB``, ``pt_BR`` …)."""
     from .i18n import normalise_language
@@ -912,6 +932,7 @@ def format_number(
     decimals: int | None = None,
     *,
     language: str | None = None,
+    locale: str | None = None,
     grouping: bool = True,
 ) -> str:
     """Write a number the way ``language`` does: ``1234.5`` → ``1 234,5`` (uk).
@@ -920,8 +941,9 @@ def format_number(
     like CLDR); by default up to three are shown and trailing zeros dropped.
     ``grouping=False`` leaves out the thousands separator (for years, PINs…).
     """
-    locale = _locale(language)
-    negative, text = _digits(value, locale, decimals=decimals, grouping=grouping)
+    language = _language_argument(language, locale)
+    formats = _locale(language)
+    negative, text = _digits(value, formats, decimals=decimals, grouping=grouping)
     return ("-" if negative else "") + text
 
 
@@ -930,11 +952,13 @@ def format_percent(
     decimals: int = 0,
     *,
     language: str | None = None,
+    locale: str | None = None,
 ) -> str:
     """A ratio as a percentage: ``0.256`` → ``26%`` (en), ``26 %`` (de)."""
-    locale = _locale(language)
-    negative, text = _digits(_to_decimal(value) * 100, locale, decimals=decimals)
-    return ("-" if negative else "") + locale.percent.format(n=text)
+    language = _language_argument(language, locale)
+    formats = _locale(language)
+    negative, text = _digits(_to_decimal(value) * 100, formats, decimals=decimals)
+    return ("-" if negative else "") + formats.percent.format(n=text)
 
 
 def format_currency(
@@ -942,6 +966,7 @@ def format_currency(
     currency: str,
     *,
     language: str | None = None,
+    locale: str | None = None,
     decimals: int | None = None,
     symbol: bool = True,
 ) -> str:
@@ -954,11 +979,12 @@ def format_currency(
     code = currency.strip().upper()
     if len(code) != 3 or not code.isalpha():
         raise ValueError(f"currency must be an ISO 4217 code such as 'UAH', got {currency!r}")
-    locale = _locale(language)
+    language = _language_argument(language, locale)
+    formats = _locale(language)
     places = _CURRENCY_DECIMALS.get(code, 2) if decimals is None else decimals
-    negative, text = _digits(amount, locale, decimals=places)
+    negative, text = _digits(amount, formats, decimals=places)
     sign = _SYMBOLS.get(code, code) if symbol else code
-    pattern = locale.currency
+    pattern = formats.currency
     if not symbol or sign == code:
         # A code reads as a word, so it is always separated from the number.
         pattern = pattern.replace("{s}{n}", "{s}" + NBSP + "{n}").replace(
@@ -1051,6 +1077,7 @@ def format_date(
     style: str = "medium",
     *,
     language: str | None = None,
+    locale: str | None = None,
     pattern: str | None = None,
 ) -> str:
     """A calendar date: ``medium`` → ``Sep 26, 2026`` (en), ``26 вер. 2026 р.`` (uk).
@@ -1062,9 +1089,10 @@ def format_date(
     """
     if not isinstance(value, date):
         raise TypeError(f"format_date needs a date or datetime, got {type(value).__name__}")
-    locale = _locale(language)
-    chosen = pattern or _style_pattern(locale.date or _EN.date, style, "date")
-    return _apply_pattern(chosen, value, locale)
+    language = _language_argument(language, locale)
+    formats = _locale(language)
+    chosen = pattern or _style_pattern(formats.date or _EN.date, style, "date")
+    return _apply_pattern(chosen, value, formats)
 
 
 def format_time(
@@ -1072,14 +1100,16 @@ def format_time(
     style: str = "short",
     *,
     language: str | None = None,
+    locale: str | None = None,
     pattern: str | None = None,
 ) -> str:
     """A time of day: ``short`` → ``4:07 PM`` (en), ``16:07`` (uk); ``medium`` adds seconds."""
     if not isinstance(value, (time, datetime)):
         raise TypeError(f"format_time needs a time or datetime, got {type(value).__name__}")
-    locale = _locale(language)
-    chosen = pattern or _style_pattern(locale.time or _EN.time, style, "time")
-    return _apply_pattern(chosen, value, locale)
+    language = _language_argument(language, locale)
+    formats = _locale(language)
+    chosen = pattern or _style_pattern(formats.time or _EN.time, style, "time")
+    return _apply_pattern(chosen, value, formats)
 
 
 def format_datetime(
@@ -1088,12 +1118,14 @@ def format_datetime(
     time_style: str = "short",
     *,
     language: str | None = None,
+    locale: str | None = None,
 ) -> str:
     """Date and time together: ``Sep 26, 2026, 4:07 PM`` (en), ``26 вер. 2026 р., 16:07`` (uk)."""
     if not isinstance(value, datetime):
         raise TypeError(f"format_datetime needs a datetime, got {type(value).__name__}")
-    locale = _locale(language)
-    return locale.datetime.format(
+    language = _language_argument(language, locale)
+    formats = _locale(language)
+    return formats.datetime.format(
         date=format_date(value, date_style, language=language),
         time=format_time(value, time_style, language=language),
     )

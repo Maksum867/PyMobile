@@ -17,6 +17,7 @@ from pymobile.compiler.widgets import (
     CustomWidgets,
     MissingRendererError,
     dex_has_case,
+    dex_has_class,
     java_branch,
     parse_props,
     scan_custom_widgets,
@@ -267,8 +268,18 @@ class TestBuildChecks:
         assert "'BarChart'" in str(caught.value)
         assert caught.value.hint is not None
         assert "pymobile widget-java BarChart" in caught.value.hint
-        assert "PYMOBILE_BUILD_JAVA=1" in caught.value.hint
+        assert "normal `pymobile build --native`" in caught.value.hint
         assert "android=False" in caught.value.hint
+
+    def test_a_project_renderer_class_satisfies_the_dex_check(self, tmp_path: Path) -> None:
+        write(tmp_path, "main.py", BAR_CHART + REGISTER.format(""))
+        pipeline = scanned(pipeline_for(tmp_path, native=True), tmp_path)
+        descriptor = b"Lorg/pymobile/app/widgets/BarChartRenderer;"
+        dex_string = bytes((len(descriptor),)) + descriptor + b"\0"
+        dex = tmp_path / "classes.dex"
+        dex.write_bytes(PREBUILT_DEX.read_bytes() + dex_string)
+        pipeline._verify_renderers(dex)
+        assert dex_has_class(dex.read_bytes(), "org.pymobile.app.widgets.BarChartRenderer")
 
     def test_a_widget_in_a_file_with_a_bom_does_not_escape_the_native_check(
         self, tmp_path: Path
@@ -438,7 +449,7 @@ class TestGenerator:
         # that is what the user can paste into a terminal or an editor.
         assert str(viewbuilder) in guide
         assert 'register_widget_type("BarChart")' in guide
-        assert "PYMOBILE_BUILD_JAVA=1 pymobile build --native" in guide
+        assert "pymobile build --native" in guide
 
     def test_the_generated_python_widget_really_works(self) -> None:
         branch = java_branch("BarChart", parse_props(["title", "value:int", "values:list"]))

@@ -39,3 +39,4 @@ class WidgetNode(TypedDict, total=False):
     props: WidgetProps
     style: StyleNode
     children: list[WidgetNode]
+    animation: dict[str, SerializedValue]

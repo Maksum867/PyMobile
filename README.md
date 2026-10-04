@@ -8,11 +8,11 @@ Write a declarative UI, run one command, install the APK on your phone.
 
 [![PyPI](https://img.shields.io/pypi/v/pymobile-framework.svg)](https://pypi.org/project/pymobile-framework/)
 [![Python](https://img.shields.io/pypi/pyversions/pymobile-framework.svg)](https://pypi.org/project/pymobile-framework/)
-[![Status](https://img.shields.io/badge/status-alpha-orange.svg)](https://github.com/Maksum867/py-mobile/issues)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Maksum867/py-mobile/blob/main/LICENSE)
+[![Status](https://img.shields.io/badge/status-alpha-orange.svg)](https://github.com/Maksum867/PyMobile/issues)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Maksum867/PyMobile/blob/main/LICENSE)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Maksum867/py-mobile/main/docs/demo.gif"
+  <img src="https://raw.githubusercontent.com/Maksum867/PyMobile/main/docs/demo.gif"
        alt="PyMobile demo: from pip install to a native Android app" width="800">
 </p>
 
@@ -24,13 +24,13 @@ Write a declarative UI, run one command, install the APK on your phone.
 > installable APKs today, but the API can change between minor releases and
 > there are known bugs. I am actively working on them: fixes ship in
 > every release — see the
-> [changelog](https://github.com/Maksum867/py-mobile/blob/main/CHANGELOG.md)
+> [changelog](https://github.com/Maksum867/PyMobile/blob/main/CHANGELOG.md)
 > for what has already landed and
-> [Issues](https://github.com/Maksum867/py-mobile/issues) for what is still
+> [Issues](https://github.com/Maksum867/PyMobile/issues) for what is still
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.9.2`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.9.3`) and read the
 > changelog before upgrading. What may change, and how much notice you get, is
 > written down in the
 > [versioning and deprecation policy](#versioning-and-deprecation-policy). Bug
@@ -73,7 +73,8 @@ pymobile build --native      # → build/demo-0.1.0.apk
 ```
 
 That APK is signed, installable and runs a real CPython interpreter on the
-device. No Java, no Gradle, no Android Studio.
+device. No Java authoring, Gradle or Android Studio; the SDK setup downloads
+the JDK for you.
 
 ---
 
@@ -156,10 +157,11 @@ Then install the Android toolchain, once per machine:
 pymobile setup-sdk
 ```
 
-This downloads JDK 17 and the Android SDK (~800 MB) into `~/.andro`. The NDK is
-**not** downloaded: a prebuilt native bridge (22 KB) ships inside the package.
-It is byte-identical for every application, so there is nothing to compile. If
-you want to rebuild it from C source anyway:
+This downloads JDK 17 and the Android SDK (~900 MB) into `~/.andro`, including
+`adb` for connected-device installs. The NDK is **not** downloaded: a prebuilt
+native bridge (22 KB) ships inside the package. It is byte-identical for every
+application, so there is nothing to compile. If you want to rebuild it from C
+source anyway:
 
 ```bash
 pymobile setup-sdk --with-ndk    # adds ~2 GB
@@ -224,6 +226,14 @@ class Home(Screen):
 
 App("My App").run(Home())
 ```
+
+`App.name` is the UI title: desktop run/GUI/web previews use it instead of the
+`name` in `pymobile.toml`. For a native APK, a literal entry-point call such as
+`App("Notes")` also becomes the Android manifest/launcher label at build time;
+the running activity and Recents task receive the actual `App.name` on the first
+render. Android fixes the launcher label in the APK, so when the name is computed
+dynamically the manifest falls back to `pymobile.toml` while the running task
+uses the runtime value.
 
 ---
 
@@ -679,6 +689,10 @@ BarChart({"Jan": 4, "Feb": -2}); LineChart([1, 3, 2]); PieChart({"A": 3, "B": 1}
 EmptyState("Nothing here", action_label="Add", on_action=self.add); Skeleton(3)
 ```
 
+`FormField`'s first positional argument is its required field key; the second is
+the display label. Both `field.validate()` and `form.validate()` return a
+boolean; read `field.error` or `form.errors` for messages.
+
 Things worth knowing:
 
 - Keep stateful ones (`Form`, `TabView`, `PageView`, `MultiSelect`, `Calendar` …) in
@@ -922,6 +936,11 @@ app.navigator.reset(Home())     # clear the stack, start fresh
 app.navigator.depth             # how many screens are stacked
 app.screen                      # the visible screen
 ```
+
+Android screen swaps fade by default. Choose `transition="fade"`, `"slide"`,
+`"scale"` or `"none"` and tune `transition_duration_ms` on `App`; a back/pop
+reverses a slide. `Widget(animate_visibility=True)` opts a widget into a fade/
+scale when its `visible` state changes; `ExpansionPanel` uses this by default.
 
 `build()` is now called **before** `on_mount()`/`on_show()`, so you can safely
 access widgets created in `build()` from lifecycle hooks. `push(None)` and
@@ -2016,14 +2035,30 @@ both architectures, so still no NDK:
 
 ```bash
 pymobile build --native --abi x86_64       # → build/my-app-1.0.0-x86_64.apk
-adb install -r build/my-app-1.0.0-x86_64.apk
+pymobile install --abi x86_64              # uses adb; auto-selects the only connected device
 ```
 
 `--abi` overrides `abis` from `pymobile.toml` for one build. The emulator APK
-gets an `-x86_64` suffix so it never overwrites the phone build. Create the
-virtual device in Android Studio (*Device Manager → Create device*, an
-**x86_64** image with API 24 or newer), start it, then `adb install` as with a
-phone; `adb logcat -s pymobile python` shows your app's output.
+gets an `-x86_64` suffix so it never overwrites the phone build. The minimal
+SDK install includes `adb` but not a virtual device. To use PyMobile's optional
+emulator instead of Android Studio, install its multi-GB image (still no NDK),
+then start the default AVD:
+
+```bash
+pymobile setup-sdk --with-emulator
+# Terminal 1 — leave this running; it creates the default AVD on first start.
+pymobile emulator start
+# Terminal 2 — after Android finishes booting:
+pymobile install --abi x86_64
+```
+
+`pymobile emulator create --name NAME` and `pymobile emulator list` manage
+additional AVDs; pass `--sdk PATH` to select a non-default SDK (it overrides
+`ANDROID_HOME`). A phone with USB debugging enabled works too. Use
+`pymobile install --device SERIAL` when multiple devices are connected, and
+`adb logcat -s pymobile python` to inspect app output. The emulator requires
+hardware virtualization (KVM on Linux); it is optional and can need several
+additional GB of storage.
 
 ### Signing
 
@@ -2145,7 +2180,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.9.2", "platform": "android",
+# {"framework_version": "0.9.3", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 
@@ -2321,9 +2356,10 @@ The CLI prints only the message and hint. Add `-v` for a full traceback.
 
 ## Desktop preview
 
-`pymobile preview` renders a screen into a picture right on your laptop — no
-emulator, no phone. It runs your entry point with the stub bridge and draws the
-resulting widget tree:
+For interactive, device-free testing use `pymobile run --gui` (Tk window) or
+`pymobile run --web` (local browser). `pymobile preview` renders a screen into
+a picture right on your laptop — no emulator, no phone. It runs your entry point
+with the stub bridge and draws the resulting widget tree:
 
 ```bash
 pymobile preview            # text picture in the terminal
@@ -2336,7 +2372,8 @@ pymobile preview --png ui.png --text    # the text picture as an image (the pre-
 `--theme dark` switches the application itself (`App.set_theme("dark")`) before
 the tree is built, so a `build()` that reads `self.app.theme["SURFACE"]` lays
 out and paints in that palette — the mockup is never asked to draw a light tree
-with dark colours.
+with dark colours. Desktop previews show the final state; screen and visibility
+motion runs in the Android renderer, not in the ASCII/PNG mockup.
 
 ### A screen other than the first
 
@@ -2491,12 +2528,15 @@ end the session.
 | Command | Description |
 | --- | --- |
 | `pymobile init [dir]` | create a project (`-n` name, `-p` package, `-f` force) |
-| `pymobile setup-sdk` | install the Android toolchain (`--with-ndk`, `--path`) |
+| `pymobile setup-sdk` | install the Android toolchain (`--with-ndk`, `--with-emulator`, `--path`) |
+| `pymobile emulator start` | launch/create the optional local x86_64 AVD (`create`, `list`, `--sdk`) |
 | `pymobile build --native` | build a signed, installable APK (`--minimal-stdlib`, `--no-ssl`, `--abi x86_64`) |
+| `pymobile install [APK]` | install an APK using `adb` (`--abi`, `--device`, `--sdk`) |
 | `pymobile run` | run the app on your machine (`--gui` window, `--web` browser) |
 | `pymobile watch` | re-render on every save (`--png`, `--text`, `--ids`, `--interval`) |
 | `pymobile preview` | draw a screen as a picture (`--png`, `--size`, `--theme`, `--text`, `--ids`) |
-| `pymobile widget-java TYPE` | print the `ViewBuilder.java` branch and Python skeleton for a custom widget type (`-p title -p value:int`, `--out FILE`) |
+| `pymobile widget add TYPE` | scaffold a project-local Python widget and auto-compiled Java renderer (`-p title -p value:int`) |
+| `pymobile widget-java TYPE` | print the shared `ViewBuilder.java` branch guide (`-p title -p value:int`, `--out FILE`; framework contributors) |
 | `pymobile info` | show the resolved configuration (`--json`) |
 | `pymobile doctor` | check environment and project health |
 | `pymobile clean` | remove build artifacts |
@@ -2513,77 +2553,46 @@ and after the sub-command.
 
 ## Extending the framework
 
-The architecture is designed so that additions never touch existing code.
+The quickest route for a project-local widget is the scaffold command:
 
-**A new widget** — subclass `Widget`, set `type_name`, override `props()`, then
-add a branch to `ViewBuilder.java`:
-
-```python
-from pymobile.core.ui.widget import Widget
-
-
-class Slider(Widget):
-    type_name = "Slider"
-    __slots__ = ("value", "minimum", "maximum")
-
-    def __init__(self, value=0.0, *, minimum=0.0, maximum=100.0, **kwargs):
-        super().__init__(**kwargs)
-        self.value, self.minimum, self.maximum = value, minimum, maximum
-
-    def props(self):
-        return {**super().props(), "value": self.value,
-                "minimum": self.minimum, "maximum": self.maximum}
+```bash
+pymobile widget add BarChart -p title -p value:int -p values:list
 ```
 
-> **The Java branch is not optional — and the build now checks that it exists.**
-> `ViewBuilder.java` has one `case` per built-in type, compiled into
-> `classes.dex`. A `type_name` with no branch there is drawn as a red
-> `[BarChart: no native renderer]` placeholder on the phone, while the desktop
-> and browser previews print `<BarChart>` and look perfectly fine. Because the
-> packaged `classes.dex` is prebuilt, a branch added to `ViewBuilder.java`
-> reaches a phone only through a rebuild of that dex
-> (`PYMOBILE_BUILD_JAVA=1 pymobile build --native`, which needs the Android
-> SDK's `d8`). What makes a gap impossible to miss:
->
-> - **`pymobile build --native` stops** when the `classes.dex` it is about to
->   package has no branch for a widget type your project defines (a class that
->   derives from a framework widget and sets `type_name = "BarChart"`) or
->   registers with `register_widget_type("BarChart")`. It asks the dex itself, so
->   a stale prebuilt dex, a forgotten rebuild and a typo in the `case` label are
->   all caught — before the APK is signed. The error names the three ways out;
-> - `pymobile build` (any build) warns about a defined type nothing has declared,
->   and a native build warns about types declared preview-only;
-> - `pymobile widget-java BarChart -p title -p value:int` prints everything you
->   need to write: the Python widget, the `case`, the `buildBarChart(...)` method
->   (it reads your props and shows them, so the widget is visible at once), the
->   `updateNode` branch, and the rebuild command;
-> - on the device the renderer logs `no native renderer for widget type "BarChart"`
->   (`adb logcat -s pymobile`), and `App` logs the same once per unknown type on
->   the first frame sent to a native bridge (desktop previews stay quiet);
-> - `unknown_types(screen.to_dict())` returns the offending names, so a test can
->   assert the tree contains nothing the renderer would drop:
->   `assert unknown_types(Shell().to_dict()) == frozenset()`.
->
-> Three ways out of the build error. **Compose** the widget from existing ones —
-> a `BarChart` made of `Row`, `ProgressBar` and `Expanded` needs no Java at all,
-> and is the safest route. **Add the branch** with `widget-java` and rebuild the
-> dex. Or declare it **preview-only**:
-> `register_widget_type("BarChart", android=False, web=True)` — the previews draw
-> it, the phone does not, and the build only warns. Declaring a type without
-> `android=False` (`register_widget_type("BarChart")`) is a promise that the Java
-> branch exists, and the build holds you to it.
+It creates `widgets/bar_chart.py` (a ready-to-import, registered Python widget)
+and `java/org/pymobile/app/widgets/BarChartRenderer.java` (a starter Android
+renderer). Use it from Python with `from widgets.bar_chart import BarChart`.
+The Java starter displays its props in a labelled `TextView`; replace its TODO
+with the actual Android view and implement its `update()` method if needed.
 
-```python
-from pymobile import register_widget_type, unknown_types
+Project Java files are compiled automatically into the APK as a local `java/`
+overlay. A normal `pymobile build --native` compiles the framework and overlay
+Java sources, fingerprints project Java for caching, and verifies the renderer
+class made it into `classes.dex` — without editing the installed PyMobile
+package or setting a Java-build environment switch. A broken overlay is a
+build error, never a silent fallback to an older dex. The renderer implements
+`WidgetRenderer` and is loaded by its class name convention
+(`org.pymobile.app.widgets.<Type>Renderer`).
 
-register_widget_type("Slider")             # case "Slider" exists in ViewBuilder.java
-assert unknown_types(screen.to_dict()) == frozenset()   # nothing the renderer drops
-```
+For full control, implement `Widget` yourself and register the type; or use
+`pymobile widget-java TYPE` to print the older in-framework `ViewBuilder.java`
+branch guide. `pymobile widget add` is the recommended project-local path; the
+branch guide is for framework contributors who intentionally change the shared
+renderer.
 
-`Wrap` is an example of a widget added the full way: `class Wrap(Container)` in
-`layout.py`, a `WidgetCapability` row in `registry.py`, a branch in each of the
-four renderers (`ViewBuilder.java` + a rebuilt `classes.dex`, `web.py`, `gui.py`,
-`preview.py`/`mockup.py`) and tests for all of them.
+Native builds check the dex for the custom widget renderer before signing, so a
+stale prebuilt dex or a typo cannot silently leave a blank Android widget.
+`unknown_types(screen.to_dict())` can assert that a screen contains no unknown
+types in a device-free test. If the widget needs no new native behavior, compose
+it from existing widgets (for example, `Row`, `ProgressBar` and `Expanded`) and
+skip the Java renderer entirely. For a preview-only type, declare
+`register_widget_type("BarChart", android=False, web=True)`; the desktop/browser
+can draw it, but it is not rendered on Android.
+
+`Wrap` is an example of a framework-level widget: `class Wrap(Container)` in
+`layout.py`, a `WidgetCapability` row in `registry.py`, support in the four
+renderers (`ViewBuilder.java`, `web.py`, `gui.py`, `preview.py`/`mockup.py`),
+and tests for all of them.
 
 **A new Android API** — add a method to `Bridge`, implement it in
 `AndroidBridge` and `StubBridge`, wrap it in a small class under `core/api/`.
@@ -2620,7 +2629,7 @@ four renderers (`ViewBuilder.java` + a rebuilt `classes.dex`, `web.py`, `gui.py`
 ## Known issues
 
 There are currently no open known issues. If you hit something new, report
-it on [GitHub Issues](https://github.com/Maksum867/py-mobile/issues) with a
+it on [GitHub Issues](https://github.com/Maksum867/PyMobile/issues) with a
 reproducer (`main.py` + `pymobile.toml`) and the device or platform. Bug
 reports with a regression test land faster.
 
@@ -2630,7 +2639,7 @@ reports with a regression test land faster.
 
 PyMobile follows [Semantic Versioning 2.0.0](https://semver.org/):
 `MAJOR.MINOR.PATCH`. This page is the promise; the
-[changelog](https://github.com/Maksum867/py-mobile/blob/main/CHANGELOG.md) is
+[changelog](https://github.com/Maksum867/PyMobile/blob/main/CHANGELOG.md) is
 where each release keeps it.
 
 ### What the public API is
@@ -2780,7 +2789,7 @@ No. `pymobile setup-sdk` downloads only the command-line tools it needs.
 ## Contributing
 
 ```bash
-git clone https://github.com/Maksum867/py-mobile.git
+git clone https://github.com/Maksum867/PyMobile.git
 cd py-mobile
 pip install -e ".[dev]"
 
@@ -2794,13 +2803,12 @@ To rebuild the native artifacts from source (requires
 
 ```bash
 # macOS / Linux
-PYMOBILE_BUILD_JAVA=1 PYMOBILE_BUILD_JNI=1 pymobile build --native --clean
+PYMOBILE_BUILD_JNI=1 pymobile build --native --clean
 ```
 
 ```powershell
 # Windows PowerShell
 $env:JAVA_HOME = "C:\Users\You\.andro\jdk-17.0.13+11"
-$env:PYMOBILE_BUILD_JAVA = "1"
 $env:PYMOBILE_BUILD_JNI = "1"
 pymobile build --native --clean
 ```
@@ -2818,9 +2826,9 @@ Issues and pull requests are welcome.
 
 ## Documentation
 
-- **[CHANGELOG.md](https://github.com/Maksum867/py-mobile/blob/main/CHANGELOG.md)** — release history
+- **[CHANGELOG.md](https://github.com/Maksum867/PyMobile/blob/main/CHANGELOG.md)** — release history
 - **[Versioning and deprecation policy](#versioning-and-deprecation-policy)** — what may change, and how much notice you get
 
 ## License
 
-MIT — see [LICENSE](https://github.com/Maksum867/py-mobile/blob/main/LICENSE).
+MIT — see [LICENSE](https://github.com/Maksum867/PyMobile/blob/main/LICENSE).

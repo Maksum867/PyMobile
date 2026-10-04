@@ -1,7 +1,9 @@
 package org.pymobile.app;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.content.res.Configuration;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
@@ -55,6 +57,8 @@ public class MainActivity extends Activity {
 
     /** The last tree rendered, replayed after a density/font-scale change. */
     private String lastJson;
+    /** App.name received from Python; config.name remains the manifest fallback. */
+    private String appTitle;
     /** Configuration seen last, to tell which parts changed. */
     private Configuration lastConfiguration;
     /** OnBackInvokedCallback on API 33+ (typed Object so older ART never loads it). */
@@ -118,7 +122,15 @@ public class MainActivity extends Activity {
             public void run() {
                 try {
                     JSONObject root = new JSONObject(json);
-                    lastJson = json;
+                    String requestedTitle = root.optString("app_title", "");
+                    if (!requestedTitle.isEmpty() && !requestedTitle.equals(appTitle)) {
+                        appTitle = requestedTitle;
+                        setTitle(requestedTitle);
+                        if (Build.VERSION.SDK_INT >= 21) {
+                            setTaskDescription(new ActivityManager.TaskDescription(
+                                    requestedTitle, (Bitmap) null));
+                        }
+                    }
 
                     // Colours are baked into views when they are built, so a
                     // new palette means a rebuild rather than a patch.
@@ -131,24 +143,56 @@ public class MainActivity extends Activity {
                             && !builder.isSnackbar(container.getChildAt(0))
                             ? container.getChildAt(0)
                             : null;
+                    JSONObject navigation = root.optJSONObject("navigation");
+                    boolean screenChanged = navigation != null;
+                    if (screenChanged) {
+                        // Navigation metadata is a one-frame command; do not
+                        // replay the transition after a configuration change.
+                        root.remove("navigation");
+                        lastJson = root.toString();
+                    } else {
+                        lastJson = json;
+                    }
 
-                    // Patch the live views when the structure is unchanged:
-                    // this preserves scroll position and keyboard focus.
-                    if (!themeChanged && existing != null && builder.update(existing, root)) {
+                    // A navigation frame is a different screen even when its
+                    // root happens to reuse the same generated widget id. Never
+                    // patch that tree into the outgoing screen: build it, then
+                    // animate the swap. Ordinary state updates still patch in
+                    // place and preserve focus/scroll.
+                    if (!screenChanged && !themeChanged && existing != null
+                            && builder.update(existing, root)) {
                         builder.syncSnackbar(container, root.optJSONObject("snackbar"));
                         return;
                     }
 
                     View view = builder.build(root);
+                    // Cancel any earlier transition and discard its outgoing
+                    // screen. The latest complete tree always wins.
                     for (int i = container.getChildCount() - 1; i >= 0; i--) {
-                        if (!builder.isSnackbar(container.getChildAt(i))) {
-                            container.removeViewAt(i);
+                        View child = container.getChildAt(i);
+                        if (builder.isSnackbar(child) || child == existing) {
+                            continue;
                         }
+                        child.animate().cancel();
+                        container.removeViewAt(i);
                     }
-                    container.addView(view, 0, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams matchParent = new FrameLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
-                    ));
+                    );
+                    if (screenChanged && existing != null) {
+                        // Attach first so ViewPropertyAnimator has a window token
+                        // and can start on the next frame.
+                        container.addView(view, 0, matchParent);
+                        if (!animateScreenChange(existing, view, navigation)) {
+                            container.removeView(existing);
+                        }
+                    } else {
+                        if (existing != null) {
+                            container.removeView(existing);
+                        }
+                        container.addView(view, 0, matchParent);
+                    }
                     builder.syncSnackbar(container, root.optJSONObject("snackbar"));
                 } catch (Exception error) {
                     Log.e(TAG, "render failed", error);
@@ -156,6 +200,74 @@ public class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    /**
+     * Animate a screen swap requested by ``App(..., transition=...)``.
+     * Returns false for disabled/zero-duration transitions so the caller can
+     * replace the old view immediately.
+     */
+    private boolean animateScreenChange(
+            final View outgoing, final View incoming, JSONObject navigation) {
+        String kind = navigation.optString("type", "none");
+        int duration = Math.max(0, Math.min(navigation.optInt("duration_ms", 220), 2000));
+        if (duration == 0 || "none".equals(kind)) {
+            return false;
+        }
+        final boolean reverse = navigation.optBoolean("reverse", false);
+        outgoing.animate().cancel();
+        incoming.animate().cancel();
+        incoming.setVisibility(View.VISIBLE);
+
+        if ("slide".equals(kind)) {
+            float width = Math.max(1, container.getWidth());
+            incoming.setTranslationX(reverse ? -width : width);
+            incoming.setAlpha(1f);
+            outgoing.setTranslationX(0f);
+            incoming.animate().translationX(0f).setDuration(duration).start();
+            outgoing.animate().translationX(reverse ? width / 4f : -width / 4f)
+                    .setDuration(duration).withEndAction(new Runnable() {
+                        @Override
+                        public void run() {
+                            container.removeView(outgoing);
+                            incoming.setTranslationX(0f);
+                        }
+                    }).start();
+            return true;
+        }
+
+        if ("scale".equals(kind)) {
+            incoming.setPivotX(incoming.getWidth() / 2f);
+            incoming.setPivotY(incoming.getHeight() / 2f);
+            incoming.setAlpha(0f);
+            incoming.setScaleX(0.96f);
+            incoming.setScaleY(0.96f);
+            incoming.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(duration).start();
+            outgoing.animate().alpha(0f).scaleX(1.02f).scaleY(1.02f)
+                    .setDuration(duration).withEndAction(new Runnable() {
+                        @Override
+                        public void run() {
+                            container.removeView(outgoing);
+                            incoming.setAlpha(1f);
+                            incoming.setScaleX(1f);
+                            incoming.setScaleY(1f);
+                        }
+                    }).start();
+            return true;
+        }
+
+        // Unknown transition names degrade to a fade, not a blank screen.
+        incoming.setAlpha(0f);
+        incoming.setTranslationX(0f);
+        outgoing.animate().alpha(0f).setDuration(duration).withEndAction(new Runnable() {
+            @Override
+            public void run() {
+                container.removeView(outgoing);
+                incoming.setAlpha(1f);
+            }
+        }).start();
+        incoming.animate().alpha(1f).setDuration(duration).start();
+        return true;
     }
 
     /** Show a toast on the UI thread. */

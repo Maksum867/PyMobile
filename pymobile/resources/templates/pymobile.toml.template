@@ -1,5 +1,5 @@
 # PyMobile project configuration.
-# Full reference: https://github.com/Maksum867/py-mobile
+# Full reference: https://github.com/Maksum867/PyMobile
 
 [app]
 name = "{{name}}"

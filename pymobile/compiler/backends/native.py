@@ -16,6 +16,7 @@ error output — the user sees what ``aapt2`` said, not a Python traceback.
 
 from __future__ import annotations
 
+import ast
 import os
 import shutil
 import struct
@@ -277,6 +278,7 @@ class NativeBackend:
         self.config = config
         self.toolchain = toolchain
         self.python_runtime = python_runtime
+        self.app_name = _literal_app_name(config.entrypoint_path) or config.name
         #: True when the caller supplied a keystore path (release signing).
         self._release_keystore = keystore is not None
         # Passwords may come from the environment instead of the command line.
@@ -336,7 +338,7 @@ class NativeBackend:
     def _asset_metadata(self) -> bytes:
         """The ``pymobile.properties`` payload written into the APK."""
         return (
-            f"name={self.config.name}\n"
+            f"name={self.app_name}\n"
             f"package={self.config.package}\n"
             f"version={self.config.version}\n"
             f"entrypoint={self._entrypoint}\n"
@@ -504,22 +506,48 @@ else:
 
     # -- 2/3. java → dex ---------------------------------------------------
     def compile_java(self, workdir: Path) -> Path:
-        """Provide ``classes.dex``.
+        """Provide ``classes.dex``; compile project-local Java overlays automatically.
 
-        The launcher classes carry no project-specific data — the app id lives
-        in the manifest — so the packaged prebuilt dex is used by default. It
-        is byte-identical to a freshly compiled one, but costs no time and
-        cannot fail, which matters because ``d8`` is fragile on some hosts.
-
-        Set ``PYMOBILE_BUILD_JAVA=1`` to compile from source instead; that path
-        is meant for people changing the Java layer of the framework itself.
+        Rebuild the framework Java sources by default so the APK includes the
+        runtime in this installed package. Any ``*.java`` in the project's
+        top-level ``java/`` overlay joins that build automatically. Set
+        ``PYMOBILE_BUILD_JAVA=0`` to explicitly use the architecture-neutral
+        prebuilt dex instead. A broken project overlay is always a hard error:
+        silently falling back would produce an APK without its renderer.
         """
-        want_source_build = os.environ.get("PYMOBILE_BUILD_JAVA") == "1"
-        if not want_source_build or not self.toolchain.javac.exists():
+        project_java = self.config.root / "java"
+        overlay_sources = sorted(project_java.rglob("*.java")) if project_java.is_dir() else []
+        project_overlay = bool(overlay_sources)
+        use_prebuilt = os.environ.get("PYMOBILE_BUILD_JAVA") == "0" and not project_overlay
+        if use_prebuilt:
+            return self._use_prebuilt_dex(workdir)
+        if project_overlay and (
+            not self.toolchain.javac.exists() or not self.toolchain.d8.exists()
+        ):
+            raise PyMobileError(
+                "project-local Java renderers need javac and d8",
+                hint=(
+                    "Run `pymobile setup-sdk` (no NDK is needed), or set ANDROID_HOME "
+                    "to an SDK with build-tools and a JDK. The Java source lives in "
+                    "your project's java/ directory."
+                ),
+            )
+        if not self.toolchain.javac.exists() or not self.toolchain.d8.exists():
+            if project_overlay:
+                raise PyMobileError(
+                    "project-local Java renderers need javac and d8",
+                    hint="Run `pymobile setup-sdk` (no NDK is needed) and retry.",
+                )
+            self.warnings.append("falling back to prebuilt dex: javac/d8 unavailable")
             return self._use_prebuilt_dex(workdir)
         try:
             result = self._compile_java_from_source(workdir)
         except PyMobileError as error:
+            if project_overlay:
+                raise PyMobileError(
+                    f"could not compile the project Java overlay: {error}",
+                    hint=error.hint or "Check the Java sources in the project's java/ directory.",
+                ) from error
             detail = f" {error.hint}" if error.hint else ""
             self.warnings.append(f"falling back to the prebuilt dex:{detail}")
             _log.warning("java build failed, using the prebuilt dex: %s", error)
@@ -558,15 +586,33 @@ else:
         """Compile the launcher classes and convert them with ``d8``."""
         src = workdir / "java"
         src.mkdir(parents=True, exist_ok=True)
-        for name in (
+        framework_sources = (
             "Native.java",
             "DeviceServices.java",
             "ViewBuilder.java",
             "AdvancedViews.java",
             "PythonRuntime.java",
             "MainActivity.java",
-        ):
+            "WidgetRenderer.java",
+            "CustomWidgetRegistry.java",
+        )
+        for name in framework_sources:
             shutil.copy2(resource_path("android", "java", name), src / name)
+
+        # A project may replace a framework source with a same-named file at
+        # java/<Name>.java, or add any number of package-organised Java files
+        # (the generated widget renderers live under java/org/pymobile/app/…).
+        project_java = self.config.root / "java"
+        if project_java.is_dir():
+            builtins = set(framework_sources)
+            for overlay in sorted(project_java.rglob("*.java")):
+                relative = overlay.relative_to(project_java)
+                if relative.parent == Path(".") and overlay.name in builtins:
+                    target = src / overlay.name
+                else:
+                    target = src / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(overlay, target)
 
         classes = workdir / "classes"
         classes.mkdir(parents=True, exist_ok=True)
@@ -588,7 +634,7 @@ else:
                 self.toolchain.platform_jar,
                 "-d",
                 classes,
-                *sorted(src.glob("*.java")),
+                *sorted(src.rglob("*.java")),
             ],
             step="javac",
             java_home=self.toolchain.java_home,
@@ -638,7 +684,7 @@ else:
         (values / "strings.xml").write_text(
             '<?xml version="1.0" encoding="utf-8"?>\n'
             "<resources>\n"
-            f'    <string name="app_name">{_xml_escape(self.config.name)}</string>\n'
+            f'    <string name="app_name">{_xml_escape(self.app_name)}</string>\n'
             "</resources>\n",
             encoding="utf-8",
         )
@@ -649,7 +695,11 @@ else:
 
         manifest = workdir / "AndroidManifest.xml"
         manifest.write_text(
-            build_manifest(self.config, activity="org.pymobile.app.MainActivity"),
+            build_manifest(
+                self.config,
+                activity="org.pymobile.app.MainActivity",
+                app_name=self.app_name,
+            ),
             encoding="utf-8",
         )
 
@@ -756,8 +806,7 @@ else:
             self.warnings.append(
                 "the packaged launcher runs main.py, and this project ships its own "
                 f"main.py as a module: the declared entry point ({self._entrypoint}) "
-                "will not be used until the launcher is rebuilt from source "
-                "(PYMOBILE_BUILD_JAVA=1)."
+                "will not be used until the launcher is rebuilt from its Java sources."
             )
             return None
         _log.debug(
@@ -1068,5 +1117,33 @@ def _xml_escape(text: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace('"', "&quot;")
-        .replace("'", "\\'")
+        .replace("'", "&apos;")
     )
+
+
+def _literal_app_name(entrypoint: Path) -> str | None:
+    """Read a literal ``App("Name")``/``App(name="Name")`` for manifest labels.
+
+    The application is never imported during a build. Static extraction keeps
+    user code (and its side effects) out of the build process; a dynamic name
+    falls back to ``pymobile.toml`` until the running Android activity receives
+    its actual ``App.name``.
+    """
+    try:
+        tree = ast.parse(entrypoint.read_bytes(), filename=str(entrypoint))
+    except (OSError, SyntaxError, ValueError):
+        return None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        function = node.func.id if isinstance(node.func, ast.Name) else (
+            node.func.attr if isinstance(node.func, ast.Attribute) else ""
+        )
+        if function != "App":
+            continue
+        value: ast.expr | None = node.args[0] if node.args else None
+        if value is None:
+            value = next((item.value for item in node.keywords if item.arg == "name"), None)
+        if isinstance(value, ast.Constant) and isinstance(value.value, str) and value.value.strip():
+            return value.value
+    return None

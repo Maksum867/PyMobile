@@ -3,6 +3,74 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.9.3] — 2026-10-04
+
+### Added
+
+- **Project-local native widgets.** `pymobile widget add TYPE -p title -p value:int`
+  scaffolds a registered Python widget and its Java renderer under the project.
+  The renderer contract and convention-based registry let applications add
+  Android views without editing the installed PyMobile package or the shared
+  `ViewBuilder.java`. Native builds compile the project's `java/` overlay and
+  verify custom renderers are present in the resulting DEX; a broken overlay
+  is a build error rather than a silent fallback.
+- **Android UI motion.** `App` supports `fade`, `slide`, `scale` and `none`
+  screen transitions with a configurable duration. Widgets can opt in to
+  fade/scale visibility animation; `ExpansionPanel` uses it by default. The
+  desktop/ASCII mockups continue to show the final state without pretending to
+  reproduce native animation.
+- **Optional emulator and install workflow.** Running
+  `pymobile setup-sdk --with-emulator` installs the x86_64 emulator and system
+  image in addition to the minimal SDK; `pymobile emulator start` creates the
+  default AVD if needed, and `pymobile install` installs an APK through `adb`.
+  The ordinary SDK setup includes platform-tools/`adb` without the
+  multi-gigabyte emulator.
+
+### Changed
+
+- **Native Java is rebuilt by default.** A regular native build compiles the
+  framework Java sources and any project overlay, so Java-side fixes reach the
+  APK without setting an opt-in environment variable. Set
+  `PYMOBILE_BUILD_JAVA=0` to select the packaged fallback DEX when there is no
+  project overlay. The x86_64 JNI bridge remains prebuilt, so an NDK is not
+  required for that ABI; the SDK/JDK are still required for APK compilation.
+  Java sources and build mode participate in the build cache fingerprint. If a
+  framework Java build fails, the existing packaged-Dex fallback still warns
+  and continues; a failed project overlay remains a hard error.
+- **More direct widget and validation APIs.** `List` reports an actionable
+  error when `item_count` is not an integer and documents the `item_count` plus
+  `builder(index)` pattern. `FormField` requires its field name as the first
+  positional argument, and `FormField.validate()` / `Form.validate()` return a
+  boolean; validation messages remain available via `error` / `errors`. Rules
+  with arguments use one-key mappings such as `{"min_length": 3}`; old colon
+  syntax now gives a clear migration error.
+- **Formatters use `language=` consistently.** The `format_*` helpers accept
+  `language=` as their canonical keyword; `locale=` remains a deprecated
+  compatibility alias for this release.
+
+### Fixed
+
+- **`App.name` no longer loses to `pymobile.toml` in titles.** Desktop previews
+  use the application's name. A literal entry-point call such as
+  `App("Notes")` supplies the Android manifest/launcher label, and the running
+  activity and Recents task receive the runtime `App.name`. A dynamically
+  computed title still uses the project name as the install-time manifest
+  fallback, then updates the running task at render time.
+- **Device setup and installation paths are more reliable.** SDK setup expands
+  `~` in custom install paths; `pymobile install` resolves relative APK paths
+  from the current directory or project root and reports `adb` failures;
+  emulator listing checks its exit status. The post-build hint now points to
+  `pymobile install` instead of requiring a hand-written `adb install` command.
+- Android string resources now escape apostrophes as XML entities, and
+  one-frame navigation metadata is kept out of ordinary render events and is
+  not replayed as an animation after a configuration change.
+
+### Tests
+
+- Added regression coverage for app titles, Android transition/visibility
+  metadata, project-local renderer generation/compilation/cache invalidation,
+  emulator/install CLI behavior, and the device-free development path.
+
 ## [0.9.2] — 2026-10-03
 
 ### Fixed

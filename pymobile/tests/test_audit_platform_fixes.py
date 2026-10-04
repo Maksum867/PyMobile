@@ -146,6 +146,20 @@ class TestCacheIdentity:
         assert debug != release
         assert release != other
 
+    def test_project_java_overlay_is_part_of_the_fingerprint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("PYMOBILE_BUILD_JAVA", raising=False)
+        config = _project(tmp_path)
+        build = BuildPipeline(config, native=True, use_cache=False)
+        before = build._fingerprint(build._collect())
+        renderer = tmp_path / "java" / "org" / "pymobile" / "app" / "widgets" / "GaugeRenderer.java"
+        renderer.parent.mkdir(parents=True)
+        renderer.write_text("class GaugeRenderer {}", encoding="utf-8")
+        after = build._fingerprint(build._collect())
+        assert before != after
+        assert build.build_mode().endswith("+java")
+
     def test_passwords_are_not_part_of_the_fingerprint(self, tmp_path: Path) -> None:
         """Only the identity is hashed; a secret must not reach cache metadata."""
         config = _project(tmp_path)
