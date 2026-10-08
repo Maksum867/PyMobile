@@ -296,6 +296,20 @@ class Driver:
         everything else is sent as the text the front end would send.
         """
         widget = self._usable(widget_id, "change")
+        # П-09: mirror the guard in press() — a Button/Chip/Link that only
+        # supports a tap must not silently swallow `id=value` routes.
+        accepts_value = (
+            hasattr(widget, "set_checked")  # Switch / Checkbox
+            or hasattr(widget, "set_value")  # Slider, Dropdown, TextInput, …
+            or hasattr(widget, "value")  # any input-style widget
+            or isinstance(getattr(widget, "editable", None), bool)
+        )
+        if not accepts_value:
+            raise PyMobileError(
+                f"{widget_id!r} is a {type(widget).__name__}, which takes no value",
+                hint=f"Use press({widget_id!r}) to tap it; change() is for inputs "
+                "(TextInput, Dropdown, Slider, Switch, Checkbox).",
+            )
         text = str(value).strip().lower() if isinstance(value, (str, bool)) else None
         if hasattr(widget, "set_checked") and text in (_ON | _OFF):
             self.app.handle_ui_event(widget_id, "toggle", "true" if text in _ON else "false")
@@ -312,7 +326,8 @@ class Driver:
         drifted (an earlier press went somewhere new) fails at the step where
         it matters instead of pressing the wrong widget three steps later.
         """
-        known = {cls.__name__ for cls in (self._screens or screen_classes(project_only=False))}
+        screen_pool = self._screens or screen_classes(project_only=False)
+        known = {cls.__name__ for cls in screen_pool}
         landed: list[Screen] = []
         for step in parse_steps(route, known):
             if step.target == BACK:
@@ -320,10 +335,30 @@ class Driver:
             else:
                 if step.screen is not None:
                     self._expect_screen(step)
-                if step.value is None:
-                    self.press(step.target)
-                else:
-                    self.change(step.target, step.value)
+                try:
+                    if step.value is None:
+                        self.press(step.target)
+                    else:
+                        self.change(step.target, step.value)
+                except PyMobileError as exc:
+                    # П-17: if the user wrote "Meniu.start" (typo in a screen
+                    # name) the parser treated "Meniu.start" as a widget id
+                    # because "Meniu" is not a known screen. Surface a screen
+                    # hint in addition to whatever the widget hint says.
+                    head = step.text.split(".", 1)[0] if "." in step.text else step.text
+                    if step.screen is None and head not in known:
+                        names = sorted({cls.__name__ for cls in screen_pool})
+                        close_screen = get_close_matches(head, names, n=1, cutoff=0.6)
+                        if close_screen and close_screen[0] != head:
+                            tail = step.text.split(".", 1)[-1] if "." in step.text else "widget"
+                            hint = (
+                                (exc.hint + " ") if exc.hint else ""
+                            ) + (
+                                f"Did you mean the screen {close_screen[0]!r}? "
+                                f"Write it as {close_screen[0]}.{tail}."
+                            )
+                            exc.hint = hint
+                    raise
             if not self.app.running:
                 raise PyMobileError(
                     f"the app stopped at step {step.text!r}",

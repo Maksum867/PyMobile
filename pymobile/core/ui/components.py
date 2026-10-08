@@ -51,6 +51,43 @@ __all__ = [
 _WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 
 
+def _parse_options(options: Sequence[Any]) -> tuple[list[str], list[str]]:
+    """Normalise selection-widget options into parallel ``(values, labels)``.
+
+    П-11: ``Dropdown``/``SegmentedButtons``/``BottomNavigation`` previously
+    treated every option as both value and label, which breaks i18n — a
+    translated label sent back from the front end would not match any value
+    after a language switch. Accepting ``(value, label)`` pairs keeps the
+    internal value stable while showing a localised label. A plain string
+    ``"x"`` is shorthand for ``("x", "x")``.
+    """
+    if not options:
+        raise ValueError(
+            "options must not be empty; pass at least one option, "
+            "e.g. options=['Item 1', 'Item 2'] or options=[('home', 'Home')]"
+        )
+    values: list[str] = []
+    labels: list[str] = []
+    for opt in options:
+        if isinstance(opt, str):
+            values.append(opt)
+            labels.append(opt)
+        elif (
+            isinstance(opt, (tuple, list))
+            and len(opt) == 2
+            and isinstance(opt[0], str)
+            and isinstance(opt[1], str)
+        ):
+            values.append(opt[0])
+            labels.append(opt[1])
+        else:
+            raise ValueError(
+                "options must be strings or (value, label) pairs of strings, "
+                f"got {opt!r}"
+            )
+    return values, labels
+
+
 def _alias(kwargs: dict[str, Any], alias: str, name: str, value: Any, default: Any) -> Any:
     """Resolve a deprecated shorthand keyword (``max=`` for ``maximum=``).
 
@@ -757,14 +794,20 @@ class Dropdown(Widget):
 
     ``options`` is the ordered list of choices; ``value`` is the currently
     selected one. ``on_select`` fires when the selection changes.
+
+    Each option may be a plain string (used as both value and visible label)
+    or a ``(value, label)`` pair — the stable machine-readable value is what
+    :attr:`value` carries (and what ``on_select`` receives), while ``label``
+    is the text rendered. This keeps localised labels from leaking into
+    program logic (П-11).
     """
 
     type_name = "Dropdown"
-    __slots__ = ("options", "_value", "on_select")
+    __slots__ = ("options", "_labels", "_value", "on_select")
 
     def __init__(
         self,
-        options: Sequence[str],
+        options: Sequence[Any],
         *,
         value: str | None = None,
         on_select: Callable[[str], None] | None = None,
@@ -773,18 +816,10 @@ class Dropdown(Widget):
     ) -> None:
         super().__init__(**kwargs)
         _deprecated_on_change(on_select, on_change)
-        if not options:
-            raise ValueError(
-                "options must not be empty; "
-                "pass at least one option, e.g. options=['Item 1', 'Item 2']"
-            )
-        if not all(isinstance(o, str) for o in options):
-            raise ValueError("options must be strings")
-        self.options = list(options)
+        values, labels = _parse_options(options)
+        self.options = values
+        self._labels = labels
         self.on_select = on_select or on_change
-        # Fail fast, the way Style() does for a bad colour: silently swapping an
-        # unknown value for the first option hides a typo until someone notices
-        # the wrong row is selected on a phone.
         if value is not None and value not in self.options:
             raise ValueError(
                 f"value {value!r} is not one of the options {self.options!r}"
@@ -793,7 +828,7 @@ class Dropdown(Widget):
 
     @property
     def value(self) -> str:
-        """The selected option; assigning to it schedules a redraw."""
+        """The selected option's *value* (not its visible label); assigning schedules a redraw."""
         return self._value
 
     @value.setter
@@ -820,7 +855,12 @@ class Dropdown(Widget):
     def props(self) -> dict[str, Any]:
         return {
             **super().props(),
+            # П-11: ``options`` stays the list of *values* (backwards compatible),
+            # ``labels`` is the matching list of visible, possibly localised
+            # labels — renderers fall back to the value when no label is given
+            # (a plain string option means value == label).
             "options": list(self.options),
+            "labels": list(self._labels),
             "value": self._value,
             "on_select": callback_name(self.on_select),
         }
@@ -1248,7 +1288,8 @@ class SegmentedButtons(Widget):
 
     ``options`` is the ordered list of choices; ``value`` is the selected one.
     ``on_select`` fires when the selection changes (``on_change`` is a
-    deprecated alias of it).
+    deprecated alias of it). Options support ``(value, label)`` pairs for
+    stable values with localised labels (П-11).
 
     **Long labels.** The options share one line, each as wide as its text. When
     they do not fit — five translated labels on a 360 dp phone — the bar scrolls
@@ -1258,11 +1299,11 @@ class SegmentedButtons(Widget):
     """
 
     type_name = "SegmentedButtons"
-    __slots__ = ("options", "_value", "on_select", "wrap")
+    __slots__ = ("options", "_labels", "_value", "on_select", "wrap")
 
     def __init__(
         self,
-        options: Sequence[str],
+        options: Sequence[Any],
         *,
         value: str | None = None,
         on_select: Callable[[str], None] | None = None,
@@ -1272,17 +1313,11 @@ class SegmentedButtons(Widget):
     ) -> None:
         super().__init__(**kwargs)
         _deprecated_on_change(on_select, on_change)
-        if not options:
-            raise ValueError(
-                "options must not be empty; "
-                "pass at least one option, e.g. options=['Item 1', 'Item 2']"
-            )
-        self.options = list(options)
+        values, labels = _parse_options(options)
+        self.options = values
+        self._labels = labels
         self.on_select = on_select or on_change
         self.wrap = bool(wrap)
-        # Fail fast, the way Style() does for a bad colour: silently swapping an
-        # unknown value for the first option hides a typo until someone notices
-        # the wrong row is selected on a phone.
         if value is not None and value not in self.options:
             raise ValueError(
                 f"value {value!r} is not one of the options {self.options!r}"
@@ -1291,7 +1326,7 @@ class SegmentedButtons(Widget):
 
     @property
     def value(self) -> str:
-        """The selected option; assigning to it schedules a redraw."""
+        """The selected option's value; assigning to it schedules a redraw."""
         return self._value
 
     @value.setter
@@ -1318,6 +1353,7 @@ class SegmentedButtons(Widget):
         return {
             **super().props(),
             "options": list(self.options),
+            "labels": list(self._labels),
             "value": self._value,
             "on_select": callback_name(self.on_select),
             "wrap": self.wrap,

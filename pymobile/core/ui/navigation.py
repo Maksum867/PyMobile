@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from .components import _deprecated_on_change
+from .components import _deprecated_on_change, _parse_options
 from .widget import Widget, callback_name, in_build_scope
 
 __all__ = ["BottomNavigation"]
@@ -30,14 +30,17 @@ class BottomNavigation(Widget):
             ["Home", "Stats", "Settings"],
             on_select=self.show_tab,
         )
+
+    Options may also be ``(value, label)`` pairs for stable identifiers with
+    localised labels (П-11).
     """
 
     type_name = "BottomNavigation"
-    __slots__ = ("options", "_value", "on_select")
+    __slots__ = ("options", "_labels", "_value", "on_select")
 
     def __init__(
         self,
-        options: Sequence[str],
+        options: Sequence[Any],
         *,
         value: str | None = None,
         on_select: Callable[[str], None] | None = None,
@@ -46,20 +49,17 @@ class BottomNavigation(Widget):
     ) -> None:
         super().__init__(**kwargs)
         _deprecated_on_change(on_select, on_change, exclusive=False)
-        values = list(options)
-        if not values:
-            raise ValueError("BottomNavigation needs at least one tab")
-        if any(not isinstance(option, str) for option in values):
-            raise ValueError("BottomNavigation options must be strings")
+        values, labels = _parse_options(options)
         if value is not None and value not in values:
             raise ValueError(f"value {value!r} is not one of the options {values!r}")
         self.options = values
+        self._labels = labels
         self.on_select = on_select or on_change
         self._value = value if value is not None else values[0]
 
     @property
     def value(self) -> str:
-        """The selected tab; assigning to it schedules a redraw."""
+        """The selected tab's value; assigning to it schedules a redraw."""
         return self._value
 
     @value.setter
@@ -86,6 +86,7 @@ class BottomNavigation(Widget):
         return {
             **super().props(),
             "options": list(self.options),
+            "labels": list(self._labels),
             "value": self._value,
             "on_select": callback_name(self.on_select),
         }

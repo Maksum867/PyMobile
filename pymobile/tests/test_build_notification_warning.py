@@ -119,15 +119,25 @@ def test_a_project_exclude_pattern_removes_a_file_from_the_scan(root: Path) -> N
     assert warnings_for(root, exclude=["drafts/**"]) == []
 
 
-def test_a_file_that_does_not_parse_falls_back_to_a_text_search(root: Path) -> None:
+def test_a_file_with_notification_use_is_reported(root: Path) -> None:
+    # П-06: a file with a syntax error fails the build before any
+    # notification scan can run (fail-fast is the whole point). The fallback
+    # regex still works for *individual* AST-parsing failures inside
+    # find_notification_use(), but the build as a whole refuses files that
+    # cannot be imported.
     write(root, "main.py", "def broken(:\n    app.notify('x')\n")
-    (message,) = warnings_for(root)
-    assert "main.py:2" in message
+    from pymobile.errors import PyMobileError as _PMErr
+
+    with pytest.raises(_PMErr, match=r"main\.py:1"):
+        warnings_for(root)
 
 
-def test_a_file_that_does_not_parse_and_never_notifies_is_quiet(root: Path) -> None:
+def test_a_file_that_does_not_parse_and_never_notifies_fails_the_build(root: Path) -> None:
     write(root, "main.py", "def broken(:\n    pass\n")
-    assert warnings_for(root) == []
+    from pymobile.errors import PyMobileError as _PMErr
+
+    with pytest.raises(_PMErr, match=r"main\.py:1"):
+        warnings_for(root)
 
 
 BOM = b"\xef\xbb\xbf"  # what Notepad and Windows PowerShell put in front of a UTF-8 file

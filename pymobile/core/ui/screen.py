@@ -87,6 +87,12 @@ class Screen:
         self._is_current = False
         self._root: Widget | None = None
         self._mounted = False
+        # П-10: set to True by Navigator._discard() once the screen has been
+        # popped. The ``app`` property raises for *new* accesses after the
+        # stack settles, but stays usable from code that is mid-handler
+        # (where the pop itself happened) so ``self.app.pop(); do(self.app)``
+        # works.
+        self._detached = False
         #: Whether this screen was ever on a navigator stack. A screen that
         #: never was is not what app.render() serialises, which is what makes
         #: a refresh() on it a no-op worth reporting.
@@ -111,7 +117,12 @@ class Screen:
         application of a screen that no longer exists is a bug that used to
         fail three lines later with a cryptic ``AttributeError`` on ``None``.
         """
-        if self._app is None:
+        # П-10: during the UI dispatch that popped this screen we leave the
+        # app reference intact so the handler can still use ``self.app``
+        # after calling pop(). Once the dispatch finishes _app is nulled and
+        # we raise again for any truly stale access.
+        in_dispatch = bool(self._app is not None and getattr(self._app, "_in_ui_dispatch", 0) > 0)
+        if self._app is None or (self._detached and not in_dispatch):
             raise PyMobileError(
                 f"screen {self.title!r} is no longer on the stack",
                 hint="grab app = self.app before calling pop()",
@@ -490,11 +501,21 @@ class Navigator:
         """
         screen._is_current = False
         screen._mounted = False
+        screen._detached = True
         try:
             screen.on_unmount()
         finally:
             screen._cancel_subscriptions()
-            screen._app = None
+            # П-10: defer clearing ``screen._app`` until the currently
+            # running UI event finishes. A button handler that calls
+            # ``self.app.pop()`` and then reads ``self.app`` one more time
+            # must not get ``PyMobileError("screen is no longer on the stack")``
+            # while its own handler is still on the stack.
+            app = screen._app
+            if app is not None and getattr(app, "_in_ui_dispatch", 0) > 0:
+                app._detach_queue.append(screen)
+            else:
+                screen._app = None
 
     def push(self, screen: ScreenT) -> ScreenT:
         """Show ``screen`` on top of the stack."""

@@ -25,12 +25,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..core.config import ProjectConfig
+from ..core.config import SECRET_LIKE_BASENAMES, SECRET_LIKE_SUFFIXES, ProjectConfig
 from ..errors import PyMobileError
 from ..log import get_logger
 from .backends.native import DEBUG_KEY_ALIAS, NativeBackend, framework_asset_files
 from .cache import BuildCache, fingerprint_files
-from .collector import SourceSet, collect_sources
+from .collector import _ALWAYS_EXCLUDED_DIRS, SourceSet, collect_sources
 from .icon import IconSet, prepare_icons
 from .manifest import build_manifest
 from .packager import ApkPackager, PackageResult
@@ -58,9 +58,10 @@ DEFAULT_ASSET_SUFFIXES = frozenset(
 )
 
 #: Directories never considered when reporting files that were not packaged.
-_IGNORED_ASSET_DIRS = frozenset(
-    {".git", ".hg", ".svn", "__pycache__", "venv", ".venv", "build", "dist", ".pymobile"}
-)
+#: Reuses the same set the collector skips so the warning does not fire on
+#: cache/tag files inside .pytest_cache/.mypy_cache/.ruff_cache/node_modules
+#: (П-19 — the collector already knows about them).
+_IGNORED_ASSET_DIRS = frozenset(_ALWAYS_EXCLUDED_DIRS | {".pymobile", "build", "dist"})
 
 #: Names that make ``<receiver>.notify(...)`` a PyMobile notification: ``app``,
 #: ``self.app``, ``my_app``, ``app.notifications``, ``get_bridge()`` … A
@@ -461,6 +462,7 @@ class BuildPipeline:
             str(suffix).lower() for suffix in self.config.asset_suffixes
         }
         ignored: dict[str, int] = {}
+        secret_packaged: list[str] = []
         for path in self.config.source_path.rglob("*"):
             if not path.is_file():
                 continue
@@ -470,17 +472,70 @@ class BuildPipeline:
             if _is_excluded(relative, self.config.exclude):
                 continue
             suffix = path.suffix.lower()
-            if not suffix or suffix in allowed_suffixes:
+            if suffix and suffix not in allowed_suffixes:
+                ignored[suffix] = ignored.get(suffix, 0) + 1
+            # П-03: warn when a secret-like file IS packaged (not excluded).
+            if (
+                path.name in SECRET_LIKE_BASENAMES
+                or suffix in SECRET_LIKE_SUFFIXES
+            ):
+                secret_packaged.append(relative.as_posix())
+        if ignored:
+            listed = ", ".join(f"{suffix} ({count})" for suffix, count in sorted(ignored.items()))
+            self.warnings.append(
+                f"files under {self.config.source_path.name}/ were NOT packaged: {listed}. "
+                "Add the extensions you need with `asset_suffixes = ['…']` in "
+                "pymobile.toml (read them on device through the packaged app dir)."
+            )
+        if secret_packaged:
+            listed = ", ".join(sorted(secret_packaged)[:5])
+            more = "" if len(secret_packaged) <= 5 else f" … (+{len(secret_packaged) - 5} more)"
+            self.warnings.append(
+                f"secret-like files will be PACKAGED into the APK: {listed}{more}. "
+                "APKs are public ZIP archives — anything inside can be extracted. "
+                "Move them out of the source directory, add them to `exclude`, or read "
+                "secrets from ~/.pymobile/ or environment variables at runtime."
+            )
+
+    def _check_python_syntax(self, sources: SourceSet) -> None:
+        """П-06: fail the build on a syntax error instead of shipping broken code.
+
+        ``py_compile`` used to emit a warning and continue, producing an APK
+        that installs but crashes at launch with ImportError. A plain
+        ``ast.parse`` catches syntax errors in milliseconds with filename and
+        line number, and respects a UTF-8 BOM (utf-8-sig) the way CPython does.
+        """
+        problems: list[str] = []
+        for path in sources.files:
+            if path.suffix != ".py":
                 continue
-            ignored[suffix] = ignored.get(suffix, 0) + 1
-        if not ignored:
-            return
-        listed = ", ".join(f"{suffix} ({count})" for suffix, count in sorted(ignored.items()))
-        self.warnings.append(
-            f"files under {self.config.source_path.name}/ were NOT packaged: {listed}. "
-            "Add the extensions you need with `asset_suffixes = ['…']` in "
-            "pymobile.toml (read them on device through the packaged app dir)."
-        )
+            try:
+                data = path.read_bytes()
+            except OSError as exc:
+                problems.append(f"{path.relative_to(sources.root).as_posix()}: {exc}")
+                continue
+            try:
+                ast.parse(data)
+            except SyntaxError as exc:
+                rel = path.relative_to(sources.root).as_posix()
+                line = exc.lineno or 0
+                # Show the offending line so the user does not have to open
+                # the file to see what broke.
+                snippet = ""
+                try:
+                    text = data.decode("utf-8-sig", errors="replace").splitlines()
+                    if 0 < line <= len(text):
+                        snippet = "\n    " + text[line - 1].strip()
+                except Exception:  # pragma: no cover - best effort
+                    pass
+                problems.append(f"{rel}:{line}: {exc.msg}{snippet}")
+        if problems:
+            head = "\n  - ".join(problems[:10])
+            more = "" if len(problems) <= 10 else f"\n  … (+{len(problems) - 10} more)"
+            raise PyMobileError(
+                f"Python syntax error(s) prevent this APK from running:\n  - {head}{more}",
+                hint="Fix the syntax errors above, then rebuild.",
+            )
 
     def _compile_sources(self, sources: SourceSet, workdir: Path) -> list[tuple[str, Path]]:
         """Copy sources into the work dir, optionally as bytecode only.
@@ -591,6 +646,9 @@ class BuildPipeline:
         self._stage("validate", self._validate)
         self._warn_unexcluded_output()
         sources: SourceSet = self._stage("collect", self._collect)
+        # П-06: fail fast on Python syntax errors rather than shipping an
+        # APK that crashes at launch.
+        self._stage("syntax", lambda: self._check_python_syntax(sources))
         self._check_requested_permissions(sources)
         self._check_widget_types(sources)
         self._check_notifications(sources)

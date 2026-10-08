@@ -3,6 +3,115 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.9.4] — 2026-10-08
+
+### Added
+
+- **Secret files are excluded from APKs by default.** The default exclusion
+  list now covers `.env*`, `*.jks`, `*.keystore`, `*.pem`, `*.key`, `id_rsa*`,
+  `secrets/**`, `secrets.json`, `credentials*.json`, `.github/**`, `.idea/**`
+  and `.vscode/**`. The build pass additionally scans the project tree for
+  secret-looking files and emits a loud warning naming each one that would
+  still end up in the APK.
+- **Value–label pairs for selection widgets.** `Dropdown`, `SegmentedButtons`
+  and `BottomNavigation` accept entries as `(value, label)` tuples, giving a
+  stable programmatic value together with a localisable display label. This
+  fixes a class of bugs where switching the active language rewrote the
+  previously selected option and broke `on_select` lookups.
+- **Decimal comma in the `number` validator.** The numeric validator (and the
+  `min`/`max`/`between` rules) now accept `89,90` the same way as `89.90`,
+  matching European/Ukrainian decimal notation common when entering prices.
+
+### Changed
+
+- **Strict type checking in `ProjectConfig`.** Before range/list validation,
+  the config is type-checked end to end. A string where a list is expected
+  (`permissions`, `exclude`, `abis`, `asset_suffixes`), a string where a
+  boolean is expected (`allow_backup`, `optimize`, `strip_debug`, `no_ssl`,
+  `minimal_stdlib`, `exclude_only`), a string where an integer is expected
+  (`min_sdk`, `version_code`), or a string where a path is expected
+  (`source_dir`, `output_dir`) now raises a `ConfigError` naming the field
+  and showing the correct TOML syntax (for example,
+  `permissions = ["android.permission.INTERNET"]` or `allow_backup = false`
+  without quotes). Permissions are normalised at load time
+  (`"INTERNET"` → `"android.permission.INTERNET"`), so `info --json` reports
+  the same fully-qualified names that end up in the Android manifest.
+- **Python syntax is checked before building.** A new `syntax` pipeline stage
+  runs `ast.parse()` over every `.py` file being packaged; a syntax error
+  fails the build immediately with file name, line number and source excerpt,
+  rather than producing an "installable" APK that crashes on launch.
+- **Web preview works behind TLS proxies.** The `Origin` check no longer
+  hard-requires the `http://` scheme; `https://` is accepted and the
+  `X-Forwarded-Host`/`X-Forwarded-Proto` headers are honoured. This restores
+  operation over SSH tunnels, Cloudflare Tunnels, corporate portals and
+  container setups where a TLS terminator sits in front of the internal HTTP
+  server.
+- **`Driver.change()` is no longer silent on non-valued widgets.** Calling
+  `driver.change("start", "yes")` on a `Button` (or any widget that has no
+  value) now raises `PyMobileError` "is a Button, which takes no value; use
+  press()" — symmetric to the existing `press()` check that already rejected
+  text inputs.
+- **README corrections.** The note claiming `run --web` listened on all
+  interfaces by default has been corrected: the default is `--host 127.0.0.1`
+  (loopback), and `--host 0.0.0.0` is the explicit opt-in for network access.
+  The "Known issues" section no longer claims that there are zero open
+  problems.
+
+### Fixed
+
+- A string value passed to list-typed configuration fields such as
+  `permissions` or `exclude` no longer silently iterates its characters:
+  `permissions = "android.permission.INTERNET"` no longer produces a manifest
+  of one-letter permissions, and `exclude = "secrets/**"` no longer excludes
+  every file in the project because `*` matches any character.
+- String booleans such as `allow_backup = "no"` (quoted, which makes them
+  truthy strings in TOML) no longer silently enable the feature; they now
+  raise a clear error pointing at `false` without quotes.
+- Bad scalar types (`min_sdk`, `version_code`, `source_dir`, `output_dir`,
+  the `--size` CLI flag) now produce an error naming the offending field
+  instead of a raw `TypeError` labelled "unexpected error".
+- Syntax-broken Python sources no longer result in a zero-exit APK that
+  cannot launch on device; the build stops on the offending file and line.
+- Under pytest (or whenever a test runner is detected), `App(...)` without an
+  explicit `storage_path` automatically sandboxes persistent storage under
+  `$TMPDIR/pymobile-test/` and emits a warning, so tests never clobber real
+  app data under `~/.pymobile/`. Runtime apps keep the existing default.
+- `self.app` remains valid until the outermost event handler returns, so
+  code like `self.app.pop(); do(self.app.theme)` inside a button tap no
+  longer raises "screen is no longer on the stack" mid-handler.
+- `translations.load(Path(...))` now raises a `TypeError` pointing at
+  `load_file()`/`load_dir()` rather than a raw `AttributeError`.
+- A translation file whose name does not look like a BCP-47 language tag
+  (e.g. `messages.json`, `strings.json`, `i18n.json`) passed to `load_file`
+  now emits a warning once, instead of silently registering a catalog under
+  that bogus tag and making every `t()` lookup miss.
+- JSON translation catalogs saved with a UTF-8 BOM (typical of Windows
+  Notepad/PowerShell) are now read transparently via `utf-8-sig`, removing
+  the `ValueError: Unexpected UTF-8 BOM`.
+- The false-positive warning "files under … were NOT packaged: .tag" no
+  longer appears: the source collector and the packaging reporter now share
+  one list of directories to always ignore (`.pytest_cache`, `.mypy_cache`,
+  `.ruff_cache`, `node_modules`, etc.).
+- `zipfile.extractall` in the SDK installer has been replaced with a safe
+  helper that rejects entries that escape the extraction root via `..`,
+  absolute paths or Windows-style paths, matching the `filter="data"`
+  treatment already applied to tar archives.
+- Unknown screen names passed to `--navigate "Meniu.start"` now suggest
+  "Did you mean the screen 'Menu'?" rather than only suggesting widgets, and
+  the hint tail wraps at 80 columns.
+- Widget labels for `Dropdown`, `SegmentedButtons` and `BottomNavigation`
+  render translated labels (not internal values) consistently across the Tk
+  preview, the ASCII mockup, the web preview and the bottom navigation bar.
+- Permissions reported by `pymobile info --json` are now normalised the same
+  way as the Android manifest list, so both outputs agree.
+- **Source distribution (`pip install` from sdist).** Four JNI UTF-8 tests
+  always failed with `FileNotFoundError` after a `pip install` from the
+  source distribution because two C helper files in `pymobile/tests/jni/`
+  (`harness_template.c`, `harness_suffix.c`) were not included by
+  `MANIFEST.in`. `MANIFEST.in` now includes those files recursively, plus
+  `LICENSE` and `README.md` so the sdist is fully self-contained. All tests
+  now pass from a fresh `pip install` of the sdist.
+
 ## [0.9.3] — 2026-10-04
 
 ### Added

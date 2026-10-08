@@ -27,6 +27,34 @@ __all__ = ["install_sdk", "default_sdk_home", "REQUIRED_PACKAGES", "EMULATOR_PAC
 
 _log = get_logger("compiler.sdk")
 
+
+def _safe_extract_zip(zf: zipfile.ZipFile, destination: Path) -> None:
+    """Extract a ZIP verifying no member escapes the destination directory.
+
+    П-20: mirrors tarfile's ``filter="data"`` behaviour for zip, so bandit's
+    B202 warning is not a false positive. SHA-256 is verified *before*
+    extraction already; this is a belt-and-braces defence against a path
+    traversal entry (``../../etc/passwd`` or an absolute Windows path).
+    """
+    destination = destination.resolve()
+    for member in zf.infolist():
+        # Reject absolute paths and any ``..`` traversal on any platform.
+        name = member.filename
+        if name.startswith(("/", "\\")) or (len(name) > 1 and name[1] == ":"):
+            raise PyMobileError(
+                f"unsafe entry in archive: {name!r} (absolute path)",
+                hint="The downloaded SDK archive was rejected; clear ~/.andro and retry.",
+            )
+        target = (destination / name).resolve()
+        try:
+            target.relative_to(destination)
+        except ValueError as exc:
+            raise PyMobileError(
+                f"unsafe entry in archive: {name!r} (resolves outside {destination})",
+                hint="The downloaded SDK archive was rejected; clear ~/.andro and retry.",
+            ) from exc
+    zf.extractall(destination)
+
 #: Everything needed to build an APK using the prebuilt JNI bridge (~450 MB).
 MINIMAL_PACKAGES = (
     "platforms;android-35",
@@ -210,7 +238,7 @@ def _ensure_jdk(home: Path) -> Path:
     _log.info("extracting the JDK…")
     if is_zip:
         with zipfile.ZipFile(archive) as zf:
-            zf.extractall(home)
+            _safe_extract_zip(zf, home)
     else:
         with tarfile.open(archive) as tar:
             tar.extractall(home, filter="data")
@@ -273,7 +301,7 @@ def install_sdk(
         staging = root / "_cmdline"
         shutil.rmtree(staging, ignore_errors=True)
         with zipfile.ZipFile(archive) as zf:
-            zf.extractall(staging)
+            _safe_extract_zip(zf, staging)
         destination = sdk / "cmdline-tools" / "latest"
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.rmtree(destination, ignore_errors=True)

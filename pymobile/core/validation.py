@@ -174,8 +174,35 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 #: What a user can type as an integer / a decimal number. Python's int() and
 #: float() are more permissive than a form should be: they accept "4_2",
 #: "nan", "inf" and non-ASCII digits.
+#: П-12: the decimal comma ``89,90`` (common in uk-UA and other European
+#: locales) is accepted as a decimal separator — forms typed by a Ukrainian
+#: user must not reject the price they actually typed.
 _INTEGER_RE = re.compile(r"[+-]?[0-9]+", re.ASCII)
-_NUMBER_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", re.ASCII)
+_NUMBER_RE = re.compile(
+    r"[+-]?(?:[0-9]+(?:[.,][0-9]*)?|[.,][0-9]+)(?:[eE][+-]?[0-9]+)?",
+    re.ASCII,
+)
+
+
+def _to_float(value: Any) -> float | None:
+    """Convert a string/number to ``float``, treating ``,`` as a decimal comma.
+
+    Returns ``None`` when conversion fails (so callers can produce the usual
+    validation message).
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if math.isfinite(float(value)) else None
+    if isinstance(value, str):
+        text = value.strip().replace(",", ".")
+        if _NUMBER_RE.fullmatch(value.strip()):
+            try:
+                result = float(text)
+            except ValueError:
+                return None
+            return result if math.isfinite(result) else None
+    return None
 
 
 def _is_empty(value: Any) -> bool:
@@ -264,14 +291,12 @@ def integer(value: Any) -> str | None:
 
 
 def number(value: Any) -> str | None:
-    """A value must be a number (int or float)."""
-    if isinstance(value, bool):
-        return RuleMessage("number")
-    if isinstance(value, int):
-        return None
-    if isinstance(value, float):
-        return None if math.isfinite(value) else RuleMessage("number")
-    if isinstance(value, str) and _NUMBER_RE.fullmatch(value.strip()):
+    """A value must be a number (int or float).
+
+    Accepts a decimal comma (``"89,90"``) the way Ukrainian and other
+    European users type prices (П-12).
+    """
+    if _to_float(value) is not None:
         return None
     return RuleMessage("number")
 
@@ -287,9 +312,8 @@ def _in_range(low: float, high: float, key: str, fallback: str | None) -> Valida
     def _check(value: Any) -> str | None:
         if value is None:
             return None
-        try:
-            num = float(value)
-        except (TypeError, ValueError):
+        num = _to_float(value)
+        if num is None:
             return RuleMessage("number")
         if not (low <= num <= high):
             return RuleMessage(key, fallback=fallback, low=low, high=high)

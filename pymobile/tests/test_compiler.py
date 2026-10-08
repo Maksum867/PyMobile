@@ -18,7 +18,7 @@ from pymobile.compiler.packager import ApkPackager
 from pymobile.compiler.pipeline import BuildPipeline, build_apk
 from pymobile.compiler.scaffold import create_project, default_package, render, slugify
 from pymobile.core.config import ProjectConfig
-from pymobile.errors import ConfigError, ResourceError
+from pymobile.errors import ConfigError, PyMobileError, ResourceError
 
 ANDROID = f"{{{ANDROID_NS}}}"
 
@@ -404,15 +404,22 @@ class TestPipeline:
         (project.root / "main.py").write_text("print('changed')\n", encoding="utf-8")
         assert not build_apk(project).cached
 
-    def test_syntax_error_still_packages_source(self, project: ProjectConfig) -> None:
-        # The warning only fires on the bytecode-compile path, which requires
-        # optimize=True (the default is to ship sources directly).
-        project.optimize = True
+    def test_syntax_error_fails_the_build(self, project: ProjectConfig) -> None:
+        # П-06: a Python syntax error anywhere in the sources fails the build
+        # with a clear message instead of producing an APK that crashes at
+        # launch with ImportError.
         (project.root / "broken.py").write_text("def (:\n", encoding="utf-8")
+        with pytest.raises(PyMobileError, match=r"broken\.py:1"):
+            build_apk(project)
+
+    def test_clean_sources_compile_to_pyc(self, project: ProjectConfig) -> None:
+        # With optimize=True clean sources ship as .pyc (no warnings).
+        project.optimize = True
+        (project.root / "main.py").write_text("x = 1\n", encoding="utf-8")
         result = build_apk(project)
-        assert any("broken.py" in warning for warning in result.warnings)
+        assert not any("could not be byte-compiled" in w for w in result.warnings)
         with zipfile.ZipFile(result.apk) as archive:
-            assert "assets/app/broken.py" in archive.namelist()
+            assert "assets/app/main.pyc" in archive.namelist()
 
     def test_warns_about_missing_internet(self, tmp_path: Path) -> None:
         (tmp_path / "main.py").write_text(
@@ -460,8 +467,10 @@ class TestPipeline:
     def test_stage_callback_and_timings(self, project: ProjectConfig) -> None:
         stages: list[str] = []
         result = BuildPipeline(project, on_stage=stages.append).run()
-        assert stages == ["validate", "collect", "compile", "icons", "manifest", "package"]
-        assert len(result.timings) == 6
+        # П-06 adds a "syntax" stage between collect and compile.
+        expected = ["validate", "collect", "syntax", "compile", "icons", "manifest", "package"]
+        assert stages == expected
+        assert len(result.timings) == 7
 
     def test_summary_text(self, project: ProjectConfig) -> None:
         assert "KB" in build_apk(project).summary()

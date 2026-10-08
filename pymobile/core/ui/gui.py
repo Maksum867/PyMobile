@@ -554,15 +554,31 @@ class GuiPreview:
             return
 
         if kind == "Dropdown":
-            options = [str(o) for o in (props.get("options") or [])]
-            fallback = options[0] if options else ""
-            variable = tk.StringVar(value=text_value(props.get("value", fallback)))
-            menu = tk.OptionMenu(
-                parent,
-                variable,
-                *(options or [""]),
-                command=lambda v: self._dispatch(widget_id, "change", str(v)),
-            )
+            # П-11: ``options`` is the list of values; ``labels`` is the
+            # parallel list of visible strings (falls back to the value).
+            option_values = [str(o) for o in (props.get("options") or [])]
+            option_labels = [str(lbl) for lbl in (props.get("labels") or option_values)]
+            while len(option_labels) < len(option_values):
+                option_labels.append(option_values[len(option_labels)])
+            default_val = option_values[0] if option_values else ""
+            current_value = text_value(props.get("value", default_val))
+            try:
+                current_label = option_labels[option_values.index(current_value)]
+            except ValueError:
+                current_label = current_value
+            variable = tk.StringVar(value=current_label)
+
+            def _pick(
+                lbl: str,
+                v: list[str] = option_values,
+                labels: list[str] = option_labels,
+            ) -> None:
+                try:
+                    self._dispatch(widget_id, "change", v[labels.index(lbl)])
+                except ValueError:
+                    self._dispatch(widget_id, "change", lbl)
+
+            menu = tk.OptionMenu(parent, variable, *(option_labels or [""]), command=_pick)
             menu.pack(fill="x", pady=pad)
             self._widgets[widget_id] = menu
             self._variables[widget_id] = variable
@@ -625,15 +641,19 @@ class GuiPreview:
         if kind == "SegmentedButtons":
             frame = tk.Frame(parent, bg=background)
             frame.pack(fill="x", pady=pad)
+            option_values = [str(o) for o in (props.get("options") or [])]
+            option_labels = [str(lbl) for lbl in (props.get("labels") or option_values)]
+            while len(option_labels) < len(option_values):
+                option_labels.append(option_values[len(option_labels)])
             selected = text_value(props.get("value", ""))
             wrap = bool(props.get("wrap"))
             buttons = []
-            for option in props.get("options") or []:
+            for val, lbl in zip(option_values, option_labels, strict=False):
                 button = tk.Button(
                     frame,
-                    text=str(option),
-                    relief="sunken" if str(option) == selected else "raised",
-                    command=lambda v=str(option): self._dispatch(widget_id, "change", v),
+                    text=lbl,
+                    relief="sunken" if val == selected else "raised",
+                    command=lambda v=val: self._dispatch(widget_id, "change", v),
                 )
                 buttons.append(button)
                 if not wrap:  # one row; Tk never squeezes a word into a column of letters
@@ -744,13 +764,17 @@ class GuiPreview:
         if kind == "BottomNavigation":
             bar = tk.Frame(parent, bg=background)
             bar.pack(fill="x", pady=pad)
-            for option in props.get("options", ()):
-                selected = option == props.get("value")
+            option_values = [str(o) for o in (props.get("options") or [])]
+            option_labels = [str(lbl) for lbl in (props.get("labels") or option_values)]
+            while len(option_labels) < len(option_values):
+                option_labels.append(option_values[len(option_labels)])
+            for val, lbl in zip(option_values, option_labels, strict=False):
+                selected = val == props.get("value")
                 tk.Button(
                     bar,
-                    text=str(option),
+                    text=lbl,
                     relief="sunken" if selected else "raised",
-                    command=lambda option=str(option): self._dispatch(widget_id, "change", option),
+                    command=lambda v=val: self._dispatch(widget_id, "change", v),
                 ).pack(side="left", expand=True, fill="x")
             return
 

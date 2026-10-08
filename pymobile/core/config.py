@@ -50,6 +50,13 @@ RUNTIME_MIN_SDK = 24
 #: new one. ``*.md`` is documentation, not app data — it keeps the
 #: scaffolded ``README.md`` out of the APK so a fresh project builds with no
 #: "not packaged" warning.
+#:
+#: Secret-like filenames are excluded by default (П-03): shipping keystores,
+#: private keys or env files inside an APK leaks credentials the moment the
+#: APK is unzipped.  ``google-services.json`` is intentionally **not** here —
+#: it is a Firebase config that must ship; projects that name a file
+#: ``secrets.json``/``credentials.json`` intentionally must list them
+#: explicitly via ``asset_suffixes``/removing the pattern.
 DEFAULT_EXCLUDE: tuple[str, ...] = (
     "**/__pycache__/**",
     "**/*.pyc",
@@ -59,10 +66,61 @@ DEFAULT_EXCLUDE: tuple[str, ...] = (
     "tests/**",
     "**/test_*.py",
     ".git/**",
+    ".github/**",
+    ".idea/**",
+    ".vscode/**",
     ".venv/**",
     "venv/**",
     "build/**",
     "dist/**",
+    # secret-like files (П-03)
+    ".env",
+    ".env.*",
+    "*.jks",
+    "*.keystore",
+    "*.pem",
+    "*.key",
+    "id_rsa",
+    "id_rsa.*",
+    "secrets/**",
+    "secrets.json",
+    "secrets.*.json",
+    "credentials.json",
+    "credentials.*.json",
+)
+
+#: File basenames that look like secrets (used to emit a warning when a
+#: matching file is **not** covered by an exclude pattern, so the user notices
+#: before shipping).  П-03.
+SECRET_LIKE_BASENAMES: frozenset[str] = frozenset(
+    {
+        ".env",
+        ".env.local",
+        ".env.production",
+        ".env.development",
+        "secrets.json",
+        "secrets.yaml",
+        "secrets.yml",
+        "secrets.toml",
+        "credentials.json",
+        "credentials.yaml",
+        "client_secret.json",
+        "service_account.json",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "server.pem",
+        "server.key",
+        "release.jks",
+        "debug.keystore",
+    }
+)
+
+#: Extensions that strongly suggest a secret file, used to warn when they
+#: would be packaged.
+SECRET_LIKE_SUFFIXES: frozenset[str] = frozenset(
+    {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"}
 )
 
 
@@ -123,9 +181,40 @@ class ProjectConfig:
 
     # -- validation --------------------------------------------------------
     def __post_init__(self) -> None:
+        # П-05: coerce path-like scalars to strings early so a Path value
+        # (e.g. passed from the API) round-trips cleanly, then validate()
+        # runs the type gates before any range/path arithmetic.
         self.root = Path(self.root).resolve()
-        self.normalise_exclude()
+        if isinstance(self.source_dir, Path):
+            self.source_dir = str(self.source_dir)
+        if isinstance(self.output_dir, Path):
+            self.output_dir = str(self.output_dir)
+        # П-04: "no"/"yes"/"true"/"false" strings are a common TOML typo.
+        for bool_field in (
+            "allow_backup",
+            "optimize",
+            "strip_debug",
+            "minimal_stdlib",
+            "no_ssl",
+            "exclude_only",
+        ):
+            value = getattr(self, bool_field)
+            if isinstance(value, str):
+                low = value.strip().lower()
+                if low in ("true", "yes", "on", "1"):
+                    setattr(self, bool_field, True)
+                elif low in ("false", "no", "off", "0", ""):
+                    setattr(self, bool_field, False)
+                # leave other strings for the type gate in validate()
+        # П-01/П-02: normalize list fields defensively.
+        for list_field in ("permissions", "abis", "asset_suffixes"):
+            value = getattr(self, list_field)
+            if value is None:
+                setattr(self, list_field, [])
+        if self.exclude is None:
+            self.exclude = list(DEFAULT_EXCLUDE)
         self.validate()
+        self.normalise_exclude()
 
     def normalise_exclude(self) -> None:
         """Merge ``exclude`` with :data:`DEFAULT_EXCLUDE` (unless ``exclude_only``).
@@ -142,6 +231,73 @@ class ProjectConfig:
 
     def validate(self) -> None:
         """Raise :class:`ConfigError` if any field is invalid."""
+        # ---- type gates (П-01, П-02, П-04, П-05, П-15) -------------------
+        # These come first so a wrong type gives a helpful message instead
+        # of a raw ``TypeError`` from a downstream range/path comparison.
+        self._check_type("name", self.name, str)
+        self._check_type("package", self.package, str)
+        self._check_type("version", self.version, str)
+        self._check_type("entrypoint", self.entrypoint, str)
+        self._check_type("orientation", self.orientation, str)
+
+        for int_field in ("version_code", "min_sdk", "target_sdk"):
+            self._check_type(int_field, getattr(self, int_field), int)
+
+        for str_or_none in ("icon",):
+            value = getattr(self, str_or_none)
+            if value is not None and not isinstance(value, str):
+                raise ConfigError(
+                    f"`{str_or_none}` must be a string path (or null), got {type(value).__name__}",
+                    hint=f'Write e.g. `{str_or_none} = "assets/icon.png"`.',
+                )
+
+        for str_field in ("source_dir", "output_dir"):
+            value = getattr(self, str_field)
+            if not isinstance(value, (str, Path)):
+                raise ConfigError(
+                    f"`{str_field}` must be a string path, got {type(value).__name__}",
+                    hint=f'Write e.g. `{str_field} = "src"`.',
+                )
+
+        for bool_field in (
+            "allow_backup",
+            "optimize",
+            "strip_debug",
+            "minimal_stdlib",
+            "no_ssl",
+            "exclude_only",
+        ):
+            value = getattr(self, bool_field)
+            if not isinstance(value, bool):
+                raise ConfigError(
+                    f"`{bool_field}` must be a boolean (true/false without quotes), "
+                    f"got {type(value).__name__}: {value!r}",
+                    hint=f"Write `{bool_field} = false` (no quotes) — "
+                    f"a quoted string like \"no\" or \"pyc\" is truthy and would "
+                    f"silently enable the flag.",
+                )
+
+        for list_field in ("permissions", "exclude", "abis", "asset_suffixes"):
+            value = getattr(self, list_field)
+            if isinstance(value, str):
+                raise ConfigError(
+                    f"`{list_field}` must be a list, not a string: got {value!r}",
+                    hint=f"A string here would be iterated character-by-character. "
+                    f"Write a TOML list, e.g. `{list_field} = [\"{value}\"]`.",
+                )
+            if not isinstance(value, (list, tuple)):
+                raise ConfigError(
+                    f"`{list_field}` must be a list of strings, got {type(value).__name__}",
+                    hint=f"Write `{list_field} = [...]`.",
+                )
+            for item in value:
+                if not isinstance(item, str):
+                    raise ConfigError(
+                        f"`{list_field}` entries must be strings; "
+                        f"got {type(item).__name__}: {item!r}",
+                    )
+
+        # ---- value checks -------------------------------------------------
         if not self.name.strip():
             raise ConfigError("`name` must not be empty")
         if not _PACKAGE_RE.match(self.package):
@@ -172,6 +328,14 @@ class ProjectConfig:
                 f"Invalid orientation {self.orientation!r}",
                 hint=f"Choose one of: {', '.join(_ORIENTATIONS)}",
             )
+
+        # Normalise permissions now so every caller (manifest, info --json,
+        # warnings) sees the fully-qualified form that actually ends up in
+        # the APK. П-23.
+        from ..core.api.permissions import normalize as _norm_perm
+
+        self.permissions = [_norm_perm(p) for p in self.permissions]
+
         for suffix in self.asset_suffixes:
             if not str(suffix).startswith(".") or len(str(suffix)) < 2:
                 raise ConfigError(
@@ -186,6 +350,22 @@ class ProjectConfig:
             )
         if not self.abis:
             raise ConfigError("`abis` must list at least one architecture")
+
+    @staticmethod
+    def _check_type(field_name: str, value: Any, expected: type) -> None:
+        """Reject booleans passed as ints (``isinstance(True, int)`` is True)."""
+        if expected is int and isinstance(value, bool):
+            raise ConfigError(
+                f"`{field_name}` must be an integer, got a boolean ({value!r})",
+                hint=f"Write `{field_name} = 1` without quotes.",
+            )
+        if expected is str and isinstance(value, Path):
+            return  # paths are acceptable as strings
+        if not isinstance(value, expected):
+            raise ConfigError(
+                f"`{field_name}` must be {expected.__name__}, "
+                f"got {type(value).__name__}: {value!r}",
+            )
 
     # -- derived paths -----------------------------------------------------
     @property

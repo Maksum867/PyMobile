@@ -18,7 +18,7 @@ Build it with ``pymobile build``.
 
 from __future__ import annotations
 
-__version__ = "0.9.3"
+__version__ = "0.9.4"
 __author__ = "MAKSYM KHLYSTUN"
 __license__ = "MIT"
 

@@ -1512,17 +1512,31 @@ class _Layout:
 
         return _Box(min(w, size * count), size, paint)
 
+    @staticmethod
+    def _pairs(props: dict[str, Any]) -> list[tuple[str, str]]:
+        """П-11: zip option values with their (possibly localised) labels."""
+        option_values = [str(o) for o in (props.get("options") or [])]
+        option_labels = [str(lbl) for lbl in (props.get("labels") or option_values)]
+        while len(option_labels) < len(option_values):
+            option_labels.append(option_values[len(option_labels)])
+        return list(zip(option_values, option_labels, strict=False))
+
     def _dropdown(self, props: dict[str, Any], style: dict[str, Any], w: float, fill: bool) -> _Box:
         p = self.p
-        options = [str(o) for o in props.get("options", ()) or ()]
-        value = text_value(props.get("value") or (options[0] if options else ""))
+        pairs = self._pairs(props)
+        value = text_value(props.get("value") or (pairs[0][0] if pairs else ""))
+        label = value
+        for v, lbl in pairs:
+            if v == value:
+                label = lbl
+                break
 
         def arrow(pt: _Painter, x: float, y: float, b: _Box) -> None:
             ax, cy = x + b.w - 20, y + b.h / 2 + 2
             pt.polygon([(ax - 5, cy - 3), (ax + 5, cy - 3), (ax, cy + 3)], p["CONTROL"])
 
         return self._text_box(
-            value, 16, p["TEXT"], style, w, fill, pad=(8, 12, 40, 12), min_h=48, background=arrow
+            label, 16, p["TEXT"], style, w, fill, pad=(8, 12, 40, 12), min_h=48, background=arrow
         )
 
     def _stepper(self, props: dict[str, Any], w: float, fill: bool) -> _Box:
@@ -1556,18 +1570,18 @@ class _Layout:
         more lines instead.
         """
         p = self.p
-        options = [str(o) for o in props.get("options", ()) or ()]
+        pairs = self._pairs(props)
         selected = text_value(props.get("value", ""))
         wrap = bool(props.get("wrap"))
         # A scrolling row measures its segments without a limit; a wrapping one
         # never offers a segment more than the width of a line.
         offer = w if wrap else 100000.0
         segments: list[_Box] = []
-        for option in options:
-            if option == selected:
+        for value, label in pairs:
+            if value == selected:
                 segments.append(
                     self._button(
-                        option,
+                        label,
                         {},
                         offer,
                         False,
@@ -1577,7 +1591,7 @@ class _Layout:
                     )
                 )
             else:
-                segments.append(self._button(option, {}, offer, False, text_colour=p["TEXT"]))
+                segments.append(self._button(label, {}, offer, False, text_colour=p["TEXT"]))
         if wrap:
             placed, height, widest = self._flow(segments, w, 0.0, 0.0, "start")
             box = _Box(w if fill else min(w, widest), height)
@@ -1594,16 +1608,16 @@ class _Layout:
 
     def _bottom_nav(self, props: dict[str, Any], w: float) -> _Box:
         p = self.p
-        options = [str(o) for o in props.get("options", ()) or ()]
+        pairs = self._pairs(props)
         selected = text_value(props.get("value", ""))
         box = _Box(w, 48)
-        if not options:
+        if not pairs:
             return box
-        tab_w = w / len(options)
-        for index, option in enumerate(options):
-            on = option == selected
+        tab_w = w / len(pairs)
+        for index, (value, label) in enumerate(pairs):
+            on = value == selected
             tab = self._button(
-                option,
+                label,
                 {},
                 tab_w,
                 True,

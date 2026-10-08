@@ -533,12 +533,16 @@ def render_html(node: dict[str, Any]) -> str:
         return f'<div style="display:flex;gap:2px;{css}">{stars}</div>'
 
     if kind == "Dropdown":
-        options = props.get("options") or []
+        options = [str(o) for o in (props.get("options") or [])]
+        labels = [str(lbl) for lbl in (props.get("labels") or options)]
+        # Pad labels in case someone crafted the props by hand.
+        while len(labels) < len(options):
+            labels.append(options[len(labels)])
         selected = text_value(props.get("value", ""))
         items = "".join(
-            f'<option value="{escape(str(opt), quote=True)}"'
-            f'{" selected" if str(opt) == selected else ""}>{escape(str(opt))}</option>'
-            for opt in options
+            f'<option value="{escape(val, quote=True)}"'
+            f'{" selected" if val == selected else ""}>{escape(lbl)}</option>'
+            for val, lbl in zip(options, labels, strict=False)
         )
         return (
             f'<select class="w" data-wid="{widget_id}"{disabled} style="{css}" '
@@ -597,15 +601,20 @@ def render_html(node: dict[str, Any]) -> str:
         )
 
     if kind == "SegmentedButtons":
-        options = props.get("options") or []
+        options = [str(o) for o in (props.get("options") or [])]
+        labels = [str(lbl) for lbl in (props.get("labels") or options)]
+        while len(labels) < len(options):
+            labels.append(options[len(labels)])
         selected = text_value(props.get("value", ""))
-        buttons = "".join(
-            f'<button class="w" data-wid="{widget_id}"{disabled} '
-            f'style="{"font-weight:700;" if str(opt) == selected else ""}" '
-            f"onclick=\"send(this.dataset.wid,'change','{_js_value(str(opt))}')\">"
-            f"{escape(str(opt))}</button>"
-            for opt in options
-        )
+        buttons = ""
+        for val, lbl in zip(options, labels, strict=False):
+            active = "font-weight:700;" if val == selected else ""
+            buttons += (
+                f'<button class="w" data-wid="{widget_id}"{disabled} '
+                f'style="{active}" '
+                f"onclick=\"send(this.dataset.wid,'change','{_js_value(val)}')\">"
+                f"{escape(lbl)}</button>"
+            )
         classes = "seg wrap" if props.get("wrap") else "seg"
         return f'<div class="{classes}" style="{css}">{buttons}</div>'
 
@@ -684,16 +693,19 @@ def render_html(node: dict[str, Any]) -> str:
         return f'<div class="row" style="gap:4px;align-items:stretch">{tile}{buttons}</div>'
 
     if kind == "BottomNavigation":
+        options = [str(o) for o in (props.get("options") or [])]
+        labels = [str(lbl) for lbl in (props.get("labels") or options)]
+        while len(labels) < len(options):
+            labels.append(options[len(labels)])
         tabs = []
-        for option in props.get("options", ()):
-            label = escape(str(option))
-            active = option == props.get("value")
+        for val, lbl in zip(options, labels, strict=False):
+            active = val == props.get("value")
             look = "font-weight:700;background:#3F51B5;color:#fff;" if active else ""
             tabs.append(
                 f'<button class="w" data-wid="{widget_id}"{disabled} '
                 f'style="flex:1;border-radius:0;{look}" '
-                f"onclick=\"send(this.dataset.wid,'change','{_js_value(str(option))}')\">"
-                f"{label}</button>"
+                f"onclick=\"send(this.dataset.wid,'change','{_js_value(val)}')\">"
+                f"{escape(lbl)}</button>"
             )
         return f'<nav class="row" style="gap:0;{css}">{"".join(tabs)}</nav>'
 
@@ -906,9 +918,32 @@ class WebPreview:
             return True
         origin = headers.get("Origin")
         if origin:
-            host = headers.get("Host", "")
-            if origin.rstrip("/") != f"http://{host}":
-                _log.debug("refusing a request from origin %s", origin)
+            # П-07: accept both http:// and https:// origins. When a TLS-
+            # terminating proxy (Cloudflare tunnel, SSH port-forward, nginx,
+            # corporate portal) sits in front it rewrites the scheme; the
+            # browser still sends Origin with the public https:// URL. The
+            # host header (or X-Forwarded-Host when set) must still match.
+            from urllib.parse import urlsplit
+
+            try:
+                origin_parts = urlsplit(origin.rstrip("/"))
+                origin_host = origin_parts.netloc
+                origin_scheme = origin_parts.scheme
+            except ValueError:
+                _log.debug("refusing a request from malformed origin %s", origin)
+                return False
+            if origin_scheme not in ("http", "https"):
+                _log.debug("refusing a request from origin with scheme %s", origin_scheme)
+                return False
+            host = (
+                headers.get("X-Forwarded-Host")
+                or headers.get("X-Forwarded-Server")
+                or headers.get("Host", "")
+            ).split(",")[0].strip()
+            # Host header sometimes carries :port — compare host and port
+            # against the origin host which may include a port.
+            if origin_host != host:
+                _log.debug("refusing a request from origin %s (host %s)", origin, host)
                 return False
         supplied = (query.get("t") or [""])[0] or headers.get("X-PMB-Token", "")
         if not secrets.compare_digest(supplied, self.token):

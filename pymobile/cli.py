@@ -618,18 +618,28 @@ def cmd_preview(args: argparse.Namespace) -> int:
         _out.ok(f"wrote the text preview to {path}")
     elif args.png:
         width, height = _parse_size(getattr(args, "size", None))
+        # П-05: surface size validation as an expected error instead of the
+        # generic "unexpected error: width must be at least 120 dp".
+        if width < 120:
+            raise PyMobileError(
+                "width must be at least 120 dp",
+                hint="Use --size 360x640 (or larger) for a phone-shaped mockup.",
+            )
         # The app carries the requested theme by now; the flag is the fallback
         # for an entry point that never created one.
         theme = app.theme if app is not None else requested_theme
-        path = render_mockup(
-            tree,
-            args.png,
-            width=width,
-            height=height,
-            theme=theme,
-            title=display_title,
-            assets=config.source_path,
-        )
+        try:
+            path = render_mockup(
+                tree,
+                args.png,
+                width=width,
+                height=height,
+                theme=theme,
+                title=display_title,
+                assets=config.source_path,
+            )
+        except ValueError as exc:
+            raise PyMobileError(str(exc)) from exc
         _out.ok(f"wrote a mockup of the screen to {path}")
         _out.hint("an approximation: fonts and system colours differ between phones")
     else:

@@ -74,6 +74,34 @@ __all__ = [
 
 _log = get_logger("i18n")
 
+#: File stems that do not look like language tags (П-14).  When a user passes
+#: ``messages.json`` they usually meant ``uk.json``/``en.json`` and would
+#: otherwise end up with a catalogue registered under ``"messages"``, which
+#: every ``t(...)`` call silently misses.
+_NON_LANGUAGE_STEMS: frozenset[str] = frozenset(
+    {"messages", "strings", "i18n", "locale", "locales", "translations", "lang", "langs"}
+)
+#: Stems already warned about, so each suspicious file is reported once.
+_warned_stems: set[str] = set()
+
+
+def _warn_non_language_stem(stem: str) -> None:
+    """Emit a warning once per stem that does not look like a language tag."""
+    if stem in _warned_stems:
+        return
+    if stem.lower() in _NON_LANGUAGE_STEMS or (
+        len(stem) > 3 and not (2 <= len(stem.split("-")[0]) <= 3)
+    ):
+        _warned_stems.add(stem)
+        _log.warning(
+            "the catalogue file %r does not look like a language tag "
+            "(got %r). Rename it to a BCP-47 code like uk.json / en.json so "
+            "translations.use(\"uk\") can find it, or pass language= explicitly.",
+            stem + ".json",
+            stem,
+        )
+
+
 #: Languages where "one" covers 1 only and everything else is plural.
 _DEFAULT_PLURAL_KEYS = ("one", "other")
 
@@ -369,6 +397,19 @@ class Translations:
         :func:`flatten_catalogue` first (an unexpanded nested object is
         warned about, because it silently makes every dotted key miss).
         """
+        # П-13: a Path/str passed where a mapping is expected used to surface
+        # as ``AttributeError: 'PosixPath' object has no attribute 'items'``
+        # — point the caller at ``load_file``/``load_dir`` instead.
+        if isinstance(messages, (str, Path)):
+            raise TypeError(
+                f"messages must be a mapping, got {type(messages).__name__!r}; "
+                "use translations.load_file(path) to load a JSON file, or "
+                "translations.load_dir(directory) for a whole directory."
+            )
+        if not isinstance(messages, Mapping):
+            raise TypeError(
+                f"messages must be a mapping, got {type(messages).__name__!r}"
+            )
         tag = normalise_language(language)
         if not tag:
             raise ValueError("language must not be empty")
@@ -443,8 +484,16 @@ class Translations:
         """
         file = Path(path)
         tag = normalise_language(language or file.stem)
+        # П-14: a file named ``messages.json`` / ``strings.json`` / ``i18n.json``
+        # is a common Windows/mobile convention that does NOT look like a
+        # language tag — silently registering it under ``"messages"`` makes
+        # every ``t(...)`` miss. Warn once per stem instead.
+        _warn_non_language_stem(file.stem)
         try:
-            data = json.loads(file.read_text(encoding="utf-8"))
+            # П-18: ``utf-8-sig`` transparently strips a UTF-8 BOM, which
+            # Notepad and other Windows editors prepend; without this the
+            # JSON parser raised ``ValueError: Unexpected UTF-8 BOM``.
+            data = json.loads(file.read_text(encoding="utf-8-sig"))
         except OSError as error:
             raise FileNotFoundError(f"cannot read catalogue {file}: {error}") from error
         except json.JSONDecodeError as error:

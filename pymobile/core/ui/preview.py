@@ -284,6 +284,15 @@ def _as_node(widget_or_tree: Any) -> dict[str, Any]:
     return node
 
 
+def _zip_options_labels(props: dict[str, Any]) -> list[tuple[str, str]]:
+    """П-11: zip ``options`` (values) with ``labels`` (visible text)."""
+    option_values = [str(o) for o in (props.get("options") or [])]
+    option_labels = [str(lbl) for lbl in (props.get("labels") or option_values)]
+    while len(option_labels) < len(option_values):
+        option_labels.append(option_values[len(option_labels)])
+    return list(zip(option_values, option_labels, strict=False))
+
+
 def _snackbar_lines(tree: dict[str, Any]) -> list[str]:
     """The snackbar of a rendered tree (``App.snackbar``) as a bottom line."""
     data = tree.get("snackbar")
@@ -483,7 +492,18 @@ def _leaf_lines(node: dict[str, Any], show_ids: bool = False) -> list[str]:
         return [f"{rating_filled}{empty} {rating:g}/{maximum}"]
 
     if node_type == "Dropdown":
-        return [f"[{props.get('value', '')} ▾]"]
+        # П-11: show the currently selected *label*, not the internal value,
+        # so a localised dropdown reads as it does on device.
+        option_values = [str(o) for o in (props.get("options") or [])]
+        option_labels = [str(lbl) for lbl in (props.get("labels") or option_values)]
+        while len(option_labels) < len(option_values):
+            option_labels.append(option_values[len(option_labels)])
+        current_value = text_value(props.get("value", option_values[0] if option_values else ""))
+        try:
+            label = option_labels[option_values.index(current_value)]
+        except ValueError:
+            label = current_value
+        return [f"[{label} ▾]"]
 
     if node_type == "Chip":
         label = text_value(props.get("text", "")) or "chip"
@@ -508,9 +528,15 @@ def _leaf_lines(node: dict[str, Any], show_ids: bool = False) -> list[str]:
         return [f"{mark} {props.get('text', '')}"]
 
     if node_type == "SegmentedButtons":
-        options = [str(o) for o in props.get("options", [])]
+        option_values = [str(o) for o in (props.get("options") or [])]
+        option_labels = [str(lbl) for lbl in (props.get("labels") or option_values)]
+        while len(option_labels) < len(option_values):
+            option_labels.append(option_values[len(option_labels)])
         value = props.get("value", "")
-        parts = [f"|{o}|" if o == value else f" {o} " for o in options]
+        parts = [
+            f"|{lbl}|" if v == value else f" {lbl} "
+            for v, lbl in zip(option_values, option_labels, strict=False)
+        ]
         if props.get("wrap"):  # the options flow onto more lines
             return _flow_blocks([[part] for part in parts], _WRAP_COLUMNS, align="start", gap=1)
         return [" ".join(parts)]
@@ -558,9 +584,9 @@ def _leaf_lines(node: dict[str, Any], show_ids: bool = False) -> list[str]:
         return [f"▸ {base}" if not disabled else f"  {base}"]
 
     if node_type == "BottomNavigation":
-        options = [str(option) for option in props.get("options", ())]
+        pairs = _zip_options_labels(props)
         value = props.get("value")
-        tabs = " ".join(f"[{option}]" if option == value else f" {option} " for option in options)
+        tabs = " ".join(f"[{lbl}]" if v == value else f" {lbl} " for v, lbl in pairs)
         bar = "─" * (len(tabs) + 2)
         return [bar, tabs, bar]
 

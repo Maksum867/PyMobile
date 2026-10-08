@@ -30,7 +30,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.9.3`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.9.4`) and read the
 > changelog before upgrading. What may change, and how much notice you get, is
 > written down in the
 > [versioning and deprecation policy](#versioning-and-deprecation-policy). Bug
@@ -118,7 +118,6 @@ the JDK for you.
 - [Known issues](#known-issues)
 - [Versioning and deprecation policy](#versioning-and-deprecation-policy)
 - [FAQ](#faq)
-- [Support the project](#support-the-project)
 - [Contributing](#contributing)
 
 ---
@@ -2180,7 +2179,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.9.3", "platform": "android",
+# {"framework_version": "0.9.4", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 
@@ -2486,11 +2485,10 @@ changed, so typing in a field does not lose focus.
 what you want on a remote machine, in a container, or when Tk is unavailable:
 
 ```bash
-pymobile run --web                 # banner prints http://127.0.0.1:8765 to open;
-                                   # the server itself listens on all interfaces
-                                   # (containers, SSH tunnels, LAN devices)
+pymobile run --web                 # banner prints http://127.0.0.1:8765;
+                                   # default --host 127.0.0.1 is loopback only
 pymobile run --web --port 9000
-pymobile run --web --host 127.0.0.1  # loopback only
+pymobile run --web --host 0.0.0.0  # listen on all interfaces (containers, SSH)
 ```
 
 The page is plain HTML built from the same serialised tree the phone receives,
@@ -2628,10 +2626,12 @@ and tests for all of them.
 
 ## Known issues
 
-There are currently no open known issues. If you hit something new, report
-it on [GitHub Issues](https://github.com/Maksum867/PyMobile/issues) with a
-reproducer (`main.py` + `pymobile.toml`) and the device or platform. Bug
-reports with a regression test land faster.
+Current known limitations are tracked in
+[CHANGELOG.md](https://github.com/Maksum867/PyMobile/blob/main/CHANGELOG.md)
+and on [GitHub Issues](https://github.com/Maksum867/PyMobile/issues). If you
+hit something new, report it there with a reproducer (`main.py` +
+`pymobile.toml`) and the device or platform. Bug reports with a regression
+test land faster.
 
 ---
 

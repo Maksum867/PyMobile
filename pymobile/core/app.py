@@ -130,6 +130,39 @@ def _app_store_path(package: str) -> Path:
     return path
 
 
+_sandbox_warned: set[str] = set()
+
+
+def _sandboxed_storage_for_tests(package: str) -> str | None:
+    """Return a sandbox storage path when we detect a test runner.
+
+    П-08: without this, a test that instantiates ``App(...)`` silently writes
+    to ``~/.pymobile/<package>.json`` and can wipe the developer's real data.
+    When pytest or unittest is in ``sys.modules`` *and* the user did not set
+    ``PYMOBILE_STORAGE_DIR``, we isolate the store under ``$TMPDIR/pymobile-test/``
+    and warn once per package so the behaviour is visible but not destructive.
+    """
+    if os.environ.get("PYMOBILE_STORAGE_DIR"):
+        return None  # caller explicitly picked a directory — respect it
+    if "pytest" not in sys.modules and "unittest" not in sys.modules:
+        return None
+    import tempfile
+
+    sandbox_root = Path(tempfile.gettempdir()) / "pymobile-test"
+    sandbox_root.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^a-z0-9]+", "-", package.lower()).strip("-") or "app"
+    target = sandbox_root / f"{slug}.json"
+    if package not in _sandbox_warned:
+        _sandbox_warned.add(package)
+        _log.warning(
+            "detected a test runner; sandboxing storage for %r at %s "
+            "(pass App(..., storage_path=...) or set PYMOBILE_STORAGE_DIR to silence)",
+            package,
+            target,
+        )
+    return str(target)
+
+
 def _package_from_project() -> str:
     """The ``package`` declared in the project's ``pymobile.toml``, if any.
 
@@ -261,6 +294,13 @@ class App:
         self.vibration = Vibration(self.bridge)
         self.permissions = PermissionManager(self.bridge)
         self.http = HttpClient(base_url=base_url, deliver=self._deliver)
+        # П-08: a script/test that builds its own App(...) without
+        # ``storage_path`` must not clobber the real app's data on disk.
+        # When pytest (or unittest) is running and the caller did not point at
+        # a store explicitly, sandbox the storage under a temp directory and
+        # emit a one-time warning so the developer knows where the data went.
+        if storage_path is None:
+            storage_path = _sandboxed_storage_for_tests(self.package)
         self.storage = (
             Storage(storage_path)
             if storage_path is not None
@@ -295,6 +335,11 @@ class App:
         self._warned_render_loop = False
         #: Widget types already reported as having no native renderer.
         self._warned_unknown_types: set[str] = set()
+        # П-10: screens popped during a UI dispatch land here so their
+        # ``_app`` reference can be cleared after the handler returns (see
+        # Navigator._discard / Screen.app).
+        self._in_ui_dispatch = 0
+        self._detach_queue: list[Any] = []
         #: Serialises everything that touches widget state outside the device
         #: UI thread: event handlers, dispatched callbacks and rendering.
         self._ui_lock = threading.RLock()
@@ -524,8 +569,16 @@ class App:
         preview — funnels through here, so the batching lives inside rather
         than being something each caller has to remember to wrap.
         """
-        with self._ui_lock, self.batch():
-            self._handle_ui_event(widget_id, kind, value)
+        # П-10: track UI-event depth so Navigator._discard can defer clearing
+        # a popped screen's ``_app`` until the current handler returns. Then
+        # code like ``self.app.pop(); self.app.theme`` still works.
+        self._in_ui_dispatch += 1
+        try:
+            with self._ui_lock, self.batch():
+                self._handle_ui_event(widget_id, kind, value)
+        finally:
+            self._in_ui_dispatch -= 1
+            self._flush_detach_queue()
 
     def _handle_ui_event(self, widget_id: str, kind: str, value: str) -> None:
         """Apply one UI event to the widget it belongs to."""
@@ -631,6 +684,21 @@ class App:
             )
         self.events.emit(f"ui:{kind}", source=widget_id, value=value)
 
+    def _flush_detach_queue(self) -> None:
+        """Null out the ``_app`` reference of screens popped during dispatch.
+
+        Runs at the end of :meth:`handle_ui_event` once the outermost handler
+        has returned (П-10).
+        """
+        import contextlib
+
+        if self._in_ui_dispatch:
+            return  # a nested dispatch is still running
+        while self._detach_queue:
+            screen = self._detach_queue.pop()
+            with contextlib.suppress(Exception):  # pragma: no cover - defensive
+                screen._app = None  # type: ignore[attr-defined]
+
     def _finish_or_stop(self) -> None:
         """Handle the root hardware-back button.
 
@@ -689,6 +757,9 @@ class App:
                 finally:
                     self.events.clear()
                 _log.info("stopped %s", self.name)
+        # П-10: drop any deferred screen references at shutdown.
+        self._in_ui_dispatch = 0
+        self._flush_detach_queue()
 
     # -- ui ----------------------------------------------------------------
     def render(self) -> dict[str, Any] | None:
