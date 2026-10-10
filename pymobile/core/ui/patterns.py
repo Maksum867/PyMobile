@@ -219,6 +219,8 @@ class FormField(_Pattern):
         )
         if not isinstance(self.input, TextInput):
             raise TypeError("control must be a TextInput or AutoComplete")
+        if not self.input.accessibility_label:
+            self.input.accessibility_label = self.label
         self._initial = self.input.value
         self._original_change = self.input.on_change
         self.input.on_change = self._changed
@@ -316,7 +318,14 @@ class FormField(_Pattern):
 class Form(_Pattern):
     """Collect and validate named FormFields. ``submit()`` returns success."""
 
-    __slots__ = ("fields", "validator", "validate_on", "on_submit", "_errors")
+    __slots__ = (
+        "fields",
+        "validator",
+        "validate_on",
+        "on_submit",
+        "_errors",
+        "_external_errors",
+    )
 
     def __init__(
         self,
@@ -345,6 +354,7 @@ class Form(_Pattern):
         )
         self.validate_on, self.on_submit = validate_on, on_submit
         self._errors: dict[str, str] = {}
+        self._external_errors: dict[str, str] = {}
         for field in fields:
             field._form_change = self._field_changed
 
@@ -356,14 +366,51 @@ class Form(_Pattern):
     def errors(self) -> dict[str, str]:
         return dict(self._errors)
 
-    def _field_changed(self, _name: str, _value: str) -> None:
-        if self.validate_on == "change" or self._errors:
+    def set_errors(self, errors: Mapping[str, str]) -> None:
+        """Show domain/server errors on the matching named fields.
+
+        Replaces the current error mapping and clears messages for fields not
+        present in ``errors``. Unknown names are rejected instead of silently
+        losing an error because the domain model and the form drifted apart::
+
+            try:
+                service.save(values)
+            except ValidationError as error:
+                form.set_errors(error.errors)
+        """
+        if not isinstance(errors, Mapping):
+            raise TypeError("errors must be a mapping of form field names to messages")
+        if any(not isinstance(name, str) for name in errors):
+            raise TypeError("form error keys must be strings")
+        field_names = {field.name for field in self.fields}
+        unknown = set(errors) - field_names
+        if unknown:
+            raise ValueError(f"errors refer to unknown form field(s): {', '.join(sorted(unknown))}")
+        cleaned = {
+            name: str(message)
+            for name, message in errors.items()
+            if message is not None and str(message).strip()
+        }
+        with self._batch():
+            self._external_errors = cleaned
+            self._errors = dict(cleaned)
+            for field in self.fields:
+                if field.name in cleaned:
+                    field._touched = True
+                field.set_error(cleaned.get(field.name))
+            self.invalidate()
+
+    def _field_changed(self, name: str, _value: str) -> None:
+        had_external_error = name in self._external_errors
+        self._external_errors.pop(name, None)
+        if self.validate_on == "change" or self._errors or had_external_error:
             self.validate()
 
     def validate(self) -> bool:
-        errors = self.validator.validate(self.values)
+        local_errors = self.validator.validate(self.values)
+        errors = {**local_errors, **self._external_errors}
         with self._batch():
-            self._errors = dict(errors)
+            self._errors = errors
             for field in self.fields:
                 field._touched = True
                 field.set_error(errors.get(field.name))
@@ -382,6 +429,7 @@ class Form(_Pattern):
             raise ValueError("reset contains unknown field names")
         with self._batch():
             self._errors = {}
+            self._external_errors = {}
             for field in self.fields:
                 field.reset(None if values is None else values.get(field.name, field._initial))
             self.invalidate()
@@ -389,8 +437,9 @@ class Form(_Pattern):
     def to_dict(self) -> WidgetNode:
         # Re-evaluate existing messages when the language changes, without
         # changing touched state or firing callbacks during rendering.
-        if self._errors:
-            self._errors = self.validator.validate(self.values)
+        if self._errors or self._external_errors:
+            local_errors = self.validator.validate(self.values)
+            self._errors = {**local_errors, **self._external_errors}
             for field in self.fields:
                 field._error = self._errors.get(field.name, "")
         return super().to_dict()

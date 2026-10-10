@@ -1,6 +1,6 @@
 """Command line interface.
 
-Sub-commands: ``init``, ``build``, ``run``, ``watch``, ``preview``, ``info``,
+Sub-commands: ``init``, ``build``, ``run``, ``watch``, ``preview``, ``check-ui``, ``info``,
 ``clean``, ``widget add``, ``widget-java``, ``setup-sdk``, ``emulator``,
 ``install``, ``doctor``.
 Every command returns an exit code; :func:`main` is the console-script entry
@@ -563,6 +563,17 @@ def _execute(config: ProjectConfig, entry: Path) -> dict[str, object]:
     return namespace
 
 
+def _positive_int(value: str) -> int:
+    """An argparse integer that must be greater than zero."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a positive integer") from None
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
 def _parse_size(value: str | None) -> tuple[int, int | None]:
     """``"360x640"`` → (360, 640); ``"400"`` → (400, None); None → defaults."""
     if not value:
@@ -645,6 +656,68 @@ def cmd_preview(args: argparse.Namespace) -> int:
     else:
         print(render_ascii(tree, show_ids=args.ids, title=display_title))
     return 0
+
+
+def cmd_check_ui(args: argparse.Namespace) -> int:
+    """Run the static accessibility and narrow-screen audit on the app tree."""
+    from .core.app import App
+    from .core.bridge import StubBridge, active_bridge, set_bridge
+    from .core.ui.audit import audit_ui
+
+    config = _load(args)
+    entry = _entrypoint(config)
+    bridge = StubBridge(verbose=False)
+    previous_bridge = active_bridge()
+    set_bridge(bridge)
+    previous_app = App.current()
+    try:
+        _execute(config, entry)
+        _navigate(args)
+        tree = bridge.last_tree
+        if tree is None:
+            raise PyMobileError(
+                "The app rendered nothing.",
+                hint="Make sure the entry point calls App(...).run(SomeScreen()).",
+            )
+
+        app = App.current()
+        issues = audit_ui(tree, width=args.width, min_touch_target=args.min_touch_target)
+        if args.json:
+            print(
+                json.dumps(
+                    [
+                        {
+                            "severity": issue.severity,
+                            "code": issue.code,
+                            "widget_id": issue.widget_id,
+                            "message": issue.message,
+                            "hint": issue.hint,
+                        }
+                        for issue in issues
+                    ],
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        else:
+            title = app.name if app is not None else config.name
+            _out.info(f"checking {title!r} at {args.width} dp wide")
+            if issues:
+                for issue in issues:
+                    _out.warn(f"{issue.widget_id} [{issue.code}] {issue.message}")
+                    _out.hint(issue.hint)
+                _out.info(f"{len(issues)} advisory warning(s)")
+            else:
+                _out.ok("no issues found by the static UI audit")
+            _out.hint(
+                "heuristic only: verify font scaling, screen-reader behavior and layout on a device"
+            )
+        return 1 if args.strict and issues else 0
+    finally:
+        app = App.current()
+        if app is not None and app is not previous_app:
+            app.stop()
+        set_bridge(previous_bridge)
 
 
 def cmd_info(args: argparse.Namespace) -> int:
@@ -1307,6 +1380,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     preview.add_argument("--ids", action="store_true", help="annotate widgets with their id")
     preview.set_defaults(func=cmd_preview)
+
+    check_ui = sub.add_parser(
+        "check-ui",
+        help="warn about accessibility gaps and likely narrow-screen overflow",
+        parents=[common, where],
+    )
+    check_ui.add_argument(
+        "--width",
+        type=_positive_int,
+        default=320,
+        metavar="DP",
+        help="narrow screen width to check (default: 320 dp)",
+    )
+    check_ui.add_argument(
+        "--min-touch-target",
+        type=_positive_int,
+        default=48,
+        metavar="DP",
+        help="minimum explicit control width/height to accept (default: 48 dp)",
+    )
+    check_ui.add_argument(
+        "--strict",
+        action="store_true",
+        help="return exit code 1 when advisory warnings are found",
+    )
+    check_ui.add_argument("--json", action="store_true", help="print machine-readable warnings")
+    check_ui.set_defaults(func=cmd_check_ui)
 
     info = sub.add_parser("info", help="show the resolved configuration", parents=[common])
     info.add_argument("--json", action="store_true", help="machine-readable output")

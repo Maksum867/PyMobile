@@ -64,6 +64,21 @@ def test_integer_number():
     assert number(1.5) is None
     assert number("3.14") is None
 
+def test_number_accepts_decimal_comma():
+    """0.9.4: prices typed in Ukrainian/European notation ("89,90")."""
+    assert number("89,90") is None
+    assert number("0,5") is None
+    assert number("1234,5") is None
+    assert number("89.90") is None
+    assert number("abc") is not None
+    assert number("") is not None
+
+
+def test_bounds_accept_decimal_comma():
+    """0.9.4: min/max/between read the same notation as the number rule."""
+    assert between(1, 2)("1,5") is None
+    assert between(1, 2)("2,5") is not None
+
 
 def test_between_and_bounds():
     assert between(0, 10)(5) is None

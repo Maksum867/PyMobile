@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
 
+from pymobile import format_date
 from pymobile.core.bridge import StubBridge, reset_bridge, set_bridge
 from pymobile.core.i18n import Translations, device_language, normalise_language
 
@@ -340,6 +342,13 @@ class TestLanguageSwitchingRedraws:
         shared.use("uk")
         assert len(bridge.calls_named("render")) == before
         shared.clear()
+
+
+class TestFullDateFormatting:
+    def test_ukrainian_full_date_includes_weekday_and_genitive_month(self) -> None:
+        assert format_date(date(2026, 10, 10), "full", language="uk") == (
+            "субота, 10 жовтня 2026 р."
+        )
 
 
 class TestFlatKeys:

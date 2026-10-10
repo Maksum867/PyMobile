@@ -343,6 +343,51 @@ class TestPreview:
         assert get_bridge().last_tree["children"][0]["style"]["background"] == "#1E1E1E"
 
 
+class TestUiAudit:
+    def _app_project(self, root: Path, source: str) -> None:
+        (root / "pymobile.toml").write_text(
+            '[app]\nname = "Audit"\npackage = "com.example.audit"\n', encoding="utf-8"
+        )
+        (root / "main.py").write_text(source, encoding="utf-8")
+
+    def test_check_ui_reports_advisories_and_strict_exit_code(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._app_project(
+            tmp_path,
+            "from pymobile import App, Button, Column, Row, Screen, Style, TextInput\n"
+            "class Home(Screen):\n"
+            "    def build(self):\n"
+            "        return Column(\n"
+            "            Button('Save', style=Style(height=32), id='small'),\n"
+            "            TextInput(id='query'),\n"
+            "            Row(Button('A', style=Style(width=220)), "
+            "Button('B', style=Style(width=220)), id='row'),\n"
+            "        )\n"
+            "App('Audit').run(Home())\n",
+        )
+        assert main(["check-ui", "-c", str(tmp_path), "--width", "320", "--strict"]) == 1
+        output = capsys.readouterr().err
+        assert "touch-target" in output
+        assert "accessibility-label" in output
+        assert "narrow-overflow" in output
+
+    def test_check_ui_json_and_parser_validation(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._app_project(
+            tmp_path,
+            "from pymobile import App, Button, Screen\n"
+            "class Home(Screen):\n"
+            "    def build(self): return Button('Continue')\n"
+            "App('Audit').run(Home())\n",
+        )
+        assert main(["check-ui", "-c", str(tmp_path), "--json"]) == 0
+        assert json.loads(capsys.readouterr().out) == []
+        with pytest.raises(SystemExit):
+            main(["check-ui", "--width", "0"])
+
+
 class TestWatch:
     """`pymobile watch` — the edit-save-see loop."""
 

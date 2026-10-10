@@ -544,6 +544,12 @@ final class ViewBuilder {
             animatedVisibilityTargets.put(view, visible);
         }
         applyStyle(view, style);
+        String accessibilityLabel = props.optString("accessibility_label", "").trim();
+        if (!accessibilityLabel.isEmpty()) {
+            view.setContentDescription(accessibilityLabel);
+        } else if (props.optBoolean("decorative", false)) {
+            view.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        }
         if ("Dialog".equals(type)) {
             // The anchor never takes space: the dialog shows in its own window.
             DialogHost host = dialogs.get(view);

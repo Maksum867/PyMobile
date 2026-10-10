@@ -77,7 +77,9 @@ def render_extra_html(
     kind, props = node["type"], node.get("props", {})
     wid = escape(str(node.get("id", "")), quote=True)
     disabled = "" if node.get("enabled", True) else " disabled"
-    label = escape(str(props.get("label", "")), quote=True)
+    label = escape(
+        str(props.get("accessibility_label") or props.get("label", "")), quote=True
+    )
     if kind in ("RangeSlider", "PageView", "Chart", "AutoComplete"):
         # A column aligns its children to the start and would shrink these to nothing.
         css = f"width:100%;{css}"

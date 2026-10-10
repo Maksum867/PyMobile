@@ -240,6 +240,26 @@ class TestForm:
         with pytest.raises(ValueError):
             FormField("x", rules=["not_a_rule"])
 
+    def test_domain_errors_are_mapped_by_field_name(self) -> None:
+        name = FormField("name", label="Plant name")
+        species = FormField("species", label="Species")
+        form = Form(name, species)
+        form.set_errors({"name": "A plant with this name already exists.", "species": "Unknown."})
+        assert form.errors == {
+            "name": "A plant with this name already exists.",
+            "species": "Unknown.",
+        }
+        assert name.error == "A plant with this name already exists."
+        assert species.error == "Unknown."
+        form.to_dict()  # language refresh must not erase domain/model errors
+        assert name.error == "A plant with this name already exists."
+        form.set_errors({"species": "Try another species."})
+        assert name.error == "" and species.error == "Try another species."
+        species.value = "Fern"
+        assert species.error == "" and "species" not in form.errors
+        with pytest.raises(ValueError, match="unknown form field"):
+            form.set_errors({"scientific_name": "Unknown field."})
+
     def test_hint_hides_while_error_and_disabled_form_cannot_submit(self) -> None:
         field = FormField("name", hint="Your name", required=True)
         form = Form(field)

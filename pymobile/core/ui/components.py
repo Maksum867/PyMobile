@@ -354,12 +354,25 @@ class Image(Widget):
     """An image loaded from a packaged resource, a file path or a URL."""
 
     type_name = "Image"
-    __slots__ = ("_source", "_fit")
+    __slots__ = ("_source", "_fit", "decorative")
 
     FITS = ("contain", "cover", "fill", "none")
 
-    def __init__(self, source: str, *, fit: str = "contain", **kwargs: Any) -> None:
-        super().__init__(**kwargs)
+    def __init__(
+        self,
+        source: str,
+        *,
+        fit: str = "contain",
+        decorative: bool = False,
+        accessibility_label: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if not isinstance(decorative, bool):
+            raise TypeError("decorative must be a bool")
+        if decorative and accessibility_label:
+            raise ValueError("a decorative image cannot also have an accessibility_label")
+        super().__init__(accessibility_label=accessibility_label, **kwargs)
+        self.decorative = decorative
         if not source:
             raise ValueError("image source must not be empty")
         if fit not in self.FITS:
@@ -452,7 +465,10 @@ class Image(Widget):
             )
 
     def props(self) -> dict[str, Any]:
-        return {**super().props(), "source": self.source, "fit": self.fit}
+        props = {**super().props(), "source": self.source, "fit": self.fit}
+        if self.decorative:
+            props["decorative"] = True
+        return props
 
 
 class Switch(Widget):

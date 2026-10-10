@@ -18,11 +18,13 @@ Build it with ``pymobile build``.
 
 from __future__ import annotations
 
-__version__ = "0.9.4"
+__version__ = "0.9.5"
 __author__ = "MAKSYM KHLYSTUN"
 __license__ = "MIT"
 
 from .core.api import (
+    ModelMigration,
+    ModelStore,
     Notifications,
     Permission,
     PermissionManager,
@@ -124,8 +126,10 @@ from .core.ui import (
     TextInput,
     Theme,
     TimePicker,
+    UiIssue,
     Widget,
     Wrap,
+    audit_ui,
 )
 from .core.ui.registry import (
     register_widget_type,
@@ -137,6 +141,7 @@ from .deprecation import PyMobileDeprecationWarning
 from .errors import (
     BridgeError,
     ConfigError,
+    ModelStoreError,
     NetworkError,
     PermissionError_,
     PlatformError,
@@ -193,6 +198,8 @@ __all__ = [
     "Permission",
     "PermissionManager",
     "Storage",
+    "ModelStore",
+    "ModelMigration",
     "default_storage_path",
     # networking
     "HttpClient",
@@ -271,6 +278,8 @@ __all__ = [
     # validation
     "Validator",
     "ValidationError",
+    "UiIssue",
+    "audit_ui",
     # jobs & plugins
     "JobManager",
     "JobHandle",
@@ -287,6 +296,7 @@ __all__ = [
     "PermissionError_",
     "NetworkError",
     "ResourceError",
+    "ModelStoreError",
     "WidgetNotFoundError",
     "WidgetParentError",
     "WidgetTypeError",

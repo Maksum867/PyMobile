@@ -16,6 +16,7 @@ __all__ = [
     "PermissionError_",
     "NetworkError",
     "ResourceError",
+    "ModelStoreError",
     "WidgetNotFoundError",
     "WidgetTypeError",
     "WidgetParentError",
@@ -60,6 +61,10 @@ class NetworkError(PyMobileError):
 
 class ResourceError(PyMobileError):
     """A packaged resource (template, icon) could not be read."""
+
+
+class ModelStoreError(PyMobileError):
+    """Typed model data could not be read, migrated or reconstructed safely."""
 
 
 class WidgetNotFoundError(PyMobileError, LookupError):

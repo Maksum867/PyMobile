@@ -3,6 +3,32 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Typed model persistence.** The optional `ModelStore` adapts dataclasses to
+  JSON records in `App.storage`, provides typed CRUD, and supports explicit,
+  atomic schema migration steps without adding a database dependency.
+- **UI audit command.** `pymobile check-ui` warns about unnamed controls/images,
+  explicitly undersized touch targets and likely overflow at a chosen narrow
+  screen width. `Widget.accessibility_label` is passed to Android and the web
+  preview; images can be marked `decorative=True`.
+- **Domain errors on form fields.** `Form.set_errors()` maps keyed errors back
+  to matching `FormField`s and rejects unknown names.
+- **README API coverage.** Added direct reference notes for `__version__`,
+  `default_storage_path()`, `ProjectConfig`/`load_config`, `Scheduler`,
+  `PermissionManager`, `HttpFuture`, `Event` and `Response`.
+
+### Changed
+
+- **English-only documentation.** Replaced non-English text in Markdown examples
+  and historical notes while retaining the documented locale identifiers.
+- **Localized date recipe.** The README now shows `format_date(..., "full")`
+  with a weekday in an English locale.
+- **Removed the Plant Tracker example project.** The API guidance stays in the
+  README; the source distribution no longer includes an `examples/` tree.
+
 ## [0.9.4] — 2026-10-08
 
 ### Added
@@ -186,19 +212,19 @@ the project uses [semantic versioning](https://semver.org/).
 
 - **Cyrillic names mixed with digits broke the scaffold.** `slugify()` stripped
   everything outside `a-z0-9` first and returned early when anything was left,
-  so `Мій додаток 2` collapsed to `2` and transliteration never ran. It now
-  transliterates first and strips afterwards, so the same name becomes
-  `miidodatok2`.
+  so a non-Latin project name followed by `2` collapsed to `2` before
+  transliteration ran. It now transliterates first and strips afterwards, so
+  the readable Latin slug is retained.
 - **Digit-leading names produced an invalid Android package.** `default_package()`
   used `org.pymobile.2048` for a project named `2048` (and `org.pymobile.123app`
   for `123 App`); the first build after `pymobile init` then died with
   `ConfigError: Invalid package name`, because a package segment must start with
   a letter. A slug that would start with a digit now gets an `app` prefix
   (`2048` → `org.pymobile.app2048`).
-- **`й` transliterated as `y`.** The NFKD normalization ran before the Cyrillic
-  table, decomposing `й` into `и` + combining breve, which the table then read
-  as `и` — so `Йогурт` became `yohurt`. Transliteration now runs first and
-  `Йогурт` correctly becomes `iohurt`.
+- **Cyrillic U+0439 transliterated incorrectly.** NFKD normalization split the
+  character into U+0438 plus the combining breve U+0306 before the transliteration
+  table could apply the whole-character mapping. Transliteration now processes
+  the source character first and produces the expected Latin output.
 - **`pymobile init && pymobile build` warned about files `exclude` already
   covered.** `_warn_about_ignored_assets()` never consulted the project's
   `exclude` patterns (only a hard-coded list of directory names) and compared
@@ -207,11 +233,11 @@ the project uses [semantic versioning](https://semver.org/).
   `*.md` to `exclude` did not silence it. Excluded files are now skipped through
   the collector's gitignore-style matcher, and the warning is raised only for
   extensions outside `DEFAULT_ASSET_SUFFIXES | asset_suffixes`.
-- **APK file names reduced to bare digits.** A project named `Нотатки 2` stripped
-  to `2` under the ASCII filter, producing `2-0.1.0.apk`. `apk_name` now falls
-  back to the last package segment whenever the sanitized name contains no Latin
-  letter — `Нотатки 2` (com.example.notes) yields `notes-0.1.0.apk`, same as
-  `Нотатки`.
+- **APK file names reduced to bare digits.** A non-Latin project name with a
+  trailing number could be stripped to `2` under the ASCII filter, producing
+  `2-0.1.0.apk`. `apk_name` now falls back to the last package segment whenever
+  the sanitized name contains no Latin letter, producing a stable, readable
+  file name.
 - **The scaffolded `main.py` disagreed with the README quick start.** The
   template's `on_tap` used `self.counter.set_text(...)` while the documentation
   shows `self.counter.text = ...`; the template now uses the property, so the
@@ -570,8 +596,8 @@ P.S. Today is the Python 3.15 release
   is no longer reported.
 - **`SegmentedButtons` scrolls instead of squeezing.** On the device the bar is a
   `HorizontalScrollView` holding natural-width segments (and scrolls to the
-  selected one); a five-segment bar of long labels at 360 dp used to wrap
-  "Біологія" into a column of letters. Bars that fit look as before. The
+  selected one); a five-segment bar of long labels at 360 dp used to wrap a
+  translated label into a column of letters. Bars that fit look as before. The
   in-place update now rebuilds the bar when the labels change (a language
   switch used to leave the old labels on the phone). The mockup, browser and
   text previews follow.
@@ -1436,7 +1462,7 @@ two pieces of behaviour behind them are documented.
   sign with a release keystore.
 - `setup-sdk` downloads command-line tools on macOS (Intel and Apple Silicon)
   and Temurin JDK 17 for Linux/macOS aarch64.
-- `slugify` transliterates Cyrillic so `Скарбничка` is not `app`.
+- `slugify` transliterates Cyrillic input instead of collapsing it to the generic `app` slug.
 - `doctor` no longer claims "everything looks good" when the Android SDK is
   missing.
 - HTTP cache stores bodies as base64; `HttpClient` builds an SSL context with

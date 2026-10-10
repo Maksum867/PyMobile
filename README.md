@@ -30,7 +30,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.9.4`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.9.5`) and read the
 > changelog before upgrading. What may change, and how much notice you get, is
 > written down in the
 > [versioning and deprecation policy](#versioning-and-deprecation-policy). Bug
@@ -86,12 +86,14 @@ the JDK for you.
 - [How it works](#how-it-works)
 - [UI components](#ui-components)
 - [Layout](#layout)
+- [UI accessibility and layout audit](#ui-accessibility-and-layout-audit)
 - [Styling](#styling)
 - [Screens and navigation](#screens-and-navigation)
 - [Updating the screen](#updating-the-screen)
 - [Threads and the UI](#threads-and-the-ui)
 - [Themes](#themes)
 - [Storage](#storage)
+- [Typed model storage](#typed-model-storage)
 - [Background jobs](#background-jobs)
 - [HTTP cache and offline mode](#http-cache-and-offline-mode)
 - [Async HTTP](#async-http)
@@ -365,8 +367,8 @@ column of letters. Pass `wrap=True` when every option should stay visible: the
 segments then flow onto further lines.
 
 ```python
-SegmentedButtons(["Географія", "Історія", "Математика", "Біологія", "Хімія"])            # scrolls
-SegmentedButtons(["Географія", "Історія", "Математика", "Біологія", "Хімія"], wrap=True)  # flows
+SegmentedButtons(["Geography", "History", "Math", "Biology", "Chemistry"])            # scrolls
+SegmentedButtons(["Geography", "History", "Math", "Biology", "Chemistry"], wrap=True)  # flows
 ```
 
 For anything other than a selection — tags, filter chips, quick replies — use
@@ -672,10 +674,10 @@ Form(
     FormField("email", "Email", required=True, rules=["email"]),
     FormField("password", "Password", password=True, rules=[{"min_length": 8}]),
     on_submit=lambda values: print(values),
-    messages={"required": "обов'язкове поле"},   # same keys as Validator(messages=)
-)                                                # call form.submit() from a Button
+    messages={"required": "This field is required"},   # same keys as Validator(messages=)
+)                                                       # call form.submit() from a Button
 
-TabView({"home": HomeView(), "stats": lambda: StatsView()}, labels={"home": "Головна"})
+TabView({"home": HomeView(), "stats": lambda: StatsView()}, labels={"home": "Home"})
 ExpansionPanel("Details", Label("…")); Accordion(panel_a, panel_b)   # one open at a time
 MultiSelect({"a": "Alpha", "b": "Beta"}, ["a"], maximum_selected=2)
 AutoComplete(["Kyiv", "Lviv"], threshold=2, on_select=print)
@@ -823,6 +825,40 @@ Column(a, b, cross_align=Align.STRETCH)
 
 Options: `Align.START`, `Align.CENTER`, `Align.END`, `Align.SPACE_BETWEEN`,
 and `Align.STRETCH` for `cross_align`.
+
+---
+
+## UI accessibility and layout audit
+
+Give controls an explicit screen-reader name when their displayed text is not
+enough. `FormField` automatically uses its visible label for the contained
+`TextInput`; other widgets accept `accessibility_label=`. Mark an image as
+decorative when it carries no information:
+
+```python
+TextInput(accessibility_label="Plant name")
+Switch(accessibility_label="Watering reminder")
+Image("assets/leaf.png", accessibility_label="New leaf on a fern")
+Image("assets/flourish.png", decorative=True)
+```
+
+The name is passed to Android as the content description and is retained by
+the browser preview as an ARIA label/alternative text. Check the currently
+rendered screen with:
+
+```bash
+python -m pymobile check-ui --width 320
+python -m pymobile check-ui --screen Settings --width 320 --strict
+```
+
+The command warns about unnamed interactive controls and images, explicitly
+undersized control widths/heights (the default target is 48 dp), fixed widths wider
+than their parent, and `Row` contents that appear too wide for the chosen
+screen. `--json` prints machine-readable results; `--strict` returns exit code
+1 when any warning is found. This is a lightweight static audit, not a full
+Android layout or TalkBack simulator: unspecified native control sizes, font
+scaling, localization and device-specific behavior still need a real-device
+check.
 
 ---
 
@@ -1257,6 +1293,18 @@ side by side never overwrite each other's data. A file named with the dots
 first time the dashed one is missing. Override the directory for every app
 with `PYMOBILE_STORAGE_DIR`.
 
+`default_storage_path(filename=...)` returns the default store-file location as
+a `Path`; it honors `PYMOBILE_STORAGE_DIR` and uses `pymobile_store.json` by
+default. Use it when you need to inspect or pass the framework's standard
+location without opening the store:
+
+```python
+from pymobile import default_storage_path
+
+path = default_storage_path()
+cache_path = default_storage_path("cache.json")
+```
+
 ```python
 App("My App", storage_path="/custom/dir")         # a directory
 App("My App", storage_path="/custom/store.json")  # or an explicit file
@@ -1278,6 +1326,51 @@ with app.storage.transaction() as store:            # multi-step
     store["balance"] = balance - price
     store["history"] = [*store.get("history", []), price]
 ```
+
+---
+
+## Typed model storage
+
+`ModelStore` is an **optional adapter** over the existing `App.storage`, not a
+new database. It converts dataclass instances to JSON records and offers typed
+CRUD while leaving the simple key/value API unchanged:
+
+```python
+from dataclasses import dataclass
+from pymobile import ModelStore
+
+@dataclass
+class Task:
+    id: str
+    title: str
+    done: bool = False
+
+tasks = ModelStore(app.storage, Task, key="tasks", schema_version=1)
+tasks.put(Task(id="task-1", title="Review the report"))  # insert or replace by id
+all_tasks = tasks.all()                                     # list[Task]
+first_task = tasks.get("task-1")                            # Task | None
+tasks.delete("task-1")
+```
+
+The value at `key` is stored as an envelope containing `schema_version` and
+`records`. Dataclass fields must be JSON-compatible by default; provide both
+`to_record=` and `from_record=` for dates, nested value objects or custom
+encodings. Migrations are explicit one-version steps that run atomically and
+are saved the first time the model store is read or written:
+
+```python
+def migrate_v1(records):
+    return [{**row, "priority": "normal"} for row in records]
+
+tasks = ModelStore(
+    app.storage, Task, key="tasks", schema_version=2,
+    migrations={1: migrate_v1},       # schema 1 records → schema 2 records
+)
+```
+
+Missing migration steps, malformed records and data written by a newer app
+raise `ModelStoreError` rather than erasing the stored value. Keep each migration
+with the model version that introduces it, and test upgrades from stored data.
 
 ---
 
@@ -1344,7 +1437,10 @@ future.cancel()   # suppress callbacks
 result = future.get(timeout=10)   # block if needed
 ```
 
-Methods: `get_async`, `post_async`, `put_async`, `delete_async`.
+Methods: `get_async`, `post_async`, `put_async`, `delete_async`. Each returns
+an `HttpFuture` for that in-flight request; use `.done`, `.cancel()`, `.get()`
+or `.then(...)` to observe it. `get()` returns a `Response` or raises the
+request error.
 
 ---
 
@@ -1379,6 +1475,36 @@ rules:
 `integer` accepts plain digits with an optional sign (not `"4_2"`), and
 `number` rejects `"nan"` and `"inf"`.
 
+### Mapping domain errors to form fields
+
+Keep field-level rules in the UI, and let the domain/service layer return
+field-keyed errors for rules the form cannot know about (for example, a
+unique username or an API rejection). `Form.set_errors()` places each
+message beside the `FormField` with the same name:
+
+```python
+from pymobile import Form, FormField, ValidationError
+
+form = Form(
+    FormField("email", label="Email", required=True, rules=["email"]),
+    FormField("username", label="Username", required=True, rules=[{"min_length": 3}]),
+)
+
+# The form has already passed its local rules. The account service can still
+# reject a value for a domain reason and report the field that owns the error.
+try:
+    account_service.save(form.values)
+except ValidationError as error:
+    form.set_errors(error.errors)  # {"username": "That name is already taken."}
+```
+
+`set_errors()` replaces the form's current error mapping, marks invalid fields
+touched and clears messages for fields not in the new mapping. A typo or a
+server error keyed to a field that is not in the form raises `ValueError`
+instead of disappearing silently. Pass `{}` to clear all mapped errors. Keep
+persistence and domain validation in a repository or service, then pass its
+field-keyed errors back to the form.
+
 Validators come in two forms:
 
 * **bare strings** — `required`, `optional`, `email`, `integer`, `number`,
@@ -1409,18 +1535,18 @@ has it:
 Validator(
     {"email": ["required", "email"], "name": ["required", {"min_length": 2}]},
     messages={
-        "required": "обов'язкове поле",
-        "email.email": "невірна адреса пошти",          # only the email field
-        "min_length": "не менше {minimum} символів",
+        "required": "This field is required",
+        "email.email": "Enter a valid email address",  # only the email field
+        "min_length": "Use at least {minimum} characters",
     },
 )
 
 # or once, for the whole app — the same ids, prefixed with "validation.":
 translations.load({
-    "validation.required": "обов'язкове поле",
-    "validation.email": "невірна адреса пошти",
-    "validation.min_length": "не менше {minimum} символів",
-}, language="uk")
+    "validation.required": "This field is required",
+    "validation.email": "Enter a valid email address",
+    "validation.min_length": "Use at least {minimum} characters",
+}, language="en")
 ```
 
 | Rule id | Default text | Placeholders |
@@ -1577,6 +1703,10 @@ app.require_permissions(Permission.CAMERA)          # raises PermissionError_ if
 Three spellings are accepted: `"CAMERA"`, `"android.permission.CAMERA"` and
 `Permission.CAMERA`.
 
+`app.permissions` is the app-owned `PermissionManager` connected to the active
+platform bridge. Use it for permission checks and runtime requests rather than
+creating a second manager with a different bridge.
+
 ### Three rules that save hours
 
 **1. Declare every permission in `pymobile.toml`.** Android denies an
@@ -1625,7 +1755,8 @@ client.put("/items/1", json={"name": "Updated"})
 client.delete("/items/1")
 ```
 
-The response object:
+Synchronous verbs return a `Response`; `HttpFuture.get()` returns the same
+object for an asynchronous request:
 
 ```python
 response = client.get("/items")
@@ -1688,27 +1819,26 @@ packaged in full.
 ```python
 from pymobile import t, translations, device_language
 
-translations.load_dir("locales")          # locales/en.json, locales/uk.json …
+translations.load_dir("locales")          # locales/en.json and other catalogue files
 translations.use(device_language(default="en"))
 
-Label(t("greeting", name="Оксана"))       # "Привіт, Оксана!"
+Label(t("greeting", name="Alex"))         # "Hello, Alex!"
 ```
 
 ```json
 {
-  "greeting": "Привіт, {name}!",
+  "greeting": "Hello, {name}!",
   "items": {
-    "one":  "{count} елемент",
-    "few":  "{count} елементи",
-    "many": "{count} елементів"
+    "one":   "{count} item",
+    "other": "{count} items"
   }
 }
 ```
 
 ```python
-t("items", count=1)     # 1 елемент
-t("items", count=3)     # 3 елементи
-t("items", count=5)     # 5 елементів
+t("items", count=1)     # 1 item
+t("items", count=3)     # 3 items
+t("items", count=5)     # 5 items
 ```
 
 The plural form is chosen by the CLDR rule of the catalogue's *language* —
@@ -1733,8 +1863,8 @@ loading such a file logs a warning naming the nested objects, and each missed
 dotted key is logged with a hint.
 
 ```
-{ "stats": { "balance": "Баланс" } }    ✗  t("stats.balance") → "stats.balance"
-{ "stats.balance": "Баланс" }           ✓  the whole key, dot included
+{ "stats": { "balance": "Balance" } }    ✗  t("stats.balance") → "stats.balance"
+{ "stats.balance": "Balance" }           ✓  the whole key, dot included
 ```
 
 Prefixes keep flat files readable — `"auth.title"`, `"auth.error"`,
@@ -1748,25 +1878,25 @@ translations.load_dir("locales", flatten=True)      # {"stats": {"balance": …}
 ```python
 from pymobile import flatten_catalogue              # or expand one mapping yourself
 
-translations.load(flatten_catalogue({"stats": {"balance": "Баланс"}}), language="uk")
+translations.load(flatten_catalogue({"stats": {"balance": "Balance"}}), language="en")
 ```
 
 The one nested shape understood without `flatten=True` is a plural form map,
 whose keys are all CLDR quantity names (`zero`/`one`/`two`/`few`/`many`/`other`):
 
 ```json
-{ "items": { "one": "{count} елемент", "few": "{count} елементи", "many": "{count} елементів" } }
+{ "items": { "one": "{count} item", "other": "{count} items" } }
 ```
 
 Any other nested object is a namespace, so `flatten_catalogue()` turns it into
 dotted keys — name a section after its content, not after a quantity.
 
-Switching language redraws whatever is on screen — `translations.use("uk")` is
+Switching language redraws whatever is on screen — `translations.use("en-GB")` is
 enough, because `t()` runs inside `build()` and the screen is rebuilt for you.
 
 `device_language()` reads the real system setting on Android — including
 Android 13 per-app language overrides — and the usual environment variables on
-a desktop. Force one during development with `PYMOBILE_LANGUAGE=uk`.
+a desktop. Force one during development with `PYMOBILE_LANGUAGE=en-GB`.
 
 Already using xgettext? `translations.install_gettext("app", "locale")` reads
 your compiled `.mo` catalogues instead.
@@ -1776,15 +1906,17 @@ your compiled `.mo` catalogues instead.
 Formatting follows the language too — no Babel, no ICU, nothing to install:
 
 ```python
+from datetime import date, time
 from pymobile import format_number, format_percent, format_currency, format_date
 
-format_number(1234567.891, 2)            # uk: 1 234 567,89   en: 1,234,567.89
-format_percent(0.256)                    # uk: 26%            de: 26 %
-format_currency(1250, "UAH")             # uk: 1 250,00 ₴     en: ₴1,250.00
-format_currency(9.5, "USD", language="en")   # $9.50
-format_date(date(2026, 10, 1), "long")   # uk: 1 жовтня 2026 р.  en: October 1, 2026
-format_date(day, pattern="d MMMM")       # uk: 1 жовтня (the genitive month)
-format_time(time(14, 5))                 # uk: 14:05          en: 2:05 PM
+format_number(1234567.891, 2)                 # 1,234,567.89
+format_percent(0.256)                         # 26%
+format_currency(1250, "USD")                 # $1,250.00
+format_currency(9.5, "EUR", language="en-GB") # €9.50
+format_date(date(2026, 10, 1), "long")        # October 1, 2026
+format_date(date(2026, 10, 10), "full", language="en-GB")  # Saturday 10 October 2026
+format_date(day, pattern="d MMMM")            # custom month-and-day pattern
+format_time(time(14, 5))                      # 2:05 PM
 ```
 
 The language is the active catalogue's (`translations.use(...)`) unless you
@@ -1798,11 +1930,11 @@ Inside a catalogue the same formats are placeholder specifiers, so the
 translator decides the wording and the code passes raw values:
 
 ```json
-{ "total": "Разом: {sum:currency:UAH}, до {day:date:long}" }
+{ "total": "Total: {sum:currency:USD}, due {day:date:long}" }
 ```
 
 ```python
-t("total", sum=1250, day=date(2026, 10, 1))   # Разом: 1 250,00 ₴, до 1 жовтня 2026 р.
+t("total", sum=1250, day=date(2026, 10, 1))   # Total: $1,250.00, due October 1, 2026
 ```
 
 Specifiers: `number`, `number:2`, `percent`, `percent:1`, `currency:EUR`,
@@ -1815,7 +1947,10 @@ rather than crashing the screen.
 
 ## Events
 
-A synchronous event bus decouples UI from application logic.
+A synchronous event bus decouples UI from application logic. Each callback
+receives an immutable `Event` with a `name`, optional `source`, and `get(key,
+default)` method for its payload. `app.on()` returns a subscription handle that
+can be cancelled individually.
 
 ```python
 # framework events
@@ -1880,6 +2015,10 @@ does not keep ticking:
 def on_unmount(self) -> None:
     self.ticker.cancel()
 ```
+
+`Scheduler` is the lower-level service behind these methods. App code should
+normally use `app.set_interval()` and `app.set_timeout()` so timer callbacks
+follow the app's event-loop and lifecycle rules.
 
 ### Intervals do not drift
 
@@ -1977,7 +2116,16 @@ then warns when it can see that `output_dir` would ship itself. The defaults are
 exported as `pymobile.core.config.DEFAULT_EXCLUDE`.
 
 Inspect the resolved configuration with `pymobile info` or
-`pymobile info --json`.
+`pymobile info --json`. In Python, `load_config()` reads the configuration from
+the current project directory and returns a validated `ProjectConfig`. Pass a
+TOML file or a directory to `load_config(path)` when loading another project:
+
+```python
+from pymobile import ProjectConfig, load_config
+
+config: ProjectConfig = load_config()
+print(config.name, config.package, config.effective_min_sdk)
+```
 
 ---
 
@@ -2155,6 +2303,15 @@ adb install -r build/my-app-1.0.0.apk
 
 ## Debugging
 
+Read the installed framework version with `pymobile.__version__`; include it in
+bug reports and compatibility diagnostics:
+
+```python
+import pymobile
+
+print(pymobile.__version__)
+```
+
 Everything your app prints, including tracebacks, goes to logcat:
 
 ```bash
@@ -2179,7 +2336,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.9.4", "platform": "android",
+# {"framework_version": "0.9.5", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 

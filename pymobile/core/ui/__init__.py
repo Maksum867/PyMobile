@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .audit import UiIssue, audit_ui
 from .charts import BarChart, LineChart, PieChart
 from .components import (
     Avatar,
@@ -68,6 +69,8 @@ from .theme import Theme
 from .widget import Container, Widget
 
 __all__ = [
+    "UiIssue",
+    "audit_ui",
     "ICON_NAMES",
     "Icon",
     "IconButton",

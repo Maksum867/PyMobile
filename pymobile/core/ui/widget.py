@@ -162,6 +162,7 @@ class Widget:
         "_explicit_id",
         "_animate_visibility",
         "_animation_duration_ms",
+        "_accessibility_label",
     )
 
     def __init__(
@@ -173,8 +174,11 @@ class Widget:
         enabled: bool = True,
         animate_visibility: bool = False,
         animation_duration_ms: int = 220,
+        accessibility_label: str | None = None,
         **props: Any,
     ) -> None:
+        if accessibility_label is not None and not isinstance(accessibility_label, str):
+            raise TypeError("accessibility_label must be a string or None")
         self._explicit_id = id is not None
         self.id = id or auto_id(type(self).__name__.lower())
         self.style = style or Style()
@@ -190,6 +194,7 @@ class Widget:
         self._enabled = enabled
         self._animate_visibility = animate_visibility
         self._animation_duration_ms = animation_duration_ms
+        self._accessibility_label = accessibility_label
         self._parent: Widget | None = None
         self._screen: Screen | None = None
         self._props: WidgetProps = {}
@@ -367,6 +372,19 @@ class Widget:
             self._enabled = value
             self.invalidate()
 
+    @property
+    def accessibility_label(self) -> str | None:
+        """A concise screen-reader name for this widget, when its text is not enough."""
+        return self._accessibility_label
+
+    @accessibility_label.setter
+    def accessibility_label(self, value: str | None) -> None:
+        if value is not None and not isinstance(value, str):
+            raise TypeError("accessibility_label must be a string or None")
+        if value != self._accessibility_label:
+            self._accessibility_label = value
+            self.invalidate()
+
     def set_prop(self, name: str, value: object, *, invalidate: bool = True) -> None:
         """Set a validated extension prop for a custom widget/renderer.
 
@@ -397,7 +415,10 @@ class Widget:
         The returned mapping is a deep copy so renderers can mutate nested
         dict/list extension props without leaking back into the widget.
         """
-        return _copy_props(self._props)
+        result = _copy_props(self._props)
+        if self._accessibility_label is not None:
+            result["accessibility_label"] = self._accessibility_label
+        return result
 
     def to_dict(self) -> WidgetNode:
         """Serialise the widget subtree into the public renderer contract.

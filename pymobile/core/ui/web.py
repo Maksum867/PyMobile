@@ -331,7 +331,7 @@ def _js_value(value: str) -> str:
     )
 
 
-def render_html(node: dict[str, Any]) -> str:
+def _render_html_node(node: dict[str, Any]) -> str:
     """Render one serialised widget node (and its children) as HTML."""
     if not node.get("visible", True):
         return ""
@@ -489,12 +489,15 @@ def render_html(node: dict[str, Any]) -> str:
 
     if kind == "Image":
         source = escape(text_value(props.get("source", "")), quote=True)
+        label = "" if props.get("decorative") else text_value(props.get("accessibility_label", ""))
+        alt = escape(label, quote=True)
+        hidden = ' aria-hidden="true"' if props.get("decorative") else ""
         # http(s)/data sources render directly; APK-local asset paths degrade
         # to the message on the right via the onerror fallback.
         onerror = "this.replaceWith(document.createTextNode('[image unavailable]'))"
         return (
             f'<div style="{css}">'
-            f'<img data-wid="{widget_id}" src="{source}" alt="" '
+            f'<img data-wid="{widget_id}" src="{source}" alt="{alt}"{hidden} '
             f'style="max-width:100%;display:block" onerror="{onerror}">'
             f"</div>"
         )
@@ -741,6 +744,47 @@ def render_html(node: dict[str, Any]) -> str:
         return render_extra_html(node, render_html, css)
 
     return f'<div class="muted">&lt;{escape(kind)}&gt;</div>'
+
+
+def render_html(node: dict[str, Any]) -> str:
+    """Render a widget node and preserve an explicit screen-reader label."""
+    markup = _render_html_node(node)
+    props = node.get("props", {})
+    label = props.get("accessibility_label") if isinstance(props, dict) else None
+    if not isinstance(label, str) or not label.strip() or not markup or node.get("type") == "Image":
+        return markup
+
+    aria_label = escape(label.strip(), quote=True)
+    kind = node.get("type")
+    direct_controls = {
+        "Button",
+        "IconButton",
+        "TextInput",
+        "AutoComplete",
+        "Switch",
+        "Checkbox",
+        "Slider",
+        "Dropdown",
+        "SearchBar",
+        "RadioButton",
+        "Link",
+        "Chip",
+    }
+    if kind in direct_controls:
+        for tag in ("input", "textarea", "button", "select", "a"):
+            start = markup.find(f"<{tag} ")
+            if start >= 0:
+                end = markup.find(">", start)
+                if end >= 0:
+                    opening = markup[start:end]
+                    if "aria-label=" not in opening:
+                        return markup[:end] + f' aria-label="{aria_label}"' + markup[end:]
+                    return markup
+    widget_id = escape(str(node.get("id", "")), quote=True)
+    return (
+        f'<span role="group" aria-label="{aria_label}" data-wid="{widget_id}" '
+        f'style="display:contents">{markup}</span>'
+    )
 
 
 class WebPreview:
