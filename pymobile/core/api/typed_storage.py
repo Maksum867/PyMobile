@@ -284,7 +284,7 @@ class ModelStore(Generic[T]):
             raise ModelStoreError(
                 f"from_record returned {type(model).__name__}, expected {self._model_type.__name__}"
             )
-        return cast(T, model)
+        return model
 
     def all(self) -> list[T]:
         """Return every stored model in insertion order."""

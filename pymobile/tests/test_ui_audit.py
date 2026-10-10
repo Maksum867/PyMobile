@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import MappingProxyType
+
 import pytest
 
 from pymobile import (
@@ -93,6 +95,62 @@ def test_web_preview_emits_aria_label_and_image_alt_text() -> None:
     assert 'alt="PyMobile logo"' in render_html(image.to_dict())
     decorative = Image("leaf.png", decorative=True, id="leaf")
     assert 'aria-hidden="true"' in render_html(decorative.to_dict())
+
+
+@pytest.mark.parametrize(
+    "optional_fields",
+    [
+        pytest.param({}, id="absent"),
+        pytest.param({"props": None, "style": None}, id="null"),
+        pytest.param({"props": [], "style": "invalid"}, id="non-mapping"),
+        pytest.param(
+            {"props": MappingProxyType({}), "style": MappingProxyType({})},
+            id="read-only-mapping",
+        ),
+    ],
+)
+def test_audit_normalizes_optional_props_and_style(
+    optional_fields: dict[str, object],
+) -> None:
+    tree = {
+        "type": "Row",
+        "id": "root",
+        **optional_fields,
+        "children": [{"type": "Button", "id": "control", **optional_fields}],
+    }
+
+    issues = audit_ui(tree)
+    assert [(issue.code, issue.widget_id) for issue in issues] == [
+        ("accessibility-label", "control")
+    ]
+
+
+def test_audit_preserves_read_only_mapping_values() -> None:
+    tree = {
+        "type": "Row",
+        "id": "actions",
+        "props": MappingProxyType({"spacing": 4}),
+        "children": [
+            {
+                "type": "Button",
+                "id": "save",
+                "props": MappingProxyType({"text": "Save"}),
+                "style": MappingProxyType({"width": 200}),
+            },
+            {
+                "type": "Button",
+                "id": "cancel",
+                "props": MappingProxyType({"text": "Cancel"}),
+                "style": MappingProxyType({"width": 120}),
+            },
+        ],
+    }
+
+    issues = audit_ui(tree, width=320)
+    assert ("narrow-overflow", "actions") in {
+        (issue.code, issue.widget_id) for issue in issues
+    }
+    assert not [issue for issue in issues if issue.code == "accessibility-label"]
 
 
 def test_audit_rejects_invalid_dimensions_and_widget_inputs() -> None:

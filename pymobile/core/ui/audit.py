@@ -64,6 +64,12 @@ def _number(value: object) -> float | None:
     return number if isfinite(number) else None
 
 
+def _mapping(value: object) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    return {}
+
+
 def _insets(style: Mapping[str, Any], key: str) -> tuple[float, float, float, float]:
     value = style.get(key)
     if isinstance(value, (list, tuple)) and len(value) == 4:
@@ -111,8 +117,8 @@ def _has_weight(node: Mapping[str, Any]) -> bool:
 def _natural_width(node: Mapping[str, Any], available: float) -> float | None:
     """Estimate a child's natural width in dp for a Row overflow warning."""
     kind = str(node.get("type", ""))
-    props = node.get("props") if isinstance(node.get("props"), Mapping) else {}
-    style = node.get("style") if isinstance(node.get("style"), Mapping) else {}
+    props = _mapping(node.get("props"))
+    style = _mapping(node.get("style"))
     width = style.get("width")
     fixed = _number(width)
     if fixed is not None:
@@ -215,8 +221,8 @@ def audit_ui(
         if not node.get("visible", True):
             return
         kind = str(node.get("type", ""))
-        props = node.get("props") if isinstance(node.get("props"), Mapping) else {}
-        style = node.get("style") if isinstance(node.get("style"), Mapping) else {}
+        props = _mapping(node.get("props"))
+        style = _mapping(node.get("style"))
         margin = _insets(style, "margin")
         padding = _insets(style, "padding")
         limit = max(0.0, available - margin[0] - margin[2])

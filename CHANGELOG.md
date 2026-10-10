@@ -3,7 +3,7 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.9.5] — 2026-10-10
 
 ### Added
 
@@ -28,6 +28,13 @@ the project uses [semantic versioning](https://semver.org/).
   with a weekday in an English locale.
 - **Removed the Plant Tracker example project.** The API guidance stays in the
   README; the source distribution no longer includes an `examples/` tree.
+
+### Fixed
+
+- **Strict type-checking failures in the new APIs.** Normalize optional
+  serialized `props` and `style` values to mappings in the UI audit and remove
+  a redundant `ModelStore` cast. Both modules pass the strict `mypy`
+  configuration without suppressing errors or weakening CI checks.
 
 ## [0.9.4] — 2026-10-08
 
