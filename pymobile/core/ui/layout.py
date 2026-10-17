@@ -238,9 +238,17 @@ class _Flex(Container):
     #: to stay smaller.
     fit: str = "tight"
 
-    def __init__(self, child: Widget, *, flex: int = 1, **kwargs: Any) -> None:
+    def __init__(self, child: Widget | None = None, *, flex: int = 1, **kwargs: Any) -> None:
         if flex < 1:
             raise ValueError("flex must be >= 1")
+        if child is None:
+            # ``Expanded()`` with no child is the plain "spacer that takes the
+            # leftover space" — the usual way a Row pushes a trailing button
+            # to the edge. Requiring (and then discarding) a dummy Label was
+            # the only way to express it before.
+            from .components import Spacer
+
+            child = Spacer(0)
         self.flex = flex
         super().__init__(child, **kwargs)
 
@@ -266,6 +274,11 @@ class Expanded(_Flex):
     ``flex=1`` takes two thirds::
 
         Row(Expanded(left), Expanded(right, flex=2), spacing=8)
+
+    With no child it is a flexible gap, which is how a trailing widget is
+    pushed to the far edge::
+
+        Row(Label("Title"), Expanded(), IconButton("settings"))
     """
 
     type_name = "Expanded"
@@ -274,7 +287,11 @@ class Expanded(_Flex):
 
 
 class Flexible(_Flex):
-    """Like :class:`Expanded`, but the child may be smaller than its share."""
+    """Like :class:`Expanded`, but the child may be smaller than its share.
+
+    ``Flexible()`` without a child is a gap that may stay smaller than its
+    share, the loose counterpart of ``Expanded()``.
+    """
 
     type_name = "Flexible"
     fit = "loose"

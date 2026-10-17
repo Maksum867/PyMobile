@@ -38,10 +38,13 @@ class _Registration:
     """One ``on()`` call. Identity matters: the same function subscribed twice
     is two registrations, and each Subscription cancels only its own."""
 
-    __slots__ = ("handler",)
+    __slots__ = ("handler", "internal")
 
-    def __init__(self, handler: Handler) -> None:
+    def __init__(self, handler: Handler, *, internal: bool = False) -> None:
         self.handler = handler
+        #: Framework plumbing (``data:changed``) rather than an application
+        #: listener: still delivered, not counted by ``len(bus)``.
+        self.internal = internal
 
 
 @dataclass(slots=True)
@@ -77,14 +80,19 @@ class EventBus:
         self._handlers: dict[str, list[_Registration]] = {}
         self._lock = threading.Lock()
 
-    def on(self, name: str, handler: Handler) -> Subscription:
-        """Register ``handler`` for events called ``name``."""
+    def on(self, name: str, handler: Handler, *, internal: bool = False) -> Subscription:
+        """Register ``handler`` for events called ``name``.
+
+        ``internal=True`` marks framework plumbing: it is delivered like any
+        other handler but not counted by ``len(bus)``, so a screen asserting
+        "only my subscription is left" does not count the app's own listener.
+        """
         if not callable(handler):
             raise TypeError(
                 f"handler must be callable, got {type(handler).__name__!r}; "
                 f"write app.on({name!r}, my_handler) where my_handler is a function"
             )
-        registration = _Registration(handler)
+        registration = _Registration(handler, internal=internal)
         with self._lock:
             self._handlers.setdefault(name, []).append(registration)
         return Subscription(self, name, handler, _registration=registration)
@@ -160,5 +168,11 @@ class EventBus:
         return iter(self._handlers)
 
     def __len__(self) -> int:
+        """Number of application subscriptions (framework-internal ones excluded)."""
         with self._lock:
-            return sum(len(v) for v in self._handlers.values())
+            return sum(
+                1
+                for registrations in self._handlers.values()
+                for registration in registrations
+                if not registration.internal
+            )

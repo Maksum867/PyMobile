@@ -86,6 +86,9 @@ class Screen:
         #: stack (see :attr:`is_current`).
         self._is_current = False
         self._root: Widget | None = None
+        #: True while ``build()`` runs; a rebuild requested from inside it
+        #: cannot call ``build()`` again without recursing.
+        self._building = False
         self._mounted = False
         # П-10: set to True by Navigator._discard() once the screen has been
         # popped. The ``app`` property raises for *new* accesses after the
@@ -158,9 +161,25 @@ class Screen:
     def root(self) -> Widget:
         """The built widget tree, constructed on first access."""
         if self._root is None:
+            if self._building:
+                # build() → rebuild() is a request for the *next* frame: the
+                # tree being assembled right now is the newest one available.
+                raise PyMobileError(
+                    f"{type(self).__name__}.build() asked for a rebuild while it "
+                    "was running",
+                    hint=(
+                        "A build() cannot rebuild itself. Move the call out of "
+                        "build() (a button handler, on_show, on_mount) or emit "
+                        "app.notify_data_changed() instead."
+                    ),
+                )
             self._resolve_title()
-            with widget_scope(self):
-                root = self.build()
+            self._building = True
+            try:
+                with widget_scope(self):
+                    root = self.build()
+            finally:
+                self._building = False
             if root is None:
                 raise PyMobileError(
                     f"{type(self).__name__}.build() returned None",
@@ -291,6 +310,59 @@ class Screen:
         """Whether the screen is currently attached to a navigator."""
         return self._mounted
 
+    def _detach_tree(self) -> None:
+        """Release the built tree so ``build()`` can attach its widgets again.
+
+        Every widget in the retired tree loses both its screen link and its
+        parent link. This is the operation that makes a stateful widget kept on
+        ``self`` (a ``List`` or a ``Column`` built in ``__init__``) attachable
+        in the *next* ``build()``: without it ``Container.add()`` sees the old
+        parent and raises :class:`~pymobile.errors.WidgetParentError`.
+
+        Public behaviour is exposed through :meth:`rebuild` and
+        :meth:`refresh`; the framework also calls it when a ``data:changed``
+        event marks a screen below the visible one for a rebuild.
+        """
+        if self._root is None:
+            return
+        self._root._screen = None
+        for node in self._root.walk():
+            node._parent = None
+        self._root = None
+
+    def rebuild(self) -> None:
+        """Rebuild the widget tree from ``build()``; draw nothing.
+
+        :meth:`refresh` is this plus a repaint of the frame that contains the
+        screen. ``rebuild()`` is the same operation for a screen that has no
+        frame of its own — a tab or a panel embedded in a shell screen, which
+        the shell renders. It detaches the retired tree first, so widgets the
+        screen keeps on ``self`` can be returned from the new ``build()``::
+
+            class DetailsTab:
+                def __init__(self) -> None:
+                    self.list = List([])          # state lives outside build()
+
+                def build(self) -> Widget:
+                    return Column(self.list, Button("Add", on_press=self.add))
+
+                def add(self) -> None:
+                    self.list.add(Label("new"))
+                    self.rebuild()                # the tree is rebuilt, the
+                                                  # shell draws it
+
+        Unlike :meth:`refresh`, an off-stack screen is *not* warned about: no
+        frame was expected in the first place.
+        """
+        if self._building:
+            # Called from inside build(): the tree in flight is already the
+            # newest one, and building it again here would recurse. Dropping
+            # the retired tree is all that is left to do.
+            self._detach_tree()
+            return
+        self._detach_tree()
+        self.root  # noqa: B018 - builds and validates the tree
+
     def refresh(self) -> None:
         """Rebuild the tree from ``build()`` and re-render immediately.
 
@@ -304,26 +376,52 @@ class Screen:
         and displays it the next time it becomes current. A screen that is not
         on the stack at all (a tab, a panel embedded in another screen's tree)
         has no frame of its own to repaint: the screen that builds it is the
-        one to rebuild. That first case is reported, once, instead of quietly
-        doing nothing.
+        one to rebuild — call :meth:`rebuild` there. That first case is
+        reported, once, instead of quietly doing nothing.
         """
-        if self._root is not None:
-            self._root._screen = None
-            for node in self._root.walk():
-                node._parent = None
-        self._root = None
+        in_build = self._building
+        self.rebuild()
         app = self._app
         if app is None:
             if not self._ever_mounted:
                 self._warn_offstage_refresh(
                     f"{type(self).__name__} is not on a navigator stack, so no frame "
                     "contains this tree. A screen embedded in another screen (tabs, "
-                    "panels) is rendered by the one that builds it: rebuild the shell "
-                    "instead — see 'Screens as tabs' in the README."
+                    "panels) is rendered by the one that builds it: call rebuild() on "
+                    "it, or rebuild the shell — see 'Screens as tabs' in the README."
                 )
+            return
+        if in_build:
+            # The rebuild was requested by build() itself: the frame currently
+            # being assembled already contains the newest data, so there is
+            # nothing to repaint here. When a frame is already in flight, ask
+            # for one more so the change cannot be lost between frames.
+            if app._rendering:
+                with app._render_lock:
+                    app._render_scheduled = True
             return
         if app.navigator.current is self:
             app.render()
+
+    def notify_data_changed(self, *, rebuild_current: bool = False) -> None:
+        """Tell the app that the data screens display has changed.
+
+        The screen on top is *not* rebuilt unless ``rebuild_current`` is true;
+        every screen below it is. That is the form a detail screen uses before
+        it pops back to a list::
+
+            def save(self) -> None:
+                self.app.storage.set("cards", cards)
+                self.app.notify_data_changed()     # the list below is stale
+                self.app.pop()                     # …and rebuilds on show
+
+        Without this, a popped-to screen shows the tree it built when it was
+        opened: the list under a form kept saying "2 items" after the third
+        one was saved, with no error to explain it.
+        """
+        self.app.notify_data_changed(
+            rebuild_current=rebuild_current, source=self.title
+        )
 
     def _warn_offstage_refresh(self, message: str) -> None:
         """Explain a refresh() that cannot repaint anything — once per screen."""

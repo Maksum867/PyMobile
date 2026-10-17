@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -219,6 +220,104 @@ class NativeBuildResult:
     def size_mb(self) -> float:
         """Artifact size in megabytes."""
         return self.size / (1024 * 1024)
+
+
+#: One javac diagnostic: ``ViewBuilder.java:37: error: ';' expected``.
+_JAVAC_DIAGNOSTIC = re.compile(
+    r"^(?P<file>(?:[A-Za-z]:)?[^:\n]+?\.java):(?P<line>\d+):\s+"
+    r"(?P<kind>error|warning|note):\s+(?P<text>.+)$",
+    re.MULTILINE,
+)
+
+#: javac problems with a known, common cause; the hint names it.
+_JAVAC_ADVICE: tuple[tuple[str, str], ...] = (
+    (
+        "is public, should be declared in a file named",
+        "rename the file to match the public class name (Java requires it)",
+    ),
+    (
+        "package org.pymobile.app",
+        "keep the package line identical to the rest of the launcher — a "
+        "project renderer lives in org.pymobile.app.widgets",
+    ),
+    (
+        "cannot find symbol",
+        "check imports and the spelling of the identifier; a widget renderer "
+        "must implement WidgetRenderer (see `pymobile widget add`)",
+    ),
+    (
+        "package android",
+        "the class is missing from the android.jar of this build-tools "
+        "version — check the API level, or avoid the newer API",
+    ),
+    (
+        "unreported exception",
+        "handle or declare the checked exception; renderer methods run on the "
+        "UI thread and cannot throw",
+    ),
+)
+
+
+def format_javac_failure(
+    detail: str, *, overlay: bool, root: Path | None = None
+) -> tuple[str, str]:
+    """Turn javac's error output into a framework-style ``message`` + ``hint``.
+
+    The raw compiler text used to be pasted into ``hint`` verbatim: the useful
+    part was buried under the command line, absolute work-directory paths and
+    javac's own "1 error" trailer. Here the diagnostics are kept, stripped to
+    ``File.java:line: error: text`` (paths relative to the project's ``java/``
+    directory when the overlay is what failed), and the most common causes are
+    named explicitly.
+    """
+    def relative(name: str) -> str:
+        """Drop the scratch-directory prefix; a build path is noise to a user."""
+        if root is None:
+            return name
+        try:
+            return Path(name).relative_to(root).as_posix()
+        except (OSError, ValueError):
+            return name
+
+    diagnostics = [
+        f"{relative(match.group('file'))}:{match.group('line')}: "
+        f"{match.group('kind')}: {match.group('text').strip()}"
+        for match in _JAVAC_DIAGNOSTIC.finditer(detail)
+    ]
+    errors = [line for line in diagnostics if ": error:" in line]
+    count = len(errors)
+    summary = (
+        f"javac reported {count} error{'s' if count != 1 else ''}"
+        if count
+        else "javac failed"
+    )
+    shown = (errors or diagnostics)[:6]
+    more = ""
+    remaining = count - len(shown) if count else 0
+    if remaining > 0:
+        more = f"\n  … and {remaining} more error{'s' if remaining != 1 else ''}"
+    elif not shown:
+        # No parseable diagnostic (a crashed compiler, a missing file): show
+        # the tail of whatever it printed, without the command line.
+        tail = [line.rstrip() for line in detail.splitlines() if line.strip()][-6:]
+        shown = tail
+    body = "\n".join(f"  {line}" for line in shown)
+    where = (
+        "the project's java/ directory"
+        if overlay
+        else "the bundled launcher sources (javac output above)"
+    )
+    advice = ""
+    lowered = detail.lower()
+    for needle, sentence in _JAVAC_ADVICE:
+        if needle.lower() in lowered:
+            advice = f"\nMost likely: {sentence}."
+            break
+    hint = (
+        f"javac says:\n{body}{more}\n\n"
+        f"The file paths are relative to {where}. Fix the source and rebuild.{advice}"
+    )
+    return summary, hint
 
 
 def _run(
@@ -544,9 +643,13 @@ else:
             result = self._compile_java_from_source(workdir)
         except PyMobileError as error:
             if project_overlay:
+                # The javac stage has already phrased the diagnostics in the
+                # framework's message + hint style (see format_javac_failure);
+                # the prefix keeps the stage name in the message.
                 raise PyMobileError(
                     f"could not compile the project Java overlay: {error}",
-                    hint=error.hint or "Check the Java sources in the project's java/ directory.",
+                    hint=error.hint
+                    or "Check the Java sources in the project's java/ directory.",
                 ) from error
             detail = f" {error.hint}" if error.hint else ""
             self.warnings.append(f"falling back to the prebuilt dex:{detail}")
@@ -616,9 +719,10 @@ else:
 
         classes = workdir / "classes"
         classes.mkdir(parents=True, exist_ok=True)
-        _run(
-            [
-                self.toolchain.javac,
+        try:
+            _run(
+                [
+                    self.toolchain.javac,
                 "-source",
                 "8",
                 "-target",
@@ -636,9 +740,21 @@ else:
                 classes,
                 *sorted(src.rglob("*.java")),
             ],
-            step="javac",
-            java_home=self.toolchain.java_home,
-        )
+                step="javac",
+                java_home=self.toolchain.java_home,
+            )
+        except PyMobileError as error:
+            # A raw compiler dump is not an explanation. The summary names the
+            # stage and the hint keeps javac's diagnostics, one per line, next
+            # to the advice a framework error is expected to carry.
+            is_overlay = project_java.is_dir()
+            summary, hint = format_javac_failure(
+                error.hint or str(error), overlay=is_overlay, root=src
+            )
+            source = (
+                "the project's java/ overlay" if is_overlay else "the launcher sources"
+            )
+            raise PyMobileError(f"{summary} while compiling {source}", hint=hint) from error
 
         # Feed d8 a single jar rather than every .class path: it keeps the
         # command line short (Windows caps it at ~32k characters) and lets d8

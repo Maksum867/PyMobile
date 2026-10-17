@@ -235,6 +235,28 @@ class Widget:
         """The widget this one is attached to, if any."""
         return self._parent
 
+    def detach(self) -> None:
+        """Remove this widget from its parent, so it can be attached again.
+
+        The explicit spelling of what :meth:`Screen.rebuild` does to a whole
+        tree. Needed when one widget is deliberately moved — a stateful
+        ``List`` or ``Form`` kept on ``self`` and returned from a second
+        ``build()`` that does not go through the owning screen's rebuild::
+
+            self.list.detach()          # it still remembers the old parent
+            return Column(self.list)    # …so it can be added here
+
+        Detaching a widget that has no parent is a no-op.
+        """
+        parent = self._parent
+        if parent is None:
+            return
+        remove = getattr(parent, "remove", None)
+        if callable(remove):
+            remove(self)
+        else:  # pragma: no cover - every framework container has remove()
+            self._parent = None
+
     @property
     def children(self) -> Sequence[Widget]:
         """Child widgets; leaf widgets return an empty tuple."""
@@ -548,7 +570,10 @@ class Container(Widget):
                 hint=(
                     "A widget can only live in one place. Build the tree from scratch in "
                     "Screen.build(); widgets stored on the screen are detached for you by "
-                    "Screen.refresh(). Use parent.remove(child) to detach one by hand."
+                    "Screen.rebuild() (and Screen.refresh()). Use parent.remove(child) "
+                    "or child.detach() to detach one by hand, and note that a second "
+                    "build() that is not a rebuild of the owning screen still shares "
+                    "the previous tree's parents."
                 ),
             )
         # A live add() is checked against the screen's current ids: the

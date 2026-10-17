@@ -15,15 +15,22 @@ because a mobile app usually needs a dozen strings, not a toolchain.
 
 **Keys are flat: a dot is part of the key, not a path.** A catalogue is one
 level of ``"key": "text"`` pairs, so ``t("stats.balance")`` needs a literal
-``"stats.balance"`` entry — a JSON file with sections::
+``"stats.balance"`` entry. A JSON file written with sections::
 
-    { "stats": { "balance": "Баланс" } }     # t("stats.balance") → "stats.balance"
+    { "stats": { "balance": "Баланс" } }
 
-would render the key itself. The one nested shape that *is* understood is a
-plural form map (``{"one": …, "few": …, "many": …}``) — see :meth:`Translations.get`.
-Loading such a file logs a warning naming the nested paths; pass
-``flatten=True`` (or call :func:`flatten_catalogue`) when you would rather
-keep sections in the source file.
+is expanded at load time — the section becomes the dotted key
+``"stats.balance"`` — so both spellings work. A plural form map
+(``{"one": …, "few": …, "many": …}``) is *not* expanded: it is one entry whose
+value is a form map, exactly as before. Pass ``flatten=False`` to read a file
+strictly flat (nested objects then stay unreachable until you flatten them
+yourself with :func:`flatten_catalogue`) — ``flatten=True`` remains available
+and means the same as the default.
+
+A missing key renders as a visible marker — ``⟦stats.unknown⟧`` — rather than
+as the bare key, so an untranslated string reads as a placeholder instead of a
+typo in the screen. Set ``translations.missing = "key"`` for the old behaviour,
+``"empty"`` to hide it, or a template such as ``"?? {key}"``.
 
 ::
 
@@ -340,11 +347,13 @@ class Translations:
     rather than blowing up mid-screen.
     """
 
-    def __init__(self, *, default_language: str = "en") -> None:
+    def __init__(self, *, default_language: str = "en", missing: str = "marker") -> None:
         self.default_language = normalise_language(default_language)
         self._catalogues: dict[str, dict[str, Any]] = {}
         self._language = self.default_language
         self._missing: set[str] = set()
+        self._missing_policy = "marker"
+        self.missing = missing
         #: Languages already told about a nested catalogue, so a reload does
         #: not repeat the same warning on every hot reload.
         self._warned_nested: set[str] = set()
@@ -386,16 +395,57 @@ class Translations:
         """Every language with a loaded catalogue."""
         return tuple(sorted(self._catalogues))
 
+    @property
+    def missing(self) -> str:
+        """What :meth:`get` renders for a key that is not in any catalogue.
+
+        ``"marker"`` (the default) wraps the key in ``⟦…⟧`` so an untranslated
+        string is visibly a placeholder; ``"key"`` is the pre-0.9.6 behaviour
+        of returning the bare key; ``"empty"`` returns an empty string; any
+        other string is a template containing ``{key}`` (for example
+        ``"to translate: {key}"``).
+        """
+        return self._missing_policy
+
+    @missing.setter
+    def missing(self, policy: str) -> None:
+        if not isinstance(policy, str) or not policy.strip():
+            raise ValueError(
+                "missing must be 'marker', 'key', 'empty' or a template containing {key}"
+            )
+        if policy not in ("marker", "key", "empty") and "{key}" not in policy:
+            raise ValueError(
+                f"unknown missing policy {policy!r}; use 'marker', 'key', 'empty' "
+                "or a template containing {key}"
+            )
+        self._missing_policy = policy
+
+    def _missing_text(self, key: str) -> str:
+        """Render a missing key according to :attr:`missing`."""
+        policy = self._missing_policy
+        if policy == "marker":
+            return f"⟦{key}⟧"
+        if policy == "empty":
+            return ""
+        if policy == "key":
+            return key
+        return policy.replace("{key}", key)
+
     def load(
-        self, messages: Mapping[str, Any], *, language: str, flatten: bool = False
+        self, messages: Mapping[str, Any], *, language: str, flatten: bool | None = None
     ) -> None:
         """Add or extend the catalogue for ``language``.
 
-        ``messages`` is a flat mapping — ``"stats.balance"`` is one key whose
-        name contains a dot. Pass ``flatten=True`` to accept a nested mapping
-        from a JSON file with sections; it is expanded with
-        :func:`flatten_catalogue` first (an unexpanded nested object is
-        warned about, because it silently makes every dotted key miss).
+        ``messages`` may be flat — ``"stats.balance"`` is one key whose name
+        contains a dot — or written with sections. Sections are expanded with
+        :func:`flatten_catalogue` automatically (once per language a note says
+        so), because a nested object is otherwise unreachable: the lookup is
+        flat, so ``t("stats.balance")`` would miss and every string in the
+        section would render as a marker.
+
+        ``flatten=False`` restores the strict pre-0.9.6 reading, where a nested
+        object is kept as-is and warned about at load time. ``flatten=True`` is
+        accepted for compatibility and means the same as the default.
         """
         # П-13: a Path/str passed where a mapping is expected used to surface
         # as ``AttributeError: 'PosixPath' object has no attribute 'items'``
@@ -413,11 +463,40 @@ class Translations:
         tag = normalise_language(language)
         if not tag:
             raise ValueError("language must not be empty")
-        if flatten:
-            messages = flatten_catalogue(messages)
-        else:
+        if flatten is False:
             self._warn_nested(tag, messages)
+        else:
+            nested = _nested_namespaces(messages)
+            if nested:
+                messages = flatten_catalogue(messages)
+                self._note_nested(tag, nested, messages)
         self._catalogues.setdefault(tag, {}).update(messages)
+
+    def _note_nested(self, tag: str, nested: list[str], flattened: Mapping[str, Any]) -> None:
+        """Say once per language that sections were read as dotted keys.
+
+        Silently expanding would hide the translation of the file's shape; the
+        note shows one example key so the mapping is obvious, and says how to
+        get the strict reading back.
+        """
+        if tag in self._warned_nested:
+            return
+        self._warned_nested.add(tag)
+        shown = ", ".join(repr(name) for name in nested[:3])
+        more = f" (+{len(nested) - 3} more)" if len(nested) > 3 else ""
+        example = next(
+            (key for key in flattened if "." in key), ""
+        )
+        example_note = f" (for example {example!r})" if example else ""
+        _log.warning(
+            "catalogue %r stores nested objects under %s%s; keys are flat, so the "
+            "sections were loaded as dotted keys%s. Pass flatten=False to read the "
+            "file strictly flat instead.",
+            tag,
+            shown,
+            more,
+            example_note,
+        )
 
     def _warn_nested(self, tag: str, messages: Mapping[str, Any]) -> None:
         """Point out nested JSON once per language.
@@ -443,7 +522,7 @@ class Translations:
         )
 
     def load_dict(
-        self, catalogues: Mapping[str, Mapping[str, Any]], *, flatten: bool = False
+        self, catalogues: Mapping[str, Mapping[str, Any]], *, flatten: bool | None = None
     ) -> tuple[str, ...]:
         """Load multiple language catalogues from a dict.
 
@@ -454,8 +533,9 @@ class Translations:
                 "uk": {"greeting": "Привіт"},
             })
 
-        Returns the normalised language tags that were loaded. ``flatten=True``
-        accepts nested sections, like :meth:`load`.
+        Returns the normalised language tags that were loaded. Nested sections
+        are expanded automatically; ``flatten=False`` keeps the strict flat
+        reading, like :meth:`load`.
         """
         if not isinstance(catalogues, Mapping):
             raise TypeError(
@@ -473,14 +553,14 @@ class Translations:
         return tuple(loaded)
 
     def load_file(
-        self, path: str | Path, *, language: str | None = None, flatten: bool = False
+        self, path: str | Path, *, language: str | None = None, flatten: bool | None = None
     ) -> str:
         """Load a JSON catalogue; the language defaults to the file's stem.
 
         ``locales/uk.json`` therefore needs no arguments at all. The JSON must
         be one level of ``"key": "text"`` pairs (a plural form map is the one
-        nested shape that is understood); ``flatten=True`` expands nested
-        sections into dotted keys instead of warning about them.
+        nested shape that is understood); nested sections are expanded into
+        dotted keys automatically, and ``flatten=False`` keeps them untouched.
         """
         file = Path(path)
         tag = normalise_language(language or file.stem)
@@ -503,7 +583,7 @@ class Translations:
         self.load(data, language=tag, flatten=flatten)
         return tag
 
-    def load_dir(self, directory: str | Path, *, flatten: bool = False) -> tuple[str, ...]:
+    def load_dir(self, directory: str | Path, *, flatten: bool | None = None) -> tuple[str, ...]:
         """Load every ``*.json`` catalogue in a directory."""
         root = Path(directory)
         loaded = [self.load_file(path, flatten=flatten) for path in sorted(root.glob("*.json"))]
@@ -582,12 +662,18 @@ class Translations:
                 # catalogue written as sections: the lookup is flat, so the
                 # dot has to be in the key itself.
                 hint = (
-                    " (a dot is part of the key — nested sections need flatten=True)"
+                    " (a dot is part of the key; nested sections are expanded at "
+                    "load time, so check the spelling and the section name)"
                     if "." in key
                     else ""
                 )
                 _log.warning("missing translation for %r in %r%s", key, self._language, hint)
-            entry = key if default is None else default
+                _log.info(
+                    "  shown as %r; set translations.missing = 'empty' to hide it "
+                    "or 'key' to render the bare key",
+                    self._missing_text(key),
+                )
+            entry = self._missing_text(key) if default is None else default
 
         if isinstance(entry, Mapping):
             entry = self._plural(entry, count, found_in)

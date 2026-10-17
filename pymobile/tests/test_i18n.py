@@ -52,8 +52,22 @@ class TestLookup:
         catalogue.use("uk")
         assert catalogue.get("bye") == "Bye"  # only present in English
 
-    def test_missing_key_returns_itself(self, catalogue: Translations) -> None:
+    def test_missing_key_is_marked(self, catalogue: Translations) -> None:
+        """A missing key is a visible placeholder, not something that reads
+        like a typo in the screen (it used to render as the bare key)."""
+        assert catalogue.get("totally.unknown") == "⟦totally.unknown⟧"
+
+    def test_missing_key_can_render_as_the_key_again(self, catalogue: Translations) -> None:
+        catalogue.missing = "key"
         assert catalogue.get("totally.unknown") == "totally.unknown"
+
+    def test_missing_policy_can_be_a_template_or_empty(self, catalogue: Translations) -> None:
+        catalogue.missing = "?? {key}"
+        assert catalogue.get("gone") == "?? gone"
+        catalogue.missing = "empty"
+        assert catalogue.get("gone") == ""
+        with pytest.raises(ValueError, match="missing"):
+            catalogue.missing = "nonsense"
 
     def test_missing_key_can_have_a_default(self, catalogue: Translations) -> None:
         assert catalogue.get("unknown", default="Fallback") == "Fallback"
@@ -352,15 +366,16 @@ class TestFullDateFormatting:
 
 
 class TestFlatKeys:
-    """A dot is part of the key: lookups never descend into nested JSON."""
+    """Keys are flat; nested JSON is expanded into dotted keys at load time."""
 
     def _catalogue(self) -> Translations:
         return Translations(default_language="en")
 
-    def test_nested_catalogue_is_reported_at_load_time(
+    def test_nested_catalogue_is_flattened_at_load_time(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """Silence is the bug: the screen renders bare keys, nothing raises."""
+        """Sections in a JSON file are readable as dotted keys, and the load
+        says what it did — silence used to mean every dotted key missed."""
         from pymobile.logging import configure
 
         configure("warning")
@@ -370,7 +385,10 @@ class TestFlatKeys:
         err = capsys.readouterr().err
         assert "nested objects" in err
         assert "'stats'" in err
-        assert "flatten=True" in err
+        assert "dotted keys" in err
+        catalogue.use("uk")
+        assert catalogue.get("stats.balance") == "Баланс"
+        assert catalogue.get("stats.income") == "Дохід"
 
     def test_the_same_catalogue_is_reported_once(
         self, capsys: pytest.CaptureFixture[str]
@@ -405,8 +423,8 @@ class TestFlatKeys:
         configure("warning")
         capsys.readouterr()
         catalogue = self._catalogue()
-        catalogue.load({"stats": {"balance": "Баланс"}}, language="en")
-        assert catalogue.get("stats.balance") == "stats.balance"
+        catalogue.load({"greeting": "Hi"}, language="en")
+        assert catalogue.get("stats.balance") == "⟦stats.balance⟧"
         err = capsys.readouterr().err
         assert "missing translation" in err
         assert "a dot is part of the key" in err
@@ -444,7 +462,7 @@ class TestFlatKeys:
         catalogue.use("uk")
         assert catalogue.get("stats.balance") == "Баланс"
 
-    def test_nested_file_without_flatten_keeps_the_old_behaviour(
+    def test_flatten_false_keeps_the_strict_flat_reading(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         from pymobile.logging import configure
@@ -454,9 +472,9 @@ class TestFlatKeys:
         path = tmp_path / "uk.json"
         path.write_text('{"stats": {"balance": "Баланс"}}', encoding="utf-8")
         catalogue = self._catalogue()
-        catalogue.load_file(path)
+        catalogue.load_file(path, flatten=False)
         catalogue.use("uk")
-        assert catalogue.get("stats.balance") == "stats.balance"
+        assert catalogue.get("stats.balance") == "⟦stats.balance⟧"
         assert "nested objects" in capsys.readouterr().err
 
     def test_flatten_is_exported_from_the_package(self) -> None:

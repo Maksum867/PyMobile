@@ -217,7 +217,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     _out.info(f"running {entry.name} in desktop preview mode")
     _execute(config, entry)
-    _navigate(args)
+    _navigate(args, config)
 
     from .core.bridge import get_bridge
     from .core.ui.preview import render_ascii
@@ -255,7 +255,7 @@ def _run_gui(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> in
     bridge = GuiBridge(verbose=False)
     set_bridge(bridge)
     _execute(config, entry)
-    _navigate(args)
+    _navigate(args, config)
     app = App.current()
     if app is None:
         raise PyMobileError(
@@ -285,7 +285,7 @@ def _run_web(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> in
     bridge = WebBridge(verbose=False)
     set_bridge(bridge)
     _execute(config, entry)
-    _navigate(args)
+    _navigate(args, config)
     app = App.current()
     if app is None:
         raise PyMobileError(
@@ -293,10 +293,18 @@ def _run_web(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> in
             hint="Make sure it calls App(...).run(SomeScreen()) before returning.",
         )
 
-    preview = WebPreview(app, host=args.host, port=args.port)
+    preview = WebPreview(
+        app,
+        host=args.host,
+        port=args.port,
+        token=getattr(args, "token", None),
+        require_token=not getattr(args, "no_token", False),
+        allow_origins=tuple(getattr(args, "allow_origin", None) or ()),
+        frame_options="" if getattr(args, "embed", False) else "DENY",
+    )
     bridge.attach(preview)
     _out.ok(f"{app.name} is running at {browser_url(args.host, preview.port, preview.token)}")
-    if preview.exposed:
+    if preview.exposed and preview.require_token:
         # Network exposure is opt-in, and the warning says what it means: the
         # port can read the app's state and press its widgets, so the session
         # token (already part of the printed URL) is mandatory.
@@ -305,6 +313,24 @@ def _run_web(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> in
             "It requires the session token in the URL above; treat that URL as a "
             "secret and use an SSH tunnel (--host 127.0.0.1) when you only need "
             "it locally."
+        )
+    elif preview.exposed:
+        _out.warn(
+            f"listening on {args.host} WITHOUT a session token (--no-token): anyone "
+            "who can reach this port can read the screen and press its widgets. "
+            "Only do this behind a proxy, tunnel or container network that "
+            "authenticates callers."
+        )
+    if preview.allow_origins:
+        note = (
+            " (every origin — the gateway must authenticate)"
+            if "*" in preview.allow_origins
+            else ""
+        )
+        _out.hint(
+            "cross-origin requests are allowed from: "
+            + ", ".join(preview.allow_origins)
+            + note
         )
     _out.info("press Ctrl+C to stop")
     with contextlib.suppress(KeyboardInterrupt):  # Ctrl+C is how you stop it
@@ -357,7 +383,7 @@ def _reload(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> Non
 
     try:
         _execute(config, entry)
-        _navigate(args)
+        _navigate(args, config)
     except Exception as error:
         _out.error(f"{type(error).__name__}: {error}")
         if isinstance(error, PyMobileError) and error.hint:
@@ -480,16 +506,23 @@ def _screen_arguments(
     return positional, keywords
 
 
-def _navigate(args: argparse.Namespace) -> None:
+def _navigate(args: argparse.Namespace, config: ProjectConfig | None = None) -> None:
     """Take the running app to the screen ``--screen`` / ``--navigate`` ask for.
 
     The first screen is what ``App.run()`` shows; ``--screen ResultScreen`` pushes
     another one on top of it and ``--navigate "Menu.start, Quiz.next"`` presses its
     way there like a user, so a screen deep in the app can be previewed without
-    editing ``main.py``. Both may be combined (the screen first, then the route).
+    editing ``main.py``. ``--tab Stats`` (or a ``@Stats`` step) picks a bottom-
+    navigation tab, and both route forms may be combined with ``--screen``.
+
+    A screen name is looked up among the classes the entry point imported.
+    When it is not there, every project module that defines a ``…Screen`` is
+    imported and the lookup is retried — a screen living in a module the entry
+    point never touched (a lazy import is the usual reason) is still found.
     """
     screen = getattr(args, "screen", None)
     route = getattr(args, "navigate", None)
+    tab = getattr(args, "tab", None)
     given = [
         flag
         for flag, present in (
@@ -503,11 +536,11 @@ def _navigate(args: argparse.Namespace) -> None:
         raise PyMobileError(
             f"{' and '.join(given)} only {verb} sense with --screen", hint="Add --screen NAME."
         )
-    if not screen and not route:
+    if not screen and not route and not tab:
         return
 
     from .core.app import App
-    from .core.driver import Driver
+    from .core.driver import Driver, discover_screens
 
     app = App.current()
     if app is None:
@@ -520,10 +553,32 @@ def _navigate(args: argparse.Namespace) -> None:
         positional, keywords = _screen_arguments(
             getattr(args, "screen_args", None), getattr(args, "screen_set", None)
         )
-        opened = driver.open(screen, *positional, **keywords)
+        try:
+            opened = driver.open(screen, *positional, **keywords)
+        except PyMobileError as error:
+            # "no screen called 'ResultScreen'": the class exists on disk but
+            # its module was never imported (a lazy import, usually). Import the
+            # project's screen modules once and retry before giving up.
+            if config is None or "no screen called" not in str(error):
+                raise
+            found = discover_screens(
+                [config.source_path], exclude=[config.entrypoint_path]
+            )
+            if not found:
+                raise
+            _out.info(
+                "imported project modules to find screens: "
+                + ", ".join(sorted(cls.__name__ for cls in found)[:6])
+            )
+            opened = driver.open(screen, *positional, **keywords)
         _out.info(f"opened {type(opened).__name__}")
-    if route:
-        for step, landed in zip(route_steps(route), driver.navigate(route), strict=True):
+    steps = route
+    if tab:
+        # ``--tab Stats`` is the short spelling of the ``@Stats`` route step.
+        tab_step = f"@{tab}"
+        steps = tab_step if not steps else f"{tab_step}, {steps}"
+    if steps:
+        for step, landed in zip(route_steps(steps), driver.navigate(steps), strict=True):
             _out.info(f"{step} → {type(landed).__name__}")
 
 
@@ -615,7 +670,7 @@ def cmd_preview(args: argparse.Namespace) -> int:
         app.set_theme(requested_theme)
     display_title = app.name if app is not None else config.name
 
-    _navigate(args)
+    _navigate(args, config)
 
     tree = bridge.last_tree
     if tree is None:
@@ -672,7 +727,7 @@ def cmd_check_ui(args: argparse.Namespace) -> int:
     previous_app = App.current()
     try:
         _execute(config, entry)
-        _navigate(args)
+        _navigate(args, config)
         tree = bridge.last_tree
         if tree is None:
             raise PyMobileError(
@@ -1232,7 +1287,16 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="STEPS",
         help=(
             'press your way to a screen: "Menu.start, Quiz.next" takes the step '
-            "[Screen.]widget in order; widget=value types a value, <back> goes back"
+            "[Screen.]widget in order; widget=value types a value, <back> goes back, "
+            "@Stats picks a bottom-navigation tab"
+        ),
+    )
+    where.add_argument(
+        "--tab",
+        metavar="NAME",
+        help=(
+            "pick this bottom-navigation tab after opening the screen, by label or "
+            "value (the short spelling of the route step '@NAME')"
         ),
     )
 
@@ -1325,6 +1389,41 @@ def build_parser() -> argparse.ArgumentParser:
             "interface for --web (default: 127.0.0.1, this machine only). Any "
             "other value exposes the preview to the network and requires its "
             "session token"
+        ),
+    )
+    run.add_argument(
+        "--token",
+        metavar="VALUE",
+        help=(
+            "with --web: use this session token instead of a generated one — the "
+            "value a proxy or an embedding page already knows"
+        ),
+    )
+    run.add_argument(
+        "--no-token",
+        action="store_true",
+        help=(
+            "with --web: serve without a session token. Anyone who can reach the "
+            "port can drive the app — only behind a proxy that authenticates callers"
+        ),
+    )
+    run.add_argument(
+        "--allow-origin",
+        metavar="ORIGIN",
+        action="append",
+        default=[],
+        help=(
+            "with --web: accept requests whose Origin is this URL (repeatable; "
+            "'*' accepts every origin). Needed when a portal embeds the preview "
+            "or a proxy rewrites the origin"
+        ),
+    )
+    run.add_argument(
+        "--embed",
+        action="store_true",
+        help=(
+            "with --web: omit X-Frame-Options so the page can live in an iframe "
+            "(combine with --allow-origin for a portal on another host)"
         ),
     )
     run.set_defaults(func=cmd_run)

@@ -66,6 +66,17 @@ class BottomNavigation(Widget):
     def value(self, value: str) -> None:
         self.select(value)
 
+    @property
+    def labels(self) -> tuple[str, ...]:
+        """The visible label of every tab, in ``options`` order.
+
+        ``options`` are the stable values an application stores; ``labels`` are
+        what the user (and the driver) sees. The two differ whenever a tab is
+        declared as a ``(value, label)`` pair — usually because the label is
+        translated.
+        """
+        return tuple(self._labels)
+
     def select(self, value: str) -> None:
         """Choose ``value``, notifying listeners only on a real change."""
         if value not in self.options:

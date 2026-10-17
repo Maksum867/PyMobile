@@ -25,6 +25,7 @@ from ...log import get_logger
 from .contract import text_value
 from .extras_preview import build_extra_gui, patch_extra_gui
 from .flow import flow_lines, line_offset
+from .registry import preview_renderer
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import tkinter as tk
@@ -367,6 +368,25 @@ class GuiPreview:
         widget_id = str(node.get("id", ""))
         background = self._background(style)
         pad = 2
+
+        custom = preview_renderer(kind, "gui")
+        if custom is not None:
+            try:
+                custom(self, parent, node, background)
+            except Exception as error:  # pragma: no cover - depends on user code
+                _log.warning(
+                    "the gui preview renderer for %r failed: %s: %s",
+                    kind,
+                    type(error).__name__,
+                    error,
+                )
+                tk.Label(
+                    parent,
+                    text=f"<{kind}: {type(error).__name__}>",
+                    fg=_PALETTE["muted"],
+                    bg=background,
+                ).pack(anchor="w")
+            return
 
         if kind == "ScrollView":
             if props.get("horizontal"):
@@ -934,6 +954,25 @@ class GuiPreview:
 
     def _background(self, style: dict[str, Any]) -> str:
         return self._colour(style.get("background"), _PALETTE["bg"])
+
+    @property
+    def tk(self) -> Any:
+        """The tkinter module, for project-registered preview renderers.
+
+        A custom widget's ``gui`` renderer receives the preview, the parent
+        frame and the node; importing tkinter itself would tie application
+        code (which also runs on the phone) to a desktop-only dependency.
+        """
+        return self._tk
+
+    def dispatch(self, widget_id: str, kind: str, value: str) -> None:
+        """Send an event from a project-registered preview renderer.
+
+        The counterpart of ``on_press=…`` on a built-in widget: a custom Tk
+        control calls this to run the application handler exactly as a tap
+        on the phone would.
+        """
+        self._dispatch(widget_id, kind, value)
 
     def _dispatch(self, widget_id: str, kind: str, value: str) -> None:
         """Feed an interaction back into the application."""

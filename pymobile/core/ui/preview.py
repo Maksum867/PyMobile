@@ -23,6 +23,7 @@ from ...log import get_logger
 from .contract import text_value
 from .extras_preview import extra_ascii
 from .flow import flow_lines, line_offset
+from .registry import preview_renderer
 
 __all__ = [
     "render_ascii",
@@ -302,12 +303,49 @@ def _snackbar_lines(tree: dict[str, Any]) -> list[str]:
     return [f"▌ {data['message']}{action}"]
 
 
+def _custom_lines(draw: Any, node: dict[str, Any]) -> list[str]:
+    """Run an application-registered ASCII renderer for a custom widget type.
+
+    The function is a developer's code, so a mistake in it must not take the
+    whole preview down: the error is logged and a placeholder that names it is
+    drawn instead — the same trade the framework makes for event handlers.
+    """
+    try:
+        drawn = draw(node)
+    except Exception as error:  # pragma: no cover - depends on user code
+        _log.warning(
+            "the ascii preview renderer for %r failed: %s: %s",
+            node.get("type"),
+            type(error).__name__,
+            error,
+        )
+        return [f"<{node.get('type')}: {type(error).__name__}>"]
+    if isinstance(drawn, str):
+        return drawn.splitlines() or [""]
+    if isinstance(drawn, (list, tuple)) and all(isinstance(line, str) for line in drawn):
+        return list(drawn) or [""]
+    raise TypeError(
+        "an ascii preview renderer must return a string or a list of strings, "
+        f"got {type(drawn).__name__}"
+    )
+
+
 def _node_lines(node: dict[str, Any], *, show_ids: bool = False) -> list[str]:
     if not node.get("visible", True):
         return []
 
     node_type = node.get("type", "")
     children = node.get("children", ())
+
+    # A project can teach this preview to draw its own widget type; without a
+    # registered function the tree falls through to the ``<BoxBadge>``
+    # placeholder at the bottom of ``_leaf_lines``.
+    custom = preview_renderer(node_type, "ascii")
+    if custom is not None:
+        drawn = _custom_lines(custom, node)
+        if show_ids and drawn:
+            return [f"({node.get('id', '?')}) {drawn[0]}", *drawn[1:]]
+        return drawn
 
     if node_type == "Row" or (
         node_type == "ScrollView" and node.get("props", {}).get("horizontal")

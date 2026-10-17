@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import secrets
 import threading
+from collections.abc import Sequence
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any, Protocol
@@ -23,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from ...log import get_logger
 from .contract import text_value
 from .extras_preview import EXTRA_SCRIPT, render_extra_html
+from .registry import preview_renderer
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..app import App
@@ -343,6 +345,30 @@ def _render_html_node(node: dict[str, Any]) -> str:
     widget_id = escape(str(node.get("id", "")), quote=True)
     disabled = "" if node.get("enabled", True) else " disabled"
     children = node.get("children", ())
+
+    # A project can teach the browser preview how to draw its own widget type.
+    custom = preview_renderer(kind, "web")
+    if custom is not None:
+        try:
+            markup = custom(node)
+        except Exception as error:  # pragma: no cover - depends on user code
+            _log.warning(
+                "the web preview renderer for %r failed: %s: %s",
+                kind,
+                type(error).__name__,
+                error,
+            )
+            return (
+                f'<div class="muted">&lt;{escape(kind)}: '
+                f"{escape(type(error).__name__)}&gt;</div>"
+            )
+        if not isinstance(markup, str):
+            raise TypeError(
+                "a web preview renderer must return an HTML string, "
+                f"got {type(markup).__name__}"
+            )
+        return markup
+
     inner = "".join(render_html(child) for child in children)
 
     if kind == "List":
@@ -814,16 +840,42 @@ class WebPreview:
         host: str = "127.0.0.1",
         port: int = 8765,
         token: str | None = None,
+        require_token: bool = True,
+        allow_origins: Sequence[str] = (),
+        frame_options: str = "DENY",
     ) -> None:
         self.app = app
         self.host = host
         self.port = port
         self.exposed = not _is_loopback(host)
+        #: Whether every request must carry the session token. On by default;
+        #: ``False`` is the explicit opt-out for a preview already fenced off by
+        #: something else (a container network, an authenticating proxy).
+        self.require_token = bool(require_token)
+        #: Browser origins allowed to drive the preview. Empty keeps the strict
+        #: same-host check; ``("*",)`` trusts every origin — only sane when the
+        #: preview sits behind an authenticating gateway.
+        self.allow_origins = tuple(
+            origin.strip() for origin in allow_origins if str(origin).strip()
+        )
+        #: Value of the ``X-Frame-Options`` header. ``""`` omits it, which is
+        #: what a preview embedded in a portal's iframe needs.
+        self.frame_options = str(frame_options or "")
         #: Session token. Generated whenever the preview leaves loopback; a
         #: loopback preview does not need one and stays click-to-open.
-        self.token = token or (secrets.token_urlsafe(18) if self.exposed else "")
-        if self.token and token is None:
-            _log.info("preview token generated for the exposed preview")
+        if not self.require_token:
+            self.token = ""
+            if self.exposed:
+                _log.warning(
+                    "the exposed preview was started without a session token: anyone "
+                    "who can reach %s:%s can read the screen and press its widgets",
+                    host,
+                    port,
+                )
+        else:
+            self.token = token or (secrets.token_urlsafe(18) if self.exposed else "")
+            if self.token and token is None:
+                _log.info("preview token generated for the exposed preview")
         self._tree: dict[str, Any] = {}
         self._status = ""
         self._version = 0
@@ -959,40 +1011,69 @@ class WebPreview:
         drive this app through the user's browser.
         """
         if not self.token:
-            return True
-        origin = headers.get("Origin")
-        if origin:
-            # П-07: accept both http:// and https:// origins. When a TLS-
-            # terminating proxy (Cloudflare tunnel, SSH port-forward, nginx,
-            # corporate portal) sits in front it rewrites the scheme; the
-            # browser still sends Origin with the public https:// URL. The
-            # host header (or X-Forwarded-Host when set) must still match.
-            from urllib.parse import urlsplit
-
-            try:
-                origin_parts = urlsplit(origin.rstrip("/"))
-                origin_host = origin_parts.netloc
-                origin_scheme = origin_parts.scheme
-            except ValueError:
-                _log.debug("refusing a request from malformed origin %s", origin)
-                return False
-            if origin_scheme not in ("http", "https"):
-                _log.debug("refusing a request from origin with scheme %s", origin_scheme)
-                return False
-            host = (
-                headers.get("X-Forwarded-Host")
-                or headers.get("X-Forwarded-Server")
-                or headers.get("Host", "")
-            ).split(",")[0].strip()
-            # Host header sometimes carries :port — compare host and port
-            # against the origin host which may include a port.
-            if origin_host != host:
-                _log.debug("refusing a request from origin %s (host %s)", origin, host)
-                return False
+            return self._origin_allowed(headers) and path in ("/", "/state", "/event")
+        if not self._origin_allowed(headers):
+            return False
         supplied = (query.get("t") or [""])[0] or headers.get("X-PMB-Token", "")
         if not secrets.compare_digest(supplied, self.token):
             return False
         return path in ("/", "/state", "/event")
+
+    def _origin_allowed(self, headers: Any) -> bool:
+        """Whether the request's ``Origin`` may drive this preview.
+
+        A page on another site must not be able to act through the user's
+        browser, so the origin's host has to match the one the request was
+        addressed to. Behind a TLS-terminating proxy the scheme is rewritten
+        (https in the browser, http here), so both are accepted — and
+        ``X-Forwarded-Host`` is trusted when the proxy sets it (П-07).
+
+        ``allow_origins`` is the escape hatch for setups where that check is
+        wrong by construction: a portal embedding the preview as an iframe from
+        its own hostname, or a proxy reachable under a public URL the preview
+        never learns. It names the exact origins, or ``"*"`` for "the gateway in
+        front decides who gets in".
+        """
+        origin = headers.get("Origin")
+        if not origin:
+            return True
+        if self.allow_origins:
+            if "*" in self.allow_origins:
+                return True
+            normalised = origin.rstrip("/").lower()
+            if normalised in {allowed.rstrip("/").lower() for allowed in self.allow_origins}:
+                return True
+            # A sandboxed iframe sends the literal origin "null"; listing
+            # "null" is how such a page opts in.
+            _log.debug(
+                "refusing a request from origin %s (allowed: %s)",
+                origin,
+                ", ".join(self.allow_origins),
+            )
+            return False
+        from urllib.parse import urlsplit
+
+        try:
+            origin_parts = urlsplit(origin.rstrip("/"))
+            origin_host = origin_parts.netloc
+            origin_scheme = origin_parts.scheme
+        except ValueError:
+            _log.debug("refusing a request from malformed origin %s", origin)
+            return False
+        if origin_scheme not in ("http", "https"):
+            _log.debug("refusing a request from origin with scheme %s", origin_scheme)
+            return False
+        host = (
+            headers.get("X-Forwarded-Host")
+            or headers.get("X-Forwarded-Server")
+            or headers.get("Host", "")
+        ).split(",")[0].strip()
+        # Host header sometimes carries :port — compare host and port
+        # against the origin host which may include a port.
+        if origin_host != host:
+            _log.debug("refusing a request from origin %s (host %s)", origin, host)
+            return False
+        return True
 
     def _build_server(self) -> ThreadingHTTPServer:
         preview = self
@@ -1014,8 +1095,11 @@ class WebPreview:
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
-                # A preview must never be embedded by another page.
-                self.send_header("X-Frame-Options", "DENY")
+                # A preview must never be embedded by another page — unless the
+                # application explicitly asked off (``--embed``), which is what
+                # a company portal showing the preview in a frame needs.
+                if preview.frame_options:
+                    self.send_header("X-Frame-Options", preview.frame_options)
                 for name, value in (extra or {}).items():
                     self.send_header(name, value)
                 self.end_headers()
@@ -1123,12 +1207,32 @@ class WebPreview:
         return server
 
 
-def serve(app: App, *, host: str = "127.0.0.1", port: int = 8765) -> WebPreview:
+def serve(
+    app: App,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    token: str | None = None,
+    require_token: bool = True,
+    allow_origins: Sequence[str] = (),
+    frame_options: str = "DENY",
+) -> WebPreview:
     """Serve ``app`` in a browser, blocking until interrupted.
 
     Binds loopback by default; pass ``host="0.0.0.0"`` explicitly to serve the
-    LAN (the preview then requires its session token).
+    LAN (the preview then requires its session token). ``require_token=False``,
+    ``allow_origins`` and ``frame_options=""`` are the explicit opt-outs for a
+    preview behind a proxy or embedded in a portal — each one weakens a
+    protection, so none of them is on by default.
     """
-    preview = WebPreview(app, host=host, port=port)
+    preview = WebPreview(
+        app,
+        host=host,
+        port=port,
+        token=token,
+        require_token=require_token,
+        allow_origins=allow_origins,
+        frame_options=frame_options,
+    )
     preview.serve_forever()
     return preview

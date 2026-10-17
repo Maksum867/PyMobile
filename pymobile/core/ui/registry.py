@@ -16,7 +16,7 @@ renderer. Declare a type you implemented in Java with
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,6 +27,10 @@ __all__ = [
     "supported_by",
     "register_widget_type",
     "unregister_widget_type",
+    "register_preview_renderer",
+    "unregister_preview_renderer",
+    "preview_renderer",
+    "preview_renderers",
     "declared_types",
     "known_types",
     "is_known",
@@ -138,6 +142,13 @@ def register_widget_type(
         register_widget_type("BarChart")           # case "BarChart": in ViewBuilder.java
         register_widget_type("Sparkline", android=False, web=True)   # preview-only
 
+    This function only *declares* capabilities. To teach a desktop preview how
+    to draw the widget, register a function as well — otherwise the ASCII,
+    browser and Tk previews fall back to ``<BarChart>``::
+
+        register_preview_renderer("BarChart", "ascii", draw_ascii)
+        register_preview_renderer("BarChart", "web", draw_html)
+
     Returns the stored :class:`WidgetCapability`. Built-in names are refused —
     their capabilities ship with the framework — and re-declaring a custom name
     simply replaces the previous declaration.
@@ -206,3 +217,115 @@ def unknown_types(render_tree: Mapping[str, Any], *, renderer: str | None = None
         if isinstance(children, list):
             stack.extend(children)
     return frozenset(names)
+
+
+# ---------------------------------------------------------------------------
+# Preview renderers for custom widget types
+# ---------------------------------------------------------------------------
+#: Renderers a preview function can be registered for.
+PREVIEW_RENDERERS = ("ascii", "web", "gui")
+
+#: ``(type_name, renderer)`` → drawing function. Kept apart from the capability
+#: declarations: declaring says "a real renderer exists somewhere"; registering
+#: a preview function says "here is how the desktop draws it".
+_preview: dict[tuple[str, str], Callable[..., Any]] = {}
+
+
+def register_preview_renderer(
+    type_name: str,
+    renderer: str,
+    draw: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Teach a desktop preview how to draw the custom widget ``type_name``.
+
+    Without this, a custom widget — one the phone draws with your Java renderer
+    — appears in the ASCII, browser and Tk previews as the placeholder
+    ``<BoxBadge>``. Registering removes the branching from application code::
+
+        from pymobile import register_widget_type, register_preview_renderer
+
+        register_widget_type("BoxBadge")
+
+        def badge_ascii(node):
+            return [f"[{node['props'].get('text', '')}]"]
+
+        def badge_html(node):
+            text = escape(str(node["props"].get("text", "")))
+            return f'<span class="badge">{text}</span>'
+
+        def badge_tk(preview, parent, node):
+            import tkinter as tk
+            tk.Label(parent, text=node["props"].get("text", "")).pack()
+
+        register_preview_renderer("BoxBadge", "ascii", badge_ascii)
+        register_preview_renderer("BoxBadge", "web", badge_html)
+        register_preview_renderer("BoxBadge", "gui", badge_tk)
+
+    ``draw`` receives the serialised node (the same mapping
+    :meth:`Widget.to_dict` produces: ``type``, ``id``, ``props``, ``style``,
+    ``children``) and must return:
+
+    * ``"ascii"`` — the lines of the text picture (a string is split on
+      newlines). ``render_ascii(child)`` renders children of a container.
+    * ``"web"`` — HTML markup; ``render_html(child)`` renders children.
+    * ``"gui"`` — nothing. It is called as ``draw(preview, parent, node,
+      background)`` where ``preview`` is the
+      :class:`~pymobile.core.ui.gui.GuiPreview`, ``parent`` the Tk container to
+      fill and ``background`` the inherited colour. ``preview.tk`` is the
+      tkinter module and ``preview.dispatch(widget_id, kind, value)`` sends an
+      event, exactly like a built-in control does.
+
+    Registering for a built-in type is allowed — that is how a project can give
+    ``ProgressBar`` its own look in a preview — but it only affects previews;
+    the phone keeps drawing its native view.
+    """
+    if not isinstance(type_name, str) or not type_name.strip():
+        raise ValueError("type_name must be a non-empty string")
+    if renderer not in PREVIEW_RENDERERS:
+        raise ValueError(
+            f"unknown preview renderer {renderer!r}; expected one of "
+            f"{', '.join(PREVIEW_RENDERERS)}"
+        )
+    if not callable(draw):
+        raise TypeError(
+            f"draw must be callable, got {type(draw).__name__!r}; pass the "
+            f"function that draws {type_name!r} in the {renderer} preview"
+        )
+    _preview[(type_name, renderer)] = draw
+    return draw
+
+
+def unregister_preview_renderer(type_name: str, renderer: str | None = None) -> int:
+    """Forget preview renderer(s) for ``type_name``; returns how many were removed."""
+    if renderer is not None:
+        if renderer not in PREVIEW_RENDERERS:
+            raise ValueError(
+                f"unknown preview renderer {renderer!r}; expected one of "
+                f"{', '.join(PREVIEW_RENDERERS)}"
+            )
+        return 1 if _preview.pop((type_name, renderer), None) is not None else 0
+    removed = [key for key in _preview if key[0] == type_name]
+    for key in removed:
+        del _preview[key]
+    return len(removed)
+
+
+def preview_renderer(type_name: str, renderer: str) -> Callable[..., Any] | None:
+    """The function registered for ``type_name`` in ``renderer``, or ``None``."""
+    if renderer not in PREVIEW_RENDERERS:
+        raise ValueError(
+            f"unknown preview renderer {renderer!r}; expected one of "
+            f"{', '.join(PREVIEW_RENDERERS)}"
+        )
+    return _preview.get((type_name, renderer))
+
+
+def preview_renderers() -> Mapping[str, tuple[str, ...]]:
+    """Every custom type with a preview function, and the renderers it covers."""
+    listed: dict[str, list[str]] = {}
+    for type_name, renderer in _preview:
+        listed.setdefault(type_name, []).append(renderer)
+    return {
+        type_name: tuple(sorted(renderer_list))
+        for type_name, renderer_list in sorted(listed.items())
+    }

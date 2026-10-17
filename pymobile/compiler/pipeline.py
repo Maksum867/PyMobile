@@ -17,6 +17,7 @@ import os
 import py_compile
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -50,6 +51,62 @@ _log = get_logger("compiler")
 
 #: Python version of the interpreter embedded in native APKs.
 DEVICE_PYTHON = (3, 14)
+
+#: Points at an interpreter of :data:`DEVICE_PYTHON` when the host runs another
+#: version: ``optimize = true`` compiles bytecode with it instead of warning.
+BYTECODE_PYTHON_ENV = "PYMOBILE_PYTHON"
+
+#: Program run by that interpreter to write one ``.pyc``. ``-c`` keeps the
+#: invocation independent of the interpreter's installation and of the host's
+#: ``py_compile`` version.
+_BYTECODE_SCRIPT = (
+    "import py_compile, sys\n"
+    "py_compile.compile(sys.argv[1], cfile=sys.argv[2], dfile=sys.argv[3],\n"
+    "                   doraise=True, optimize=int(sys.argv[4]),\n"
+    "                   invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)\n"
+)
+
+
+def _interpreter_version(interpreter: str) -> tuple[int, int] | None:
+    """The ``(major, minor)`` an interpreter reports, or ``None``."""
+    try:
+        completed = subprocess.run(
+            [interpreter, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    parts = completed.stdout.strip().split(".")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        return None
+    return int(parts[0]), int(parts[1])
+
+
+def find_bytecode_interpreter() -> str | None:
+    """An interpreter matching :data:`DEVICE_PYTHON`, or ``None``.
+
+    ``optimize = true`` used to work only when the build itself ran on the same
+    Python version as the device — the ``.pyc`` format is version-locked, and
+    ``py_compile`` writes for the running interpreter. A host with the right
+    interpreter installed (``python3.14``) or pointed at by
+    ``PYMOBILE_PYTHON`` can now produce the bytecode for it.
+    """
+    candidates: list[str] = []
+    override = os.environ.get(BYTECODE_PYTHON_ENV, "").strip()
+    if override:
+        candidates.append(override)
+    candidates.append(f"python{DEVICE_PYTHON[0]}.{DEVICE_PYTHON[1]}")
+    for candidate in candidates:
+        resolved = shutil.which(candidate) or (candidate if Path(candidate).is_file() else None)
+        if resolved is not None and _interpreter_version(resolved) == DEVICE_PYTHON:
+            _log.debug("using %s for device bytecode", resolved)
+            return resolved
+    return None
 
 #: Asset extensions packaged without any configuration. Kept in sync with
 #: ``collector.collect_sources``; ``asset_suffixes`` in pymobile.toml adds to it.
@@ -461,6 +518,10 @@ class BuildPipeline:
         allowed_suffixes = DEFAULT_ASSET_SUFFIXES | {
             str(suffix).lower() for suffix in self.config.asset_suffixes
         }
+        # java/ is a build input, not an asset: its sources are compiled into
+        # classes.dex by the native backend, so reporting them as "not
+        # packaged" was a false alarm on every project with a custom renderer.
+        java_overlay = self.config.root / "java"
         ignored: dict[str, int] = {}
         secret_packaged: list[str] = []
         for path in self.config.source_path.rglob("*"):
@@ -471,6 +532,13 @@ class BuildPipeline:
                 continue
             if _is_excluded(relative, self.config.exclude):
                 continue
+            if path.suffix.lower() == ".java":
+                try:
+                    path.relative_to(java_overlay)
+                except ValueError:
+                    pass
+                else:
+                    continue  # a project renderer: compiled, not shipped as data
             suffix = path.suffix.lower()
             if suffix and suffix not in allowed_suffixes:
                 ignored[suffix] = ignored.get(suffix, 0) + 1
@@ -555,34 +623,67 @@ class BuildPipeline:
             entries.append((relative.as_posix(), target))
 
         # A native build runs CPython 3.14 on the device. .pyc files are
-        # version-locked, so bytecode can only be produced by a 3.14 host;
-        # anywhere else the option is ignored — loudly, not silently.
+        # version-locked, so bytecode must be produced for that version: by the
+        # running interpreter when it matches, or by a 3.14 interpreter found
+        # on the host (PYMOBILE_PYTHON). Only when neither exists is the
+        # option ignored — loudly, not silently.
         if not self.config.optimize:
             return entries
+        interpreter: str | None = None
         if self.native and sys.version_info[:2] != DEVICE_PYTHON:
-            self.warnings.append(
-                "optimize = true was ignored: the device runs Python "
-                f"{DEVICE_PYTHON[0]}.{DEVICE_PYTHON[1]} and bytecode is version-specific, "
-                f"but this build runs on {sys.version_info[0]}.{sys.version_info[1]}; "
-                "shipping .py sources instead"
-            )
-            return entries
+            interpreter = find_bytecode_interpreter()
+            if interpreter is None:
+                wanted = f"{DEVICE_PYTHON[0]}.{DEVICE_PYTHON[1]}"
+                self.warnings.append(
+                    "optimize = true was ignored: the device runs Python "
+                    f"{wanted} and bytecode is version-specific, but this build runs "
+                    f"on {sys.version_info[0]}.{sys.version_info[1]} and no Python "
+                    f"{wanted} interpreter was found; shipping .py sources instead. "
+                    f"Install python{wanted} or set {BYTECODE_PYTHON_ENV} to its path."
+                )
+                return entries
 
         optimize_level = 2 if self.config.strip_debug else 1
         for name, path in entries:
             if path.suffix != ".py":
                 continue
-            try:
-                py_compile.compile(
+            if interpreter is None:
+                try:
+                    py_compile.compile(
+                        str(path),
+                        cfile=str(path.with_suffix(".pyc")),
+                        dfile=f"app/{name}",
+                        doraise=True,
+                        optimize=optimize_level,
+                        invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+                    )
+                except py_compile.PyCompileError as exc:
+                    _log.debug("byte-compilation of %s failed: %s", name, exc)
+                continue
+            # A .pyc is version-locked: hand the source to the matching
+            # interpreter, with the same relative ``dfile`` the local path uses
+            # so the bytecode stays reproducible and path-free.
+            completed = subprocess.run(
+                [
+                    interpreter,
+                    "-c",
+                    _BYTECODE_SCRIPT,
                     str(path),
-                    cfile=str(path.with_suffix(".pyc")),
-                    dfile=f"app/{name}",
-                    doraise=True,
-                    optimize=optimize_level,
-                    invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+                    str(path.with_suffix(".pyc")),
+                    f"app/{name}",
+                    str(optimize_level),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if completed.returncode != 0:
+                _log.debug(
+                    "byte-compilation of %s with %s failed: %s",
+                    name,
+                    interpreter,
+                    (completed.stderr or completed.stdout).strip()[:400],
                 )
-            except py_compile.PyCompileError as exc:
-                _log.debug("byte-compilation of %s failed: %s", name, exc)
 
         compiled: list[tuple[str, Path]] = []
         for name, path in entries:

@@ -49,12 +49,20 @@ class ModelStore(Generic[T]):
     or a store created by a newer app raises :class:`ModelStoreError`; data is
     never silently reset.
 
+    ``get()``/``all()`` return copies, never live objects: a record lives in
+    the storage as JSON, and a model is decoded from it on every read. Change a
+    copy and write it back with :meth:`put`/:meth:`update`, or use
+    :meth:`edit` to change fields in one call.
+
     Example::
 
         store = ModelStore(app.storage, Plant, key="plants", schema_version=1)
         store.put(Plant(id="fern", name="Fern"))
         plants = store.all()
         fern = store.get("fern")
+        fern.watered = 2
+        store.update(fern)             # persisted; the previous line changed a copy
+        store.edit("fern", name="Boston fern")
         store.delete("fern")
     """
 
@@ -306,7 +314,17 @@ class ModelStore(Generic[T]):
         return None
 
     def put(self, model: T) -> T:
-        """Insert or replace a model, identified by ``id_field``."""
+        """Insert or replace a model, identified by ``id_field``.
+
+        ``all()`` and ``get()`` return **detached snapshots**: the dataclass is
+        rebuilt from the stored JSON every time, so mutating it changes nothing
+        until it is handed back to :meth:`put` (or :meth:`update`, which is the
+        same call under the name the situation suggests)::
+
+            card = store.get("c1")      # a copy — card.box == 1
+            card.box += 1               # the store still says 1
+            store.put(card)             # now it says 2
+        """
         record = self._encode(model)
         identifier = self._identifier(record, context=f"{self._model_type.__name__} record")
         with self._storage.transaction() as storage:
@@ -323,6 +341,54 @@ class ModelStore(Generic[T]):
                 {"schema_version": self._schema_version, "records": records},
             )
         return model
+
+    def update(self, model: T) -> T:
+        """Save a model that was loaded, changed and is now ready to persist.
+
+        An alias of :meth:`put` — the snapshot :meth:`get` returned has to be
+        written back explicitly, and a call named ``update`` says that out
+        loud at the place where it matters.
+        """
+        return self.put(model)
+
+    def edit(self, identifier: ModelId, /, **changes: Any) -> T:
+        """Load a model, apply ``changes``, persist and return it.
+
+        The one-liner for the common "change one field" case, and the answer to
+        a snapshot that looked live::
+
+            store.edit("c1", box=2)     # stored and returned
+
+        Raises :class:`~pymobile.errors.ModelStoreError` when the id is absent,
+        a field does not exist on the model, or the model is frozen (then build
+        a replacement with ``dataclasses.replace`` and pass it to
+        :meth:`put`).
+        """
+        model = self.get(identifier)
+        if model is None:
+            raise ModelStoreError(
+                f"no {self._model_type.__name__} with {self._id_field} {identifier!r} "
+                f"in model store {self._key!r}",
+                hint="Read it with get() first, or insert it with put().",
+            )
+        for name, value in changes.items():
+            if not hasattr(model, name):
+                known = ", ".join(sorted(vars(model))) or "none"
+                raise ModelStoreError(
+                    f"{self._model_type.__name__} has no field {name!r} "
+                    f"(fields: {known})"
+                )
+            try:
+                setattr(model, name, value)
+            except Exception as exc:
+                raise ModelStoreError(
+                    f"could not set {name!r} on {self._model_type.__name__}: {exc}",
+                    hint=(
+                        "Frozen dataclasses cannot be edited in place: build a "
+                        "replacement with dataclasses.replace(model, …) and call put()."
+                    ),
+                ) from exc
+        return self.put(model)
 
     def delete(self, identifier: ModelId) -> bool:
         """Delete a model by id; return ``False`` when the id was absent."""

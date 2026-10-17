@@ -61,7 +61,15 @@ from .patterns import (
     TabView,
 )
 from .pickers import DatePicker, TimePicker
-from .registry import WidgetCapability, supported_by, widget_types
+from .registry import (
+    WidgetCapability,
+    preview_renderer,
+    preview_renderers,
+    register_preview_renderer,
+    supported_by,
+    unregister_preview_renderer,
+    widget_types,
+)
 from .screen import Navigator, Screen
 from .snackbar import Snackbar
 from .style import Align, Color, EdgeInsets, Style
@@ -149,4 +157,8 @@ __all__ = [
     "WidgetCapability",
     "widget_types",
     "supported_by",
+    "register_preview_renderer",
+    "unregister_preview_renderer",
+    "preview_renderer",
+    "preview_renderers",
 ]

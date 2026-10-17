@@ -18,7 +18,7 @@ Build it with ``pymobile build``.
 
 from __future__ import annotations
 
-__version__ = "0.9.5"
+__version__ = "0.9.6"
 __author__ = "MAKSYM KHLYSTUN"
 __license__ = "MIT"
 
@@ -132,8 +132,12 @@ from .core.ui import (
     audit_ui,
 )
 from .core.ui.registry import (
+    preview_renderer,
+    preview_renderers,
+    register_preview_renderer,
     register_widget_type,
     unknown_types,
+    unregister_preview_renderer,
     unregister_widget_type,
 )
 from .core.validation import ValidationError, Validator
@@ -223,6 +227,10 @@ __all__ = [
     "register_widget_type",
     "unregister_widget_type",
     "unknown_types",
+    "register_preview_renderer",
+    "unregister_preview_renderer",
+    "preview_renderer",
+    "preview_renderers",
     # ui
     "Widget",
     "Container",

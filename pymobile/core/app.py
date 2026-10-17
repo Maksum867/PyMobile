@@ -27,7 +27,7 @@ from .api.storage import Storage, default_storage_path
 from .api.vibration import Vibration
 from .bridge import Bridge, get_bridge
 from .dispatcher import UiDispatcher
-from .events import EventBus, Subscription
+from .events import Event, EventBus, Subscription
 from .i18n import translations
 from .jobs import JobHandle, JobManager
 from .net.http import HttpClient
@@ -41,6 +41,12 @@ from .ui.theme import Theme
 
 #: Event kind the device bridge uses to wake the event loop for UI calls.
 WAKE_EVENT = "__wake__"
+
+#: Event the application emits when the data behind its screens changed.
+#: Subscribing to it is optional — :meth:`App.notify_data_changed` emits it and
+#: the framework's own listener rebuilds the screens stacked below the visible
+#: one, so a detail screen that saves and pops back leaves a fresh list behind.
+DATA_CHANGED = "data:changed"
 
 #: How many frames in a row may be requested while a frame is being built.
 #: A handful is normal (a widget updated inside build()); a long run means a
@@ -353,6 +359,12 @@ class App:
         # Subscribed in run() — an App that never runs has nothing to rebuild,
         # and 50 test apps used to leave 54 listeners on the global catalogue.
         self._unsubscribe_language: Callable[[], None] = _noop
+        # A screen that was covered by another one used to keep the tree it
+        # built when it was opened, so popping back showed a stale list. The
+        # listener is installed for the whole life of the app (not only in
+        # run()) so tests that drive the navigator by hand see the same
+        # behaviour; stop() clears the bus with everything else.
+        self.events.on(DATA_CHANGED, self._on_data_changed, internal=True)
         #: The snackbar on screen, if any (see snackbar()).
         self._snackbar: Snackbar | None = None
         self._snackbar_serial = 0
@@ -1242,6 +1254,63 @@ class App:
             return
         for screen in self.navigator.stack:
             screen.refresh()
+
+    # -- data changes ------------------------------------------------------
+    def notify_data_changed(
+        self, *, rebuild_current: bool = False, source: str | None = None
+    ) -> None:
+        """Announce that the data screens render has changed.
+
+        Screens **below** the visible one are marked stale: their tree is
+        dropped and ``build()`` runs again the next time the screen is shown,
+        which is what makes "save in a form, pop back to the list" show the
+        new row instead of the tree the list built when it was first opened.
+
+        The visible screen keeps its tree — a detail screen usually emits this
+        right before popping itself, and rebuilding it would only draw work
+        that is about to be discarded. Pass ``rebuild_current=True`` when the
+        screen that changed is the one on display::
+
+            def add_card(self) -> None:
+                self.cards.append(Card(...))
+                self.app.notify_data_changed(rebuild_current=True)
+
+        Emits :data:`DATA_CHANGED` as well (``source=`` travels with it), so a
+        project can listen for the same event::
+
+            app.on("data:changed", lambda event: refresh_cache())
+
+        Inside a screen, ``self.notify_data_changed()`` is the same call.
+        """
+        self.events.emit(
+            DATA_CHANGED,
+            source=source,
+            rebuild_current=bool(rebuild_current),
+        )
+
+    def _on_data_changed(self, event: Event) -> None:
+        """Mark every screen below the visible one for a rebuild."""
+        current = self.navigator.current
+        if current is None:
+            return
+        rebuild_current = bool(event.get("rebuild_current", False))
+        for screen in self.navigator.stack:
+            if screen is current:
+                if not rebuild_current:
+                    continue
+                if self._rendering:
+                    # Rebuilding the tree a frame is currently serialising
+                    # would hand it half a tree; the rebuild happens as the
+                    # follow-up frame instead.
+                    screen._detach_tree()
+                    with self._render_lock:
+                        self._render_scheduled = True
+                    continue
+                screen.refresh()
+                continue
+            # A covered screen has no frame of its own: dropping the tree is
+            # enough — it is rebuilt by the render that shows it again.
+            screen._detach_tree()
 
     def _on_screen_change(self, screen: Screen | None) -> None:
         """Re-render whenever the navigator changes the visible screen."""

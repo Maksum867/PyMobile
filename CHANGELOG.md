@@ -3,6 +3,58 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.9.6] — 2026-10-17
+
+### Added
+
+- **`data:changed` and `App.notify_data_changed()`.** Screens stacked below the
+  visible one are rebuilt when the data they render changes, so saving in a
+  form and popping back no longer reveals the list as it was when the form was
+  opened. `rebuild_current=True` refreshes the visible screen too.
+- **`Screen.rebuild()` and `Widget.detach()`.** Rebuild a tree that no frame
+  owns (a tab or panel in a shell) and move a single widget deliberately,
+  instead of relying on the fact that only `refresh()` used to detach parents.
+- **Preview renderers for custom widgets.** `register_preview_renderer(type,
+  "ascii" | "web" | "gui", draw)` teaches the desktop previews to draw a custom
+  type; without it they show `<BoxBadge>`. `preview_renderer(s)()` and
+  `unregister_preview_renderer()` complete the API.
+- **`--tab NAME` and the `@Name` route step.** Select a bottom-navigation tab
+  by label or value; `BottomNavigation.labels` exposes the visible labels and
+  `Driver.tab()` does the same from tests. Tabs needed no id for any of it.
+- **Web preview access options.** `--token`, `--no-token`, `--allow-origin`
+  (repeatable) and `--embed`, mirrored by `WebPreview(token=…,
+  require_token=…, allow_origins=…, frame_options=…)`, make a proxied or
+  embedded preview reachable on purpose. Defaults are unchanged: an exposed
+  preview still requires its token and refuses foreign origins.
+- **`ModelStore.update()` and `ModelStore.edit()`.** The documented way to
+  persist a snapshot returned by `get()`/`all()`.
+
+### Changed
+
+- **Nested catalogues are expanded at load time.** A JSON file written as
+  sections now yields dotted keys (`{"stats": {"balance": …}}` →
+  `"stats.balance"`), with a note naming what was flattened. `flatten=False`
+  keeps the strict flat reading.
+- **A missing translation renders as `⟦key⟧`** instead of the bare key, so an
+  untranslated string is visibly a placeholder. `translations.missing = "key"`
+  restores the old output; `"empty"` and a `"{key}"` template also work.
+- **`Expanded()` and `Flexible()` accept no child**, becoming a flexible gap.
+
+### Fixed
+
+- **`optimize = true` works off a 3.14 host.** Bytecode is compiled by a
+  matching interpreter found as `python3.14` or through `PYMOBILE_PYTHON`;
+  the warning that sources are shipped instead now names both.
+- **javac failures for a project `java/` overlay** are reported as a framework
+  message plus a hint with one diagnostic per line, relative paths and the most
+  likely cause, instead of a raw compiler dump.
+- **`java/` overlay sources are no longer reported as unpackaged assets.**
+- **`EmptyState` and other icon-bearing widgets draw a glyph** (`ⓘ`, `🔍`, …)
+  in the ASCII preview instead of `[icon:info]`.
+- **`--screen` discovers screens in modules the entry point never imported.**
+  Project modules defining a `…Screen` class are imported once before the
+  lookup is declared failed; the entry point itself is never re-imported.
+
 ## [0.9.5] — 2026-10-10
 
 ### Added

@@ -128,7 +128,9 @@ class TestRegistryAndRenderers:
             PieChart([1, 2]),
         )
         ascii_ = render_ascii(tree)
-        assert "[icon:search]" in ascii_ and "page" in ascii_ and "PieChart" in ascii_
+        # Bundled icons draw as a glyph (search → 🔍); unmapped names keep the
+        # readable ``[icon:name]`` placeholder.
+        assert "🔍" in ascii_ and "page" in ascii_ and "PieChart" in ascii_
         html = render_html(tree.to_dict())
         assert "<svg" in html and 'type="range"' in html and "<datalist" in html
         assert "&lt;" not in html

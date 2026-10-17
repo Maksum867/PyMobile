@@ -19,29 +19,45 @@ A step of a route is ``[Screen.]widget[=value]``::
     name=Ann                   type "Ann" into ``name`` (or pick / set a value)
     dark=true                  switch ``dark`` on
     <back>                     the hardware back button
+    @Stats                     pick the "Stats" tab of the bottom navigation
+    Shell.@Stats               …and assert that the step is taken on Shell
 """
 
 from __future__ import annotations
 
+import ast
+import importlib
 import re
+import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from difflib import get_close_matches
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..errors import PyMobileError
+from ..log import get_logger
 from .ui.screen import Screen
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .app import App
     from .ui.widget import Widget
 
-__all__ = ["Driver", "Step", "parse_steps", "screen_classes", "find_screen_class"]
+__all__ = [
+    "Driver",
+    "Step",
+    "parse_steps",
+    "screen_classes",
+    "find_screen_class",
+    "discover_screens",
+]
 
 #: Words a switch or checkbox is set with (``dark=true``); anything else is a value.
 _ON = frozenset({"true", "on", "yes", "1"})
 _OFF = frozenset({"false", "off", "no", "0"})
 BACK = "<back>"
+
+_log = get_logger("driver")
 
 
 # --------------------------------------------------------------------------
@@ -68,6 +84,94 @@ def screen_classes(*, project_only: bool = True) -> list[type[Screen]]:
     if project_only:
         classes = [cls for cls in classes if not cls.__module__.startswith("pymobile.")]
     return classes
+
+
+#: Directories never searched for screen modules: build output, caches and the
+#: Java/asset folders have nothing a ``Screen`` subclass could live in.
+_SKIPPED_PARTS = frozenset({"__pycache__", "build", "dist", "java", "jni", "prebuilt"})
+
+
+def _defines_a_screen(tree: ast.AST) -> bool:
+    """Whether a module syntactically defines a ``…Screen`` class.
+
+    The check is deliberately syntactic: importing every project module to find
+    out would run their top-level code, and the reason a screen is missing is
+    usually that the module holding it was never imported at all.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for base in node.bases:
+            name = base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "")
+            if isinstance(name, str) and name.endswith("Screen"):
+                return True
+    return False
+
+
+def discover_screens(
+    paths: Iterable[str | Path], *, exclude: Iterable[str | Path] = ()
+) -> list[type[Screen]]:
+    """Import project modules that define a ``Screen`` and return all screens.
+
+    ``pymobile preview --screen ResultScreen`` used to see only the screens the
+    entry point had already imported — a screen imported lazily (or, commonly,
+    in a module the entry point never touches) was reported as "no screen
+    called 'ResultScreen'". Every ``.py`` under ``paths`` that syntactically
+    defines a ``…Screen`` class is imported, so the class exists by the time
+    the name is looked up.
+
+    Returns the screen classes that were not visible before the call. Modules
+    that fail to import are skipped (their error is logged at debug level): a
+    broken helper in an unrelated folder must not break the preview.
+    """
+    before = {id(cls) for cls in screen_classes(project_only=False)}
+    # The entry point has already been executed as ``__main__``: importing the
+    # same file again would define every screen a second time and make names
+    # ambiguous. Callers pass it in ``exclude``.
+    skipped = {
+        str(Path(item).expanduser().resolve()) for item in exclude
+    }
+    roots: list[Path] = []
+    for raw in paths:
+        root = Path(raw).expanduser().resolve()
+        if root.is_file():
+            root = root.parent
+        if root.is_dir() and root not in roots:
+            roots.append(root)
+    for root in roots:
+        candidates = sorted(root.rglob("*.py"))
+        for path in candidates:
+            relative = path.relative_to(root)
+            if any(part in _SKIPPED_PARTS or part.startswith(".") for part in relative.parts):
+                continue
+            if str(path.resolve()) in skipped:
+                continue
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+            except (OSError, SyntaxError):
+                continue
+            if not _defines_a_screen(tree):
+                continue
+            _import_project_module(root, path)
+    return [cls for cls in screen_classes(project_only=False) if id(cls) not in before]
+
+
+def _import_project_module(root: Path, path: Path) -> None:
+    """Import one file as a module of the project rooted at ``root``."""
+    relative = path.relative_to(root).with_suffix("")
+    parts = list(relative.parts)
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    if not parts:
+        return
+    name = ".".join(parts)
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    try:
+        importlib.invalidate_caches()
+        importlib.import_module(name)
+    except Exception as error:  # a broken module must not break the preview
+        _log.debug("could not import %s while looking for screens: %s", path, error)
 
 
 def find_screen_class(
@@ -118,9 +222,13 @@ class Step:
     """One step of a route: what to do, on which widget, and where."""
 
     text: str
-    target: str  # widget id, or BACK
+    target: str  # widget id, a tab name, or BACK
     screen: str | None = None  # the screen the step expects to be on
     value: str | None = None  # None: press; otherwise set this value
+    #: ``True`` for ``@Stats``: pick that tab in the bottom navigation. A tab
+    #: bar has no stable id in an inline tree, so it is addressed by the label
+    #: or value the user sees instead.
+    tab: bool = False
 
 
 def parse_steps(route: str | Sequence[str], known_screens: Iterable[str] = ()) -> list[Step]:
@@ -145,12 +253,21 @@ def parse_steps(route: str | Sequence[str], known_screens: Iterable[str] = ()) -
         if dot and head in screens and tail:
             screen, expression = head, tail
         target = expression.strip()
+        tab = target.startswith("@")
+        if tab:
+            target = target[1:].strip()
+            if sign:
+                raise PyMobileError(
+                    f"a tab step takes no value: {text!r}",
+                    hint='Write "@Stats" to pick the Stats tab; tabs are chosen by '
+                    "label or value, not set with =.",
+                )
         if not target:
             raise PyMobileError(
                 f"empty step in the route {route!r}",
                 hint='A step is [Screen.]widget or [Screen.]widget=value, e.g. "Menu.start".',
             )
-        steps.append(Step(text, target, screen, value if sign else None))
+        steps.append(Step(text, target, screen, value if sign else None, tab))
     if not steps:
         raise PyMobileError(
             f"the route {route!r} has no steps",
@@ -282,6 +399,65 @@ class Driver:
             )
         self.app.handle_ui_event(widget_id, "press", "")
 
+    def tab(self, target: str | int) -> Screen:
+        """Pick a tab in the screen's bottom navigation; return the screen.
+
+        The top-level tabs of an app are usually a ``BottomNavigation`` built
+        inline in ``build()``, so they have no id a route could name. This
+        selects them the way the user does — by the label or value shown on the
+        bar, or by position — and runs the screen's own ``on_select``::
+
+            driver.tab("Stats")     # --navigate "@Stats" on the command line
+            driver.tab(2)           # the third tab
+
+        The first matching bar is used when a screen has more than one.
+        """
+        screen = self.screen
+        bars = [
+            widget
+            for widget in screen.root.walk()
+            if getattr(widget, "type_name", "") == "BottomNavigation"
+        ]
+        if not bars:
+            raise PyMobileError(
+                f"{type(screen).__name__} has no BottomNavigation to pick a tab in",
+                hint=(
+                    "Add a BottomNavigation to the screen, or press the widget that "
+                    "switches tabs with press(widget_id)."
+                ),
+            )
+        chosen: tuple[Any, str] | None = None
+        for bar in bars:
+            values = [str(value) for value in getattr(bar, "options", ())]
+            labels = [str(label) for label in getattr(bar, "labels", values)]
+            if isinstance(target, int):
+                if 0 <= target < len(values):
+                    chosen = (bar, values[target])
+                    break
+                continue
+            wanted = str(target)
+            if wanted in values:
+                chosen = (bar, wanted)
+                break
+            if wanted in labels:
+                chosen = (bar, values[labels.index(wanted)])
+                break
+        if chosen is None:
+            described = "; ".join(
+                ", ".join(
+                    str(label)
+                    for label in getattr(bar, "labels", getattr(bar, "options", ()))
+                )
+                for bar in bars
+            )
+            raise PyMobileError(
+                f"no tab called {target!r} in this screen's bottom navigation",
+                hint=f"The tabs are: {described or 'none'}.",
+            )
+        bar, value = chosen
+        self.app.handle_ui_event(bar.id, "change", value)
+        return self.screen
+
     def long_press(self, widget_id: str) -> None:
         """Long-press a widget (list rows)."""
         widget = self._usable(widget_id, "long-press")
@@ -336,7 +512,9 @@ class Driver:
                 if step.screen is not None:
                     self._expect_screen(step)
                 try:
-                    if step.value is None:
+                    if step.tab:
+                        self.tab(step.target)
+                    elif step.value is None:
                         self.press(step.target)
                     else:
                         self.change(step.target, step.value)

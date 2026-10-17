@@ -30,7 +30,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.9.5`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.9.6`) and read the
 > changelog before upgrading. What may change, and how much notice you get, is
 > written down in the
 > [versioning and deprecation policy](#versioning-and-deprecation-policy). Bug
@@ -789,6 +789,12 @@ Row(
 ```
 
 `Expanded` makes the child fill its share, `Flexible` lets it stay smaller.
+With no child they are a flexible gap, which is the concise way to push a
+trailing widget to the far edge:
+
+```python
+Row(Label("Title"), Expanded(), IconButton("menu"))   # ⋯ … fills the middle
+```
 
 ### Divider
 
@@ -1185,11 +1191,34 @@ with app.batch():
 | --- | --- |
 | *(nothing)* | a property changed — handled for you |
 | `self.refresh()` | the tree itself changed (rows added or removed) |
+| `self.rebuild()` | rebuild a tree that no frame owns (a tab, a panel) |
+| `app.notify_data_changed()` | another screen's data changed — rebuild the screens below |
 | `app.render()` | you want a frame pushed out right now |
 
 `self.refresh()` repaints a screen the navigator owns; a screen embedded in
 another screen's tree is rebuilt by the screen that builds it — see
-[Screens as tabs](#screens-as-tabs-one-shell-owns-the-frame).
+[Screens as tabs](#screens-as-tabs-one-shell-owns-the-frame). Such a screen can
+call `self.rebuild()` to re-run its `build()` without asking for a frame.
+
+### Data changed on another screen
+
+A covered screen keeps the tree it built when it was opened, so a form that
+saves and pops back used to reveal a list that still said "2 items". Say that
+the data changed, and every screen *below* the visible one is rebuilt on the
+way back:
+
+```python
+class NewCard(Screen):
+    def save(self) -> None:
+        self.store.put(self.card)
+        self.app.notify_data_changed()   # the list below re-runs build()
+        self.app.pop()
+```
+
+`self.notify_data_changed()` is the same call from inside a screen. The visible
+screen keeps its tree by default — pass `rebuild_current=True` when it is the
+one that changed. The event is public, so `app.on("data:changed", handler)`
+observes the same moment.
 
 ```python
 def on_data_loaded(self) -> None:
@@ -1350,6 +1379,17 @@ tasks.put(Task(id="task-1", title="Review the report"))  # insert or replace by 
 all_tasks = tasks.all()                                     # list[Task]
 first_task = tasks.get("task-1")                            # Task | None
 tasks.delete("task-1")
+```
+
+`get()` and `all()` return **detached snapshots**: the dataclass is rebuilt from
+the stored JSON on every read, so changing a field of the returned object
+changes nothing until it is written back:
+
+```python
+task = tasks.get("task-1")       # a copy
+task.done = True                 # the store still has done = False
+tasks.update(task)               # put() under the name the situation suggests
+tasks.edit("task-1", done=False) # load, change, persist in one call
 ```
 
 The value at `key` is stored as an envelope containing `schema_version` and
@@ -1849,27 +1889,28 @@ without plurals (Chinese, Japanese, Korean, …), and the English rule for the
 rest. A form missing from the catalogue falls back to `other`, then `many`.
 An explicit `zero` form is used for 0 in any language.
 `plural_category(21, "pl")` returns the category directly. Lookup falls back from `pt-br` to `pt` and
-then to the default language, and a missing key renders as the key itself
-(logged once) rather than raising in the middle of a screen.
+then to the default language. A missing key renders as a visible marker —
+`⟦stats.unknown⟧` — rather than as the bare key, so an untranslated string reads
+as a placeholder instead of a typo in the screen (it is also logged once).
+`translations.missing = "key"` restores the old bare-key output, `"empty"`
+hides it, and any string with `{key}` is used as the template.
 
 ### Keys are flat — a dot is part of the key
 
-A catalogue is **one level** of `"key": "text"` pairs. `t("stats.balance")`
-looks for a key literally named `stats.balance`; it does not descend into
-`{"stats": {"balance": …}}`. Nothing about a miss like that is dramatic — the
-screen shows the key itself — so a catalogue written as sections looks like a
-translation bug rather than a structure problem. The framework now says so:
-loading such a file logs a warning naming the nested objects, and each missed
-dotted key is logged with a hint.
+A catalogue is **one level** of `"key": "text"` pairs, so the key a dotted
+lookup needs is the whole dotted name. A file written with sections is expanded
+at load time, which makes both spellings work:
 
 ```
-{ "stats": { "balance": "Balance" } }    ✗  t("stats.balance") → "stats.balance"
-{ "stats.balance": "Balance" }           ✓  the whole key, dot included
+{ "stats": { "balance": "Balance" } }    → key "stats.balance" (expanded on load)
+{ "stats.balance": "Balance" }           → the same key, written flat
 ```
 
-Prefixes keep flat files readable — `"auth.title"`, `"auth.error"`,
-`"stats.balance"`, … all at the top level. If you would rather keep sections in
-the source file, expand them at load time:
+Both `t("stats.balance")` calls find `Balance`. The expansion is reported once
+per language, naming the section that was flattened and an example key — a
+catalogue written as sections used to render bare keys with nothing but a
+"missing translation" line per string to explain it. Pass `flatten=False` (or
+`load_file(..., flatten=False)`) to read the file strictly flat:
 
 ```python
 translations.load_dir("locales", flatten=True)      # {"stats": {"balance": …}} → "stats.balance"
@@ -1881,8 +1922,8 @@ from pymobile import flatten_catalogue              # or expand one mapping your
 translations.load(flatten_catalogue({"stats": {"balance": "Balance"}}), language="en")
 ```
 
-The one nested shape understood without `flatten=True` is a plural form map,
-whose keys are all CLDR quantity names (`zero`/`one`/`two`/`few`/`many`/`other`):
+The one nested shape that is never expanded is a plural form map, whose keys are
+all CLDR quantity names (`zero`/`one`/`two`/`few`/`many`/`other`):
 
 ```json
 { "items": { "one": "{count} item", "other": "{count} items" } }
@@ -2074,7 +2115,8 @@ allow_backup = false            # keep the private store out of cloud/adb backup
 # --- build ---
 abis = ["arm64-v8a"]
 output_dir = "build"
-optimize = false                # ship bytecode instead of sources (needs a Python 3.14 build host)
+optimize = false                # ship bytecode instead of sources (needs Python 3.14 on the
+                                # build host, or PYMOBILE_PYTHON pointing at it)
 strip_debug = true              # -OO: drop docstrings and asserts
 exclude = ["docs/**", "secrets/**"]   # added to the built-in defaults
 exclude_only = false                    # true = use exclude as written
@@ -2096,7 +2138,7 @@ exclude_only = false                    # true = use exclude as written
 | `allow_backup` | `false` | let Android back up the app's private data |
 | `abis` | `["arm64-v8a"]` | architectures |
 | `output_dir` | `build` | where the APK is written |
-| `optimize` | `false` | package `.pyc` when enabled; for `--native` only when the build runs on Python 3.14 (the device's version), otherwise sources are shipped with a warning — which is why the `init` template ships `optimize = false` too |
+| `optimize` | `false` | package `.pyc` when enabled; for `--native` the bytecode must match the device's Python 3.14 — the build uses the running interpreter when it is 3.14, or a `python3.14`/`PYMOBILE_PYTHON` interpreter when the host differs, and only falls back to sources with a warning when neither exists (which is why the `init` template ships `optimize = false`) |
 | `strip_debug` | `true` | compile with `-OO` |
 | `exclude` | *(none)* | glob patterns to skip, **added to** the built-in list (`**/__pycache__/**`, `**/*.pyc`, `**/tests/**`, `tests/**`, `**/test_*.py`, `.git/**`, `.venv/**`, `venv/**`, `build/**`, `dist/**`) |
 | `exclude_only` | `false` | `true` = `exclude` replaces the built-in list (advanced; the build then warns if `output_dir` would ship itself) |
@@ -2336,7 +2378,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.9.5", "platform": "android",
+# {"framework_version": "0.9.6", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 
@@ -2542,10 +2584,15 @@ pymobile preview --screen ResultScreen --set score=7 --set total=10   # construc
 pymobile preview --screen ResultScreen --args '{"score": 7}'    # the same, as JSON (bash, zsh)
 pymobile preview --navigate "Menu.start"                        # press the way there
 pymobile preview --navigate "Menu.start, Quiz.answer=42, Quiz.next" --png result.png
+pymobile preview --tab Stats                                    # pick a bottom-navigation tab
+pymobile preview --navigate "@Stats"                            # the same, as a route step
 ```
 
 `--screen NAME` pushes that screen on top of the first one (the class name, or
-`module.Class` when two screens share a name). `--set NAME=VALUE`, repeatable,
+`module.Class` when two screens share a name). The name is looked up among the
+classes the entry point imported; when it is missing, every project module that
+defines a `…Screen` class is imported and the lookup is retried, so a screen in
+a lazily imported module is found too. `--set NAME=VALUE`, repeatable,
 passes one constructor argument: the value is read as JSON when it parses (`7`,
 `true`, `[1, 2]`) and is plain text otherwise (`--set player=Anna`). It needs no
 quoting, so it works in every shell — unlike `--args`, whose JSON needs its
@@ -2556,8 +2603,11 @@ a list for positional ones, and a `--set` overrides the same name.
 `--navigate` walks a route like a user: each step is `[Screen.]widget` (press it),
 `[Screen.]widget=value` (type into a `TextInput`, pick a `Dropdown` option, set a
 `Slider`, flip a `Switch` with `true`/`false`) or `<back>`. The optional
-`Screen.` prefix asserts where the step is taken. The steps are echoed
-(`Menu.start → Quiz`), and a mistake names what is available —
+`Screen.` prefix asserts where the step is taken. `@Stats` selects a tab in
+the screen's bottom navigation by its label or value — tabs are built inline and
+have no id a route could name, so `--tab Stats` exists as the short spelling.
+The steps are echoed (`Menu.start → Quiz`), and a mistake names what is
+available —
 `no screen called 'Resulz'. Did you mean 'Result'?`,
 `no widget with id 'strt'. Did you mean 'start'?`. Both flags work with `--png`,
 `--ids`, `--text`, and on `pymobile run` (including `--gui` and `--web`, which
@@ -2647,6 +2697,22 @@ pymobile run --web                 # banner prints http://127.0.0.1:8765;
 pymobile run --web --port 9000
 pymobile run --web --host 0.0.0.0  # listen on all interfaces (containers, SSH)
 ```
+
+An exposed preview requires the session token printed in the URL, and a request
+that states a foreign `Origin` is refused — a page on another site must not
+drive the app. Behind a proxy, a tunnel or a portal that embeds the preview in
+an iframe, opt out explicitly:
+
+```bash
+pymobile run --web --host 0.0.0.0 --allow-origin "https://portal.example" --embed
+pymobile run --web --host 0.0.0.0 --no-token        # the gateway authenticates
+pymobile run --web --host 0.0.0.0 --token "$SECRET" # a token the proxy knows
+```
+
+`--allow-origin` is repeatable (`'*'` trusts every origin), `--embed` drops
+`X-Frame-Options`, and `--no-token` serves without a session. Each one weakens
+a protection, so none is enabled by default; use them only behind something that
+authenticates callers.
 
 The page is plain HTML built from the same serialised tree the phone receives,
 so it cannot drift from the real renderer. Buttons, switches and text fields
@@ -2743,6 +2809,25 @@ it from existing widgets (for example, `Row`, `ProgressBar` and `Expanded`) and
 skip the Java renderer entirely. For a preview-only type, declare
 `register_widget_type("BarChart", android=False, web=True)`; the desktop/browser
 can draw it, but it is not rendered on Android.
+
+A declared type still shows up as `<BarChart>` in the ASCII, browser and Tk
+previews until you register a drawer for it — no more `if app.platform ==
+"android"` branches in application code:
+
+```python
+from pymobile import register_preview_renderer
+
+register_preview_renderer("BarChart", "ascii", lambda node: ["[bar chart]"])
+register_preview_renderer("BarChart", "web", lambda node: '<div class="chart"></div>')
+
+def draw_tk(preview, parent, node, background):     # preview.tk is tkinter
+    preview.tk.Label(parent, text="bar chart").pack()
+
+register_preview_renderer("BarChart", "gui", draw_tk)
+```
+
+The function receives the serialised node (`type`, `id`, `props`, `style`,
+`children`) and returns lines of text, HTML markup or nothing (for Tk).
 
 `Wrap` is an example of a framework-level widget: `class Wrap(Container)` in
 `layout.py`, a `WidgetCapability` row in `registry.py`, support in the four
@@ -2894,7 +2979,10 @@ are documented and are **not** deprecated.
 **Why doesn't my UI update?**
 It should: assigning to a widget property redraws the screen by itself. If the
 *structure* changed — rows added or removed — call `self.refresh()` to rebuild
-through `build()`. See [Updating the screen](#updating-the-screen).
+through `build()`; a tab or panel that no frame owns uses `self.rebuild()`. If
+the data changed on *another* screen (a form saved and popped), call
+`app.notify_data_changed()` so the screen underneath rebuilds on the way back.
+See [Updating the screen](#updating-the-screen).
 
 **Why does `pymobile run` show no window?**
 By default it runs your logic through the stub bridge without native views,

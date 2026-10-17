@@ -166,13 +166,53 @@ def render_extra_html(
     raise ValueError(f"not an advanced HTML widget: {kind}")
 
 
+#: Icons the text preview can draw as a glyph instead of ``[icon:name]``.
+#: The list follows the bundled set (``pymobile.ICON_NAMES``); anything else
+#: keeps the readable placeholder.
+_ICON_GLYPHS: dict[str, str] = {
+    "add": "＋",
+    "back": "←",
+    "forward": "→",
+    "up": "↑",
+    "down": "↓",
+    "calendar": "📅",
+    "check": "✓",
+    "close": "✕",
+    "delete": "🗑",
+    "download": "⤓",
+    "edit": "✎",
+    "heart": "♥",
+    "home": "⌂",
+    "info": "ⓘ",
+    "menu": "☰",
+    "refresh": "⟳",
+    "remove": "−",
+    "search": "🔍",
+    "settings": "⚙",
+    "share": "⇧",
+    "star": "★",
+    "user": "👤",
+}
+
+
 def extra_ascii(node: dict[str, Any]) -> list[str]:
     kind, props = node["type"], node.get("props", {})
     if kind == "Icon":
-        return [f"[icon:{props['name']}]"]
+        name = str(props.get("name", ""))
+        glyph = _ICON_GLYPHS.get(name)
+        if glyph is None:
+            return [f"[icon:{name}]"]
+        # An icon that carries an accessibility label reads as its label too,
+        # so the picture says what a screen reader would say.
+        label = str(props.get("label") or "").strip()
+        return [glyph] if not label else [f"{glyph} {label}"]
     if kind == "IconButton":
         suffix = " ✗" if not node.get("enabled", True) else ""
-        return [f"({props['label']} [{props['name']}]){suffix}"]
+        name = str(props.get("name", ""))
+        glyph = _ICON_GLYPHS.get(name)
+        if glyph is None:
+            return [f"({props['label']} [{name}]){suffix}"]
+        return [f"({props['label']} {glyph}){suffix}"]
     if kind == "AutoComplete":
         value = props.get("value") or props.get("placeholder") or "…"
         if props.get("password") and props.get("value"):
