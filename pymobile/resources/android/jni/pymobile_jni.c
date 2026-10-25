@@ -803,6 +803,518 @@ static PyObject *py_finish_app(PyObject *self, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+/* ------------------------------------------------------------------ */
+/* Files, clipboard, sharing and audio                                 */
+/* ------------------------------------------------------------------ */
+
+/* Turn a Java StringArray into a Python list of str ([] for null). */
+static PyObject *string_array_to_list(JNIEnv *env, jobjectArray array) {
+    PyObject *list = PyList_New(0);
+    if (!list) {
+        return NULL;
+    }
+    if (!array) {
+        return list;
+    }
+    jsize count = (*env)->GetArrayLength(env, array);
+    for (jsize i = 0; i < count; i++) {
+        jstring item = (jstring)(*env)->GetObjectArrayElement(env, array, i);
+        if (!item) {
+            continue;
+        }
+        Utf8Text text = jstring_to_utf8(env, item);
+        PyObject *value = text.data
+            ? PyUnicode_FromStringAndSize(text.data, (Py_ssize_t)text.len)
+            : PyUnicode_FromString("");
+        text_free(&text);
+        (*env)->DeleteLocalRef(env, item);
+        if (value) {
+            PyList_Append(list, value);
+            Py_DECREF(value);
+        }
+    }
+    return list;
+}
+
+static jstring new_jstring(JNIEnv *env, const char *text) {
+    return utf8_to_jstring(env, text, strlen(text));
+}
+
+static PyObject *py_pick_file(PyObject *self, PyObject *args) {
+    const char *mime = "*/*";
+    int multiple = 0;
+    PyObject *result = NULL;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "s|p", &mime, &multiple)) {
+        return NULL;
+    }
+    int attached = 0;
+    JNIEnv *env = jni_env(&attached);
+    if (env && g_native_class) {
+        jmethodID method = static_method(env, "pickFile",
+                                         "(Ljava/lang/String;Z)[Ljava/lang/String;");
+        if (method) {
+            jstring jmime = new_jstring(env, mime);
+            jobjectArray paths = NULL;
+            /* The picker blocks until the user answers, so the GIL is released:
+             * timers and background threads keep running while it is open. */
+            Py_BEGIN_ALLOW_THREADS
+            paths = (jobjectArray)(*env)->CallStaticObjectMethod(
+                env, g_native_class, method, jmime, (jboolean)(multiple ? 1 : 0));
+            Py_END_ALLOW_THREADS
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);
+            } else {
+                result = string_array_to_list(env, paths);
+            }
+            if (paths) {
+                (*env)->DeleteLocalRef(env, paths);
+            }
+            (*env)->DeleteLocalRef(env, jmime);
+        }
+        if (attached) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+    }
+    return result ? result : PyList_New(0);
+}
+
+static PyObject *py_pick_image(PyObject *self, PyObject *args) {
+    PyObject *result = NULL;
+    (void)self;
+    (void)args;
+    int attached = 0;
+    JNIEnv *env = jni_env(&attached);
+    if (env && g_native_class) {
+        jmethodID method = static_method(env, "pickImage", "()[Ljava/lang/String;");
+        if (method) {
+            jobjectArray paths = NULL;
+            Py_BEGIN_ALLOW_THREADS
+            paths = (jobjectArray)(*env)->CallStaticObjectMethod(env, g_native_class, method);
+            Py_END_ALLOW_THREADS
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);
+            } else {
+                result = string_array_to_list(env, paths);
+            }
+            if (paths) {
+                (*env)->DeleteLocalRef(env, paths);
+            }
+        }
+        if (attached) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+    }
+    return result ? result : PyList_New(0);
+}
+
+static PyObject *py_copy_to_clipboard(PyObject *self, PyObject *args) {
+    const char *text;
+    int copied = 0;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "s", &text)) {
+        return NULL;
+    }
+    int attached = 0;
+    JNIEnv *env = jni_env(&attached);
+    if (env && g_native_class) {
+        jmethodID method = static_method(env, "copyToClipboard", "(Ljava/lang/String;)Z");
+        if (method) {
+            jstring jtext = new_jstring(env, text);
+            copied = (*env)->CallStaticBooleanMethod(env, g_native_class, method, jtext);
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);
+                copied = 0;
+            }
+            (*env)->DeleteLocalRef(env, jtext);
+        }
+        if (attached) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+    }
+    return PyBool_FromLong(copied);
+}
+
+static PyObject *py_clipboard_text(PyObject *self, PyObject *args) {
+    PyObject *result = NULL;
+    (void)self;
+    (void)args;
+    int attached = 0;
+    JNIEnv *env = jni_env(&attached);
+    if (env && g_native_class) {
+        jmethodID method = static_method(env, "clipboardText", "()Ljava/lang/String;");
+        if (method) {
+            jstring value = (jstring)(*env)->CallStaticObjectMethod(env, g_native_class, method);
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);
+            } else if (value) {
+                Utf8Text text = jstring_to_utf8(env, value);
+                if (text.data) {
+                    result = PyUnicode_FromStringAndSize(text.data, (Py_ssize_t)text.len);
+                }
+                text_free(&text);
+                (*env)->DeleteLocalRef(env, value);
+            }
+        }
+        if (attached) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+    }
+    return result ? result : PyUnicode_FromString("");
+}
+
+static PyObject *py_share(PyObject *self, PyObject *args) {
+    const char *text;
+    const char *url;
+    const char *subject;
+    int shared = 0;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "sss", &text, &url, &subject)) {
+        return NULL;
+    }
+    int attached = 0;
+    JNIEnv *env = jni_env(&attached);
+    if (env && g_native_class) {
+        jmethodID method = static_method(
+            env, "share", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Z");
+        if (method) {
+            jstring jtext = new_jstring(env, text);
+            jstring jurl = new_jstring(env, url);
+            jstring jsubject = new_jstring(env, subject);
+            shared = (*env)->CallStaticBooleanMethod(env, g_native_class, method,
+                                                    jtext, jurl, jsubject);
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);
+                shared = 0;
+            }
+            (*env)->DeleteLocalRef(env, jtext);
+            (*env)->DeleteLocalRef(env, jurl);
+            (*env)->DeleteLocalRef(env, jsubject);
+        }
+        if (attached) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+    }
+    return PyBool_FromLong(shared);
+}
+
+/* -- audio: Python holds an int handle, the player stays in the JVM --- */
+
+static int audio_call_int(const char *name, const char *signature, int handle) {
+    int value = 0;
+    int attached = 0;
+    JNIEnv *env = jni_env(&attached);
+    if (env && g_native_class) {
+        jmethodID method = static_method(env, name, signature);
+        if (method) {
+            value = (int)(*env)->CallStaticIntMethod(env, g_native_class, method, (jint)handle);
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);
+                value = 0;
+            }
+        }
+        if (attached) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+    }
+    return value;
+}
+
+static int audio_call_bool(const char *name, const char *signature, int handle) {
+    int value = 0;
+    int attached = 0;
+    JNIEnv *env = jni_env(&attached);
+    if (env && g_native_class) {
+        jmethodID method = static_method(env, name, signature);
+        if (method) {
+            value = (*env)->CallStaticBooleanMethod(env, g_native_class, method, (jint)handle);
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);
+                value = 0;
+            }
+        }
+        if (attached) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+    }
+    return value;
+}
+
+static void audio_call_void(const char *name, const char *signature, int handle) {
+    int attached = 0;
+    JNIEnv *env = jni_env(&attached);
+    if (env && g_native_class) {
+        jmethodID method = static_method(env, name, signature);
+        if (method) {
+            (*env)->CallStaticVoidMethod(env, g_native_class, method, (jint)handle);
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);
+            }
+        }
+        if (attached) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+    }
+}
+
+static PyObject *py_audio_open(PyObject *self, PyObject *args) {
+    const char *source;
+    int looping = 0;
+    int handle = -1;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "s|p", &source, &looping)) {
+        return NULL;
+    }
+    int attached = 0;
+    JNIEnv *env = jni_env(&attached);
+    if (env && g_native_class) {
+        jmethodID method = static_method(env, "audioOpen", "(Ljava/lang/String;Z)I");
+        if (method) {
+            jstring jsource = new_jstring(env, source);
+            handle = (int)(*env)->CallStaticIntMethod(
+                env, g_native_class, method, jsource, (jboolean)(looping ? 1 : 0));
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);
+                handle = -1;
+            }
+            (*env)->DeleteLocalRef(env, jsource);
+        }
+        if (attached) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+    }
+    return PyLong_FromLong(handle);
+}
+
+static PyObject *py_audio_position(PyObject *self, PyObject *args) {
+    int handle;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "i", &handle)) {
+        return NULL;
+    }
+    return PyLong_FromLong(audio_call_int("audioPosition", "(I)I", handle));
+}
+
+static PyObject *py_audio_duration(PyObject *self, PyObject *args) {
+    int handle;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "i", &handle)) {
+        return NULL;
+    }
+    return PyLong_FromLong(audio_call_int("audioDuration", "(I)I", handle));
+}
+
+static PyObject *py_audio_is_playing(PyObject *self, PyObject *args) {
+    int handle;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "i", &handle)) {
+        return NULL;
+    }
+    return PyBool_FromLong(audio_call_bool("audioIsPlaying", "(I)Z", handle));
+}
+
+static PyObject *py_audio_play(PyObject *self, PyObject *args) {
+    int handle;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "i", &handle)) {
+        return NULL;
+    }
+    audio_call_void("audioPlay", "(I)V", handle);
+    Py_RETURN_NONE;
+}
+
+static PyObject *py_audio_pause(PyObject *self, PyObject *args) {
+    int handle;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "i", &handle)) {
+        return NULL;
+    }
+    audio_call_void("audioPause", "(I)V", handle);
+    Py_RETURN_NONE;
+}
+
+static PyObject *py_audio_stop(PyObject *self, PyObject *args) {
+    int handle;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "i", &handle)) {
+        return NULL;
+    }
+    audio_call_void("audioStop", "(I)V", handle);
+    Py_RETURN_NONE;
+}
+
+static PyObject *py_audio_release(PyObject *self, PyObject *args) {
+    int handle;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "i", &handle)) {
+        return NULL;
+    }
+    audio_call_void("audioRelease", "(I)V", handle);
+    Py_RETURN_NONE;
+}
+
+static PyObject *py_recorder_cancel(PyObject *self, PyObject *args) {
+    int handle;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "i", &handle)) {
+        return NULL;
+    }
+    audio_call_void("recorderCancel", "(I)V", handle);
+    Py_RETURN_NONE;
+}
+
+static PyObject *py_audio_seek(PyObject *self, PyObject *args) {
+    int handle;
+    int position;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "ii", &handle, &position)) {
+        return NULL;
+    }
+    int attached = 0;
+    JNIEnv *env = jni_env(&attached);
+    if (env && g_native_class) {
+        jmethodID method = static_method(env, "audioSeek", "(II)V");
+        if (method) {
+            (*env)->CallStaticVoidMethod(env, g_native_class, method,
+                                        (jint)handle, (jint)position);
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);
+            }
+        }
+        if (attached) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *py_audio_volume(PyObject *self, PyObject *args) {
+    int handle;
+    float level;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "if", &handle, &level)) {
+        return NULL;
+    }
+    int attached = 0;
+    JNIEnv *env = jni_env(&attached);
+    if (env && g_native_class) {
+        jmethodID method = static_method(env, "audioVolume", "(IF)V");
+        if (method) {
+            (*env)->CallStaticVoidMethod(env, g_native_class, method,
+                                        (jint)handle, (jfloat)level);
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);
+            }
+        }
+        if (attached) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *py_audio_looping(PyObject *self, PyObject *args) {
+    int handle;
+    int looping = 0;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "i|p", &handle, &looping)) {
+        return NULL;
+    }
+    int attached = 0;
+    JNIEnv *env = jni_env(&attached);
+    if (env && g_native_class) {
+        jmethodID method = static_method(env, "audioLooping", "(IZ)V");
+        if (method) {
+            (*env)->CallStaticVoidMethod(env, g_native_class, method,
+                                        (jint)handle, (jboolean)(looping ? 1 : 0));
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);
+            }
+        }
+        if (attached) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *py_recorder_start(PyObject *self, PyObject *args) {
+    const char *directory = "";
+    int handle = -1;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "|s", &directory)) {
+        return NULL;
+    }
+    int attached = 0;
+    JNIEnv *env = jni_env(&attached);
+    if (env && g_native_class) {
+        jmethodID method = static_method(env, "recorderStart", "(Ljava/lang/String;)I");
+        if (method) {
+            jstring jdir = new_jstring(env, directory);
+            handle = (int)(*env)->CallStaticIntMethod(env, g_native_class, method, jdir);
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);
+                handle = -1;
+            }
+            (*env)->DeleteLocalRef(env, jdir);
+        }
+        if (attached) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+    }
+    return PyLong_FromLong(handle);
+}
+
+static PyObject *py_recorder_stop(PyObject *self, PyObject *args) {
+    int handle;
+    PyObject *result = NULL;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "i", &handle)) {
+        return NULL;
+    }
+    int attached = 0;
+    JNIEnv *env = jni_env(&attached);
+    if (env && g_native_class) {
+        jmethodID method = static_method(env, "recorderStop", "(I)Ljava/lang/String;");
+        if (method) {
+            jstring value = (jstring)(*env)->CallStaticObjectMethod(env, g_native_class,
+                                                                    method, (jint)handle);
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);
+            } else if (value) {
+                Utf8Text text = jstring_to_utf8(env, value);
+                if (text.data) {
+                    result = PyUnicode_FromStringAndSize(text.data, (Py_ssize_t)text.len);
+                }
+                text_free(&text);
+                (*env)->DeleteLocalRef(env, value);
+            }
+        }
+        if (attached) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+    }
+    return result ? result : PyUnicode_FromString("");
+}
+
+static PyObject *py_recorder_is_recording(PyObject *self, PyObject *args) {
+    int handle;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "i", &handle)) {
+        return NULL;
+    }
+    return PyBool_FromLong(audio_call_bool("recorderIsRecording", "(I)Z", handle));
+}
+
+static PyObject *py_recorder_elapsed(PyObject *self, PyObject *args) {
+    int handle;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "i", &handle)) {
+        return NULL;
+    }
+    return PyLong_FromLong(audio_call_int("recorderElapsed", "(I)I", handle));
+}
+
 static PyMethodDef module_methods[] = {
     {"render", py_render, METH_VARARGS, "Send a serialised widget tree to the UI thread."},
     {"toast", py_toast, METH_VARARGS, "Show a toast."},
@@ -816,6 +1328,27 @@ static PyMethodDef module_methods[] = {
     {"request_permission", py_request_permission, METH_VARARGS, "Request a permission."},
     {"device_language", py_device_language, METH_NOARGS, "The device's language tag."},
     {"open_url", py_open_url, METH_VARARGS, "Open a URL in the browser."},
+    {"pick_file", py_pick_file, METH_VARARGS, "Ask the user for files."},
+    {"pick_image", py_pick_image, METH_NOARGS, "Take a photo or pick a picture."},
+    {"copy_to_clipboard", py_copy_to_clipboard, METH_VARARGS, "Copy text."},
+    {"clipboard_text", py_clipboard_text, METH_NOARGS, "Read the clipboard."},
+    {"share", py_share, METH_VARARGS, "Open the share sheet."},
+    {"audio_open", py_audio_open, METH_VARARGS, "Open an audio file."},
+    {"audio_play", py_audio_play, METH_VARARGS, "Play."},
+    {"audio_pause", py_audio_pause, METH_VARARGS, "Pause."},
+    {"audio_stop", py_audio_stop, METH_VARARGS, "Stop."},
+    {"audio_seek", py_audio_seek, METH_VARARGS, "Seek."},
+    {"audio_position", py_audio_position, METH_VARARGS, "Current position in ms."},
+    {"audio_duration", py_audio_duration, METH_VARARGS, "Length in ms."},
+    {"audio_is_playing", py_audio_is_playing, METH_VARARGS, "Whether it is playing."},
+    {"audio_volume", py_audio_volume, METH_VARARGS, "Set the volume, 0..1."},
+    {"audio_looping", py_audio_looping, METH_VARARGS, "Loop the file."},
+    {"audio_release", py_audio_release, METH_VARARGS, "Free the player."},
+    {"recorder_start", py_recorder_start, METH_VARARGS, "Start recording."},
+    {"recorder_stop", py_recorder_stop, METH_VARARGS, "Stop and return the file."},
+    {"recorder_cancel", py_recorder_cancel, METH_VARARGS, "Throw the take away."},
+    {"recorder_is_recording", py_recorder_is_recording, METH_VARARGS, "Recording state."},
+    {"recorder_elapsed", py_recorder_elapsed, METH_VARARGS, "Recording length in ms."},
     {"next_event", py_next_event, METH_VARARGS, "Block until the next UI event."},
     {"wake", py_wake, METH_NOARGS, "Wake the thread blocked in next_event()."},
     {"finish_app", py_finish_app, METH_NOARGS, "Ask the Activity to finish."},

@@ -9,7 +9,7 @@ from __future__ import annotations
 from ...log import get_logger
 from ..platform import is_android
 from .android import AndroidBridge
-from .base import Bridge, BridgeCall, NotificationSpec
+from .base import Bridge, BridgeCall, NotificationSpec, PickedFile, pick_filters
 from .gui import GuiBridge, WebBridge
 from .jni import JNIBridge
 from .stub import StubBridge
@@ -19,6 +19,8 @@ __all__ = [
     "AndroidBridge",
     "BridgeCall",
     "NotificationSpec",
+    "PickedFile",
+    "pick_filters",
     "JNIBridge",
     "StubBridge",
     "GuiBridge",

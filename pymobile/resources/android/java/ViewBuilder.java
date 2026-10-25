@@ -80,6 +80,8 @@ final class ViewBuilder {
     private int colorSurface = Color.WHITE;
     private int colorText = Color.parseColor("#212121");
     private int colorTextMuted = Color.parseColor("#757575");
+    /** Destructive actions (ButtonVariant.DANGER). */
+    private int colorError = Color.parseColor("#C62828");
     private String themeSignature = null;
     private boolean darkTheme = false;
 
@@ -100,6 +102,8 @@ final class ViewBuilder {
                 : Color.WHITE;
         colorText = parseColor(t.optString("TEXT", ""), Color.parseColor("#212121"));
         colorTextMuted = parseColor(t.optString("TEXT_MUTED", ""), Color.parseColor("#757575"));
+        // The destructive button follows the theme's ERROR colour.
+        colorError = parseColor(t.optString("ERROR", ""), Color.parseColor("#C62828"));
         colorOnPrimary = Color.WHITE;
         darkTheme = t.optBoolean("dark", false);
         return true;
@@ -384,6 +388,39 @@ final class ViewBuilder {
         }
     }
 
+    /**
+     * Make a layout view tappable (C-3).
+     *
+     * The container reports the same events as a Button, with the container's
+     * own id, so Python's press()/long_press() run and the whole surface
+     * (a Card, a Row, a Stack overlay) becomes the target. A foreground
+     * selectable item is what gives the ripple its shape and tells
+     * accessibility this is a control, not a group.
+     */
+    private void bindContainerTap(final View view, final String id, JSONObject props,
+                                  boolean enabled) {
+        final boolean hasPress = props.optString("on_press", "").length() > 0;
+        final boolean hasLongPress = props.optString("on_long_press", "").length() > 0;
+        view.setClickable(enabled);
+        if (hasPress) {
+            view.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    Native.dispatchEvent(id, "press", "");
+                }
+            });
+        }
+        if (hasLongPress) {
+            view.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override
+                public boolean onLongClick(View v) {
+                    Native.dispatchEvent(id, "long_press", "");
+                    return true;
+                }
+            });
+        }
+    }
+
     /** Build the view for one node, recursing into children. */
     View build(JSONObject node) throws JSONException {
         String type = node.optString("type", "Label");
@@ -399,6 +436,10 @@ final class ViewBuilder {
         View view;
         switch (type) {
             case "Column":
+            case "Container":
+                // C-2: an explicit Container is a Column on the device —
+                // without this case it fell through to CustomWidgetRegistry and
+                // drew "[Container: no native renderer]".
                 view = buildLinear(node, props, LinearLayout.VERTICAL);
                 break;
             case "Row":
@@ -408,7 +449,7 @@ final class ViewBuilder {
                 view = buildScroll(node, props);
                 break;
             case "Stack":
-                view = buildStack(node);
+                view = buildStack(node, props);
                 break;
             case "Grid":
                 view = buildGrid(node, props);
@@ -512,6 +553,9 @@ final class ViewBuilder {
             case "Chart":
                 view = buildVector(type, id, props);
                 break;
+            case "Canvas":
+                view = buildCanvas(id, props);
+                break;
             case "AutoComplete":
                 view = buildAutoComplete(id, props);
                 break;
@@ -538,6 +582,14 @@ final class ViewBuilder {
         }
 
         view.setEnabled(enabled);
+        // C-3: a container with on_press is one native touch target, so a card
+        // of labels becomes a tap without being rebuilt as a ListTile. The
+        // children keep their own listeners; Android gives the tap to the
+        // innermost clickable view, which is the behaviour a user expects.
+        if (props.optString("on_press", "").length() > 0
+                || props.optString("on_long_press", "").length() > 0) {
+            bindContainerTap(view, id, props, enabled);
+        }
         view.setVisibility(visible ? View.VISIBLE : View.GONE);
         JSONObject animation = node.optJSONObject("animation");
         if (animation != null && "fade_scale".equals(animation.optString("visibility", ""))) {
@@ -591,6 +643,17 @@ final class ViewBuilder {
                 }
             }).start();
         }
+    }
+
+    /**
+     * A declarative drawing. It shares {@link AdvancedViews.VectorView} with
+     * Chart and Icon: the shape list is identical, only the intent differs, so
+     * the Android side gained a branch rather than a renderer.
+     */
+    private View buildCanvas(String id, JSONObject props) {
+        AdvancedViews.VectorView view = new AdvancedViews.VectorView(context, "Canvas");
+        view.bind(id, props, colorText);
+        return view;
     }
 
     private View buildVector(String kind, String id, JSONObject props) {
@@ -911,12 +974,25 @@ final class ViewBuilder {
         return scroller;
     }
 
-    private View buildStack(JSONObject node) throws JSONException {
+    private View buildStack(JSONObject node, JSONObject props) throws JSONException {
         android.widget.FrameLayout frame = new android.widget.FrameLayout(context);
+        int spacing = dp(props.optInt("spacing", 0));
         JSONArray children = node.optJSONArray("children");
         if (children != null) {
             for (int i = 0; i < children.length(); i++) {
-                frame.addView(buildChild(children.getJSONObject(i)));
+                View child = buildChild(children.getJSONObject(i));
+                if (spacing > 0 && i > 0) {
+                    // C-2: offset each layer so an overlay does not sit exactly
+                    // on the content it annotates.
+                    android.widget.FrameLayout.LayoutParams params =
+                            new android.widget.FrameLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.WRAP_CONTENT);
+                    params.topMargin = i * spacing;
+                    frame.addView(child, params);
+                } else {
+                    frame.addView(child);
+                }
             }
         }
         return frame;
@@ -1145,10 +1221,16 @@ final class ViewBuilder {
         box.addView(head, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         JSONArray children = node.optJSONArray("children");
+        int spacing = dp(props.optInt("spacing", 0));
         if (children != null) {
             for (int i = 0; i < children.length(); i++) {
-                box.addView(buildChild(children.getJSONObject(i)), new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                if (spacing > 0 && i > 0) {
+                    // C-2: the dialog's own spacing, without a wrapping Column.
+                    params.topMargin = spacing;
+                }
+                box.addView(buildChild(children.getJSONObject(i)), params);
             }
         }
         ScrollView scroll = new ScrollView(context);
@@ -1339,10 +1421,44 @@ final class ViewBuilder {
         return placeholder;
     }
 
+    /**
+     * A button in one of the five roles of {@code ButtonVariant}.
+     *
+     * The platform widget ignores a background set from a Style, which is why
+     * every button used to look the same grey. The variants are drawn here as
+     * a GradientDrawable + a text colour, so primary/tonal/outlined/text/danger
+     * are visually distinct on the device as well as in the previews.
+     */
     private View buildButton(final String id, JSONObject props) {
+        String variant = props.optString("variant", "primary");
+        GradientDrawable shape = new GradientDrawable();
+        shape.setCornerRadius(dp(variant.equals("text") ? 0 : 10));
+        int fill = colorPrimary;
+        int textColour = Color.WHITE;
+        if ("tonal".equals(variant)) {
+            fill = blend(colorPrimary, colorSurface, 0.82f);
+            textColour = readableOn(fill);
+        } else if ("outlined".equals(variant)) {
+            shape.setColor(Color.TRANSPARENT);
+            shape.setStroke(Math.max(1, dp(1)), colorPrimary);
+            textColour = colorPrimary;
+        } else if ("text".equals(variant)) {
+            shape.setColor(Color.TRANSPARENT);
+            textColour = colorPrimary;
+        } else if ("danger".equals(variant)) {
+            fill = colorError;
+            textColour = readableOn(fill);
+        }
+        if (!"outlined".equals(variant) && !"text".equals(variant)) {
+            shape.setColor(fill);
+        }
         Button button = new Button(context);
+        button.setBackground(shape);
+        button.setTextColor(textColour);
         button.setText(props.optString("text", ""));
         button.setAllCaps(false);
+        button.setElevation(dp("primary".equals(variant) || "danger".equals(variant) ? 2 : 0));
+        button.setPadding(dp(20), dp(10), dp(20), dp(10));
         button.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -1350,6 +1466,23 @@ final class ViewBuilder {
             }
         });
         return button;
+    }
+
+    /** Mix two colours; {@code amount} is how much of {@code over} to keep. */
+    private static int blend(int base, int over, float amount) {
+        float keep = Math.max(0f, Math.min(1f, amount));
+        int r = Math.round(Color.red(base) * keep + Color.red(over) * (1 - keep));
+        int g = Math.round(Color.green(base) * keep + Color.green(over) * (1 - keep));
+        int b = Math.round(Color.blue(base) * keep + Color.blue(over) * (1 - keep));
+        return Color.rgb(r, g, b);
+    }
+
+    /** Black or white, whichever is legible on {@code background}. */
+    private static int readableOn(int background) {
+        double luminance = (0.299 * Color.red(background)
+                + 0.587 * Color.green(background)
+                + 0.114 * Color.blue(background)) / 255.0;
+        return luminance > 0.6 ? Color.BLACK : Color.WHITE;
     }
 
     private View buildTextInput(final String id, JSONObject props) {
@@ -2609,7 +2742,8 @@ final class ViewBuilder {
         if (CustomWidgetRegistry.hasRenderer(type)) {
             return CustomWidgetRegistry.update(view, type, id, props);
         }
-        if ("Icon".equals(type) || "IconButton".equals(type) || "Chart".equals(type)) {
+        if ("Icon".equals(type) || "IconButton".equals(type) || "Chart".equals(type)
+                || "Canvas".equals(type)) {
             if (!(view instanceof AdvancedViews.VectorView)
                     || !type.equals(((AdvancedViews.VectorView) view).kind)) return false;
             ((AdvancedViews.VectorView) view).bind(id, props, colorText);

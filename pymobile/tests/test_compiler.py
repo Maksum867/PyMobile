@@ -358,7 +358,12 @@ class TestPipeline:
             from pymobile.compiler.pipeline import BuildPipeline
 
             config = ProjectConfig(
-                name="Demo App", package="com.example.demo", root={str(project.root)!r}
+                name="Demo App",
+                package="com.example.demo",
+                root={str(project.root)!r},
+                # pin the same output_dir as the ``project`` fixture, otherwise
+                # the APK lands in a different directory and the cache misses.
+                output_dir={project.output_dir!r},
             )
             pipeline = BuildPipeline(config)
             print(pipeline._fingerprint(pipeline._collect()))
@@ -389,7 +394,13 @@ class TestPipeline:
             from pymobile.compiler.pipeline import build_apk
 
             config = ProjectConfig(
-                name="Demo App", package="com.example.demo", root={str(project.root)!r}
+                name="Demo App",
+                package="com.example.demo",
+                root={str(project.root)!r},
+                # Pin the same output_dir as the ``project`` fixture: the default
+                # is "apk" now (P1), so a fresh config would build elsewhere and
+                # legitimately miss the cache.
+                output_dir={project.output_dir!r},
             )
             print(build_apk(config).cached)
             """

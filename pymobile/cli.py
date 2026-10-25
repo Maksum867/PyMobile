@@ -1,6 +1,6 @@
 """Command line interface.
 
-Sub-commands: ``init``, ``build``, ``run``, ``watch``, ``preview``, ``check-ui``, ``info``,
+Sub-commands: ``init``, ``build``, ``run``, ``dev``, ``watch``, ``preview``, ``check-ui``, ``info``,
 ``clean``, ``widget add``, ``widget-java``, ``setup-sdk``, ``emulator``,
 ``install``, ``doctor``.
 Every command returns an exit code; :func:`main` is the console-script entry
@@ -23,6 +23,7 @@ import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .compiler.pipeline import BuildPipeline
@@ -108,6 +109,36 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _warn_if_output_is_ignored(config: ProjectConfig) -> None:
+    """Say so when the chosen output directory will never leave the machine.
+
+    ``output_dir`` defaults to ``apk/`` for exactly this reason, but a project
+    that sets ``build``/``dist``/``out`` is usually inside a ``.gitignore`` and
+    a CI artefact rule — the APK is built, the file is fine, and nobody can
+    find it. Silent builds that "disappear" are the worst version of this.
+    """
+    ignore_file = config.root / ".gitignore"
+    if not ignore_file.is_file():
+        return
+    try:
+        lines = ignore_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:  # pragma: no cover - unreadable file is not our problem
+        return
+    name = Path(config.output_dir).name
+    patterns = {
+        line.strip().strip("/").lstrip("!")
+        for line in lines
+        if line.strip() and not line.strip().startswith("#")
+    }
+    if name not in patterns and f"{name}/" not in patterns:
+        return
+    _out.warn(
+        f"output_dir {config.output_dir!r} matches a rule in {ignore_file.name}: "
+        "the APK will not be committed or kept as a CI artefact"
+    )
+    _out.hint("use `--output apk` (the default) or remove the ignore rule")
+
+
 def cmd_build(args: argparse.Namespace) -> int:
     """Compile the project into an APK."""
     config = _load(args)
@@ -137,6 +168,7 @@ def cmd_build(args: argparse.Namespace) -> int:
             "prefer PYMOBILE_KS_PASS / PYMOBILE_KEY_PASS"
         )
 
+    _warn_if_output_is_ignored(config)
     native = getattr(args, "native", False)
     if native:
         _out.info("native build: this may take a few minutes on the first run")
@@ -337,6 +369,95 @@ def _run_web(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> in
         preview.serve_forever()
     _out.ok("stopped")
     return 0
+
+
+def cmd_dev(args: argparse.Namespace) -> int:
+    """Interactive window + live reload — ``run --gui`` and ``watch`` in one.
+
+    The two commands existed but had to be remembered and combined by hand:
+    ``watch`` printed a picture on every save, ``run --gui`` opened a window
+    that never noticed an edit. ``dev`` keeps a Tk window open and re-executes
+    the app inside it whenever a source file changes, which is the loop a
+    desktop preview is for. Falls back to the text preview when Tk is missing.
+    """
+    from .core.bridge import GuiBridge, StubBridge, set_bridge
+    from .core.ui.gui import tkinter_available
+    from .core.watcher import FileWatcher
+
+    config = _load(args)
+    entry = _entrypoint(config)
+    roots = [config.source_path]
+
+    if not tkinter_available():
+        _out.warn("Tkinter is not available; showing the text preview instead")
+        _out.hint("install python3-tk (Linux) or use `pymobile watch`")
+        return cmd_watch(args)
+
+    _out.info(f"dev: {config.name} — edit a file to reload, Ctrl+C to stop")
+    window = None
+    try:
+        while True:
+            _purge_project_modules(config.source_path)
+            # A fresh bridge per reload, so a removed widget does not linger.
+            bridge = GuiBridge(verbose=False)
+            set_bridge(bridge)
+            try:
+                _execute(config, entry)
+                _navigate(args, config)
+            except Exception as error:
+                _out.error(f"{type(error).__name__}: {error}")
+                if isinstance(error, PyMobileError) and error.hint:
+                    _out.hint(error.hint)
+                if getattr(args, "verbose", False):
+                    import traceback
+
+                    traceback.print_exc()
+            window = _open_gui_window(bridge, config)
+            _out.ok("watching for changes")
+            watcher = FileWatcher(roots, interval=getattr(args, "interval", 0.5))
+            changed = watcher.wait()
+            names = ", ".join(path.name for path in changed[:3])
+            if len(changed) > 3:
+                names += f" (+{len(changed) - 3})"
+            _out.info(f"changed: {names} — reloading")
+            _close_gui_window(window)
+            window = None
+    except KeyboardInterrupt:  # pragma: no cover - interactive
+        print()
+        _out.ok("stopped")
+        return 0
+    finally:
+        if window is not None:
+            _close_gui_window(window)
+        set_bridge(StubBridge(verbose=False))
+
+
+def _open_gui_window(bridge: Any, config: ProjectConfig) -> Any:
+    """Open the Tk preview for ``dev`` without blocking on ``mainloop()``.
+
+    Returns the preview, or ``None`` on a headless machine — ``dev`` then keeps
+    reloading and says so instead of dying on the first save.
+    """
+    from .core.app import App
+    from .core.ui.gui import GuiPreview
+
+    app = App.current()
+    if app is None:
+        return None
+    preview = GuiPreview(app, title=f"{app.name} — dev")
+    bridge.attach(preview)
+    preview.root.update_idletasks()
+    preview.root.update()
+    return preview
+
+
+def _close_gui_window(preview: Any) -> None:
+    """Close a window opened by :func:`_open_gui_window` (missing display, too)."""
+    if preview is None:
+        return
+    # The window may already be gone (closed by the user, or never drawn).
+    with contextlib.suppress(Exception):  # pragma: no cover - defensive
+        preview.root.destroy()
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
@@ -926,17 +1047,17 @@ _DEFAULT_EMULATOR_IMAGE = "system-images;android-35;google_apis;x86_64"
 
 
 def _sdk_root_for_device(args: argparse.Namespace) -> Path:
-    """Find the SDK for adb/emulator commands without requiring build tools."""
-    explicit = getattr(args, "sdk", None)
-    if explicit:
-        return Path(explicit).expanduser().resolve()
-    for name in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
-        value = os.environ.get(name)
-        if value:
-            return Path(value).expanduser().resolve()
-    from .compiler.sdk_installer import default_sdk_home
+    """Find the SDK for adb/emulator commands without requiring build tools.
 
-    return default_sdk_home() / "sdk"
+    Delegates to the one resolver in :mod:`pymobile.compiler.toolchain`, so
+    ``PYMOBILE_SDK_HOME``, ``ANDROID_HOME`` and the managed install are read
+    the same way by every command (P1: they used to disagree).
+    """
+    from .compiler.sdk_installer import default_sdk_home
+    from .compiler.toolchain import _sdk_root
+
+    resolved = _sdk_root(getattr(args, "sdk", None))
+    return resolved if resolved is not None else default_sdk_home() / "sdk"
 
 
 def _sdk_executable(root: Path, relative: str, name: str) -> Path:
@@ -1427,6 +1548,23 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     run.set_defaults(func=cmd_run)
+
+    dev = sub.add_parser(
+        "dev",
+        help="interactive window with live reload (run --gui + watch in one)",
+        parents=[common],
+    )
+    dev.add_argument(
+        "--interval",
+        type=float,
+        default=0.5,
+        help="seconds between source scans (default: 0.5)",
+    )
+    dev.add_argument("--screen", metavar="NAME", help="show this screen instead of the first")
+    dev.add_argument("--args", metavar="JSON", help="with --screen: constructor arguments as JSON")
+    dev.add_argument("--set", metavar="NAME=VALUE", action="append", default=[])
+    dev.add_argument("--ids", action="store_true", help="annotate widgets with their id")
+    dev.set_defaults(func=cmd_dev)
 
     watch = sub.add_parser(
         "watch",

@@ -8,6 +8,7 @@ the native side can apply its own defaults.
 from __future__ import annotations
 
 import re
+import types
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
@@ -79,9 +80,75 @@ class Align:
         return value
 
 
+class _FieldInsteadOfMethod(TypeError):
+    """A dataclass field called like a constructor: ``EdgeInsets.top(8)``.
+
+    ``top`` is a field, so the class attribute is a slot descriptor and the
+    call died with ``'member_descriptor' object is not callable`` — a message
+    that says nothing about what to write instead.
+    """
+
+
+class _FieldShorthand:
+    """Stand-in for a slot descriptor on the class, so calling it explains itself."""
+
+    __slots__ = ("_owner", "_name")
+
+    def __init__(self, owner: type, name: str) -> None:
+        self._owner = owner
+        self._name = name
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        raise _FieldInsteadOfMethod(
+            f"{self._owner.__name__}.{self._name}(…) is not a constructor: "
+            f"{self._name!r} is a field of the dataclass. Write "
+            f"{self._owner.__name__}.only({self._name}=8) — or .all(8), "
+            f".symmetric(horizontal=…, vertical=…) — instead."
+        )
+
+    def __get__(self, instance: Any, owner: type | None = None) -> Any:
+        # Instance access keeps working: inset.top is the number. The slot
+        # descriptor of the same name still lives on the class, so this hands
+        # over to the descriptor protocol directly — the argument mypy wants
+        # is the accessor itself, not this stand-in.
+        descriptor = types.MemberDescriptorType
+        return descriptor.__get__(descriptor, instance, owner)  # type: ignore[arg-type]
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<{self._owner.__name__}.{self._name}: a field, not a method>"
+
+
+class _FieldGuard(type):
+    """Turn ``EdgeInsets.top(8)`` into a hint instead of a descriptor error.
+
+    Only the *class* attribute is wrapped; ``inset.top`` on an instance still
+    returns the number, and ``dataclasses.asdict``/``replace``/``fields`` — the
+    framework's own serialisation path — keep seeing the plain slots.
+    """
+
+    def __getattribute__(cls, name: str) -> Any:
+        value = super().__getattribute__(name)
+        if isinstance(value, types.MemberDescriptorType):
+            return _FieldShorthand(cls, name)
+        return value
+
+
+#: ``EdgeInsets.only()`` spellings that name an edge already in the dataclass:
+#: logical start/end are left/right in this LTR-only layout.
+_ONLY_ALIASES = {"leading": "left", "trailing": "right", "start": "left", "end": "right"}
+
+
 @dataclass(frozen=True, slots=True)
-class EdgeInsets:
-    """Padding or margin in density-independent pixels."""
+class EdgeInsets(metaclass=_FieldGuard):
+    """Padding or margin in density-independent pixels.
+
+    The four sides are plain fields, so the named constructors are the way to
+    say "only these sides": :meth:`only` (``only(top=8)``,
+    ``only(leading=16, trailing=4)``), :meth:`all`, :meth:`symmetric`. Calling
+    a field — ``EdgeInsets.top(8)`` — fails with a ``TypeError`` that names
+    :meth:`only`, instead of the old ``'member_descriptor' object is not
+    callable``.
+    """
 
     left: int = 0
     top: int = 0
@@ -97,6 +164,78 @@ class EdgeInsets:
     def symmetric(cls, *, horizontal: int = 0, vertical: int = 0) -> EdgeInsets:
         """Separate horizontal and vertical insets."""
         return cls(horizontal, vertical, horizontal, vertical)
+
+    @classmethod
+    def only(
+        cls,
+        *,
+        left: int | None = None,
+        top: int | None = None,
+        right: int | None = None,
+        bottom: int | None = None,
+        leading: int | None = None,
+        trailing: int | None = None,
+        start: int | None = None,
+        end: int | None = None,
+        horizontal: int | None = None,
+        vertical: int | None = None,
+    ) -> EdgeInsets:
+        """Inset only the sides named; every other side stays ``0``.
+
+        This is what ``EdgeInsets.top(8)`` meant to say. ``leading``/``trailing``
+        (and ``start``/``end``) are the left/right spellings, and
+        ``horizontal``/``vertical`` group a pair the way :meth:`symmetric` does::
+
+            EdgeInsets.only(top=8)                      # 0, 8, 0, 0
+            EdgeInsets.only(top=8, bottom=12)           # 0, 8, 0, 12
+            EdgeInsets.only(leading=16, trailing=4)     # 16, 0, 4, 0
+            EdgeInsets.only(vertical=8)                 # 0, 8, 0, 8
+
+        Naming the same side twice (``only(left=4, leading=4)``,
+        ``only(top=8, vertical=8)``) is refused rather than silently letting
+        one value win.
+        """
+        named: dict[str, int] = {}
+        for name, value in (
+            ("left", left),
+            ("top", top),
+            ("right", right),
+            ("bottom", bottom),
+            ("leading", leading),
+            ("trailing", trailing),
+            ("start", start),
+            ("end", end),
+            ("horizontal", horizontal),
+            ("vertical", vertical),
+        ):
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"EdgeInsets.only({name}={value!r}): every side must be an int")
+            if value < 0:
+                raise ValueError(f"EdgeInsets.only({name}={value}): a side must not be negative")
+            target = _ONLY_ALIASES.get(name, name)
+            touched = (
+                ("top", "bottom")
+                if target == "vertical"
+                else ("left", "right")
+                if target == "horizontal"
+                else (target,)
+            )
+            for side in touched:
+                if side in named:
+                    raise TypeError(
+                        f"EdgeInsets.only() names {side!r} twice (as {name!r} and as another "
+                        "argument). Name each side once: only(top=8), only(vertical=8) or "
+                        "only(leading=8) — not two of them together."
+                    )
+                named[side] = value
+        return cls(
+            named.get("left", 0),
+            named.get("top", 0),
+            named.get("right", 0),
+            named.get("bottom", 0),
+        )
 
     def to_list(self) -> list[int]:
         """``[left, top, right, bottom]``."""

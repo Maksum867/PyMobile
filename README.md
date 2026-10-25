@@ -20,7 +20,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 
 > ### ⚠️ Alpha software — known bugs, actively being fixed
 >
-> PyMobile is at **0.9.x** and is still in alpha. It builds and signs real,
+> PyMobile is at **0.10.x** and is still in alpha. It builds and signs real,
 > installable APKs today, but the API can change between minor releases and
 > there are known bugs. I am actively working on them: fixes ship in
 > every release — see the
@@ -30,7 +30,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.9.6`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.10.0`) and read the
 > changelog before upgrading. What may change, and how much notice you get, is
 > written down in the
 > [versioning and deprecation policy](#versioning-and-deprecation-policy). Bug
@@ -143,6 +143,15 @@ Verified on a physical device running Android 14.
 
 **Requirements:** Python 3.10+, about 1 GB of free disk space, an Android 7.0+
 (API 24) device.
+
+The framework itself runs on CPython 3.10 and newer, including the 3.16
+pre-releases. Verified by hand against **3.16.0a1**, built from python.org: the
+whole suite passes (1673 passed, 8 skipped), `ruff` and `mypy` are clean, and
+`pymobile init` / `preview` / `check-ui` / `build` work under it. CI runs a
+separate, allowed-to-fail job on 3.15 and 3.16 pre-releases so a future alpha
+cannot break the framework unnoticed. (The *phone* runtime is a fixed 3.14 build
+bundled by the compiler — that is the interpreter inside the APK, not the one
+you run the framework with.)
 
 ```bash
 pip install pymobile-framework
@@ -293,6 +302,21 @@ label.set_text("New text")
 Button("Save", on_press=self.save)
 Button("Unavailable", on_press=self.save, enabled=False)   # taps ignored
 ```
+
+`variant=` picks the intent without a `Style(...)` recipe per call site:
+
+```python
+Button("Save",  variant=ButtonVariant.PRIMARY)    # the default: filled, white label
+Button("Later", variant="tonal")                  # tinted background, primary label
+Button("Details", variant="outlined")             # border, transparent inside
+Button("Skip", variant="text")                    # just the label
+Button("Delete", variant="danger")                # red, white label
+```
+
+The five variants mean the same thing on Android, in the browser preview, in
+the mockup picture and in the ASCII picture. A typo lists the ones that exist:
+`invalid variant 'primry'; expected one of primary, tonal, outlined, text,
+danger`.
 
 ### TextInput
 
@@ -503,6 +527,32 @@ Image("assets/logo.png", fit="cover")   # contain | cover | fill | none
 ```
 
 Paths are relative to your project directory.
+
+### Canvas, Line, Path, Shape
+
+Vector drawing, for the things a layout cannot express: a waveform, a progress
+ring, a signature, a sparkline. Elements are plain data, so a drawing renders
+identically on the phone, in the browser preview, in the desktop window and in
+a golden PNG snapshot — and it can be snapshotted like any other widget.
+
+```python
+Canvas(
+    Rect(0, 0, 210, 80, color="#F5F5F5"),
+    *[Line((4 + i * 5, 40), (4 + i * 5, 40 - value * 30), width=2) for i, value in enumerate(samples)],
+    Line((4, 40), (204, 40), color="#B0BEC5", width=1),
+    width=210,
+    height=80,
+)
+```
+
+`Rect`, `Circle`, `Line`, `Path(points, closed=True)`, `Polygon` and
+`Shape("rect" | "circle" | "polygon" | "text", …)` cover the primitives;
+`color`, `width`, `opacity` and `fill` are understood by all of them. Colours
+default to the theme's text colour and `opacity` is folded into the alpha
+channel, so a 50 % stroke is 50 % transparent everywhere. Coordinates are in the
+canvas' own logical box (``width`` × ``height``), which every renderer scales to
+fit. Before this, a waveform meant forty `Container` strips of differing width —
+one nested layout per sample.
 
 ### List / ListTile
 
@@ -860,7 +910,15 @@ python -m pymobile check-ui --screen Settings --width 320 --strict
 The command warns about unnamed interactive controls and images, explicitly
 undersized control widths/heights (the default target is 48 dp), fixed widths wider
 than their parent, and `Row` contents that appear too wide for the chosen
-screen. `--json` prints machine-readable results; `--strict` returns exit code
+screen. It also checks **colour contrast** against WCAG AA instead of leaving it
+to the eye: every text widget is measured against the background it is actually
+drawn on (a `Style(color=...)` on a `Card` inherits the card's background, not
+the screen's), and anything below 4.5:1 — 3:1 for large text, ≥18 dp or bold
+≥14 dp — is reported with the ratio and the two colours:
+
+```text
+contrast: text #2A2233 on #191322 is 1.19:1, below WCAG AA 4.5:1
+``` `--json` prints machine-readable results; `--strict` returns exit code
 1 when any warning is found. This is a lightweight static audit, not a full
 Android layout or TalkBack simulator: unspecified native control sizes, font
 scaling, localization and device-specific behavior still need a real-device
@@ -1291,6 +1349,26 @@ app.theme["PRIMARY"]                 # resolved colour
 Built-in themes: `Theme.light()` and `Theme.dark()`. Custom themes use
 `Theme(name, colors)` with your own palette.
 
+Keeping two palettes by hand drifts: one gets a new colour, the other does not.
+`Theme.dark_from(light)` derives the dark one from the light one — it reads each
+colour's perceived luminance, flips the background and surface, keeps the hue of
+the accents and lightens each accent until it clears 4.5:1 against the dark
+surface:
+
+```python
+mocha = Theme("mocha", {"PRIMARY": "#6D5340", "BACKGROUND": "#F2ECE7", ...})
+dark = Theme.dark_from(mocha)        # a warm dark theme, not a blue-grey slab
+App("My App", theme=dark)
+```
+
+There are two small sets of design tokens as well, plain numbers so they read as
+intent instead of as magic values:
+
+```python
+Card(child, spacing=Space.md)                  # Space.xs/sm/md/lg/xl = 4/8/12/16/24
+Label("Total", style=Style(font_size=TextScale.title))   # caption/body/title/headline = 12/14/22/28
+```
+
 The active theme is available everywhere via `app.theme`. `Color.PRIMARY` is a
 fixed hex constant (`#3F51B5`); for the live theme use `app.theme["PRIMARY"]`
 (or `app.theme.color("BACKGROUND")`).
@@ -1313,6 +1391,44 @@ app.storage.exists("token")          # alias, more discoverable
 app.storage.keys()                   # all keys
 app.storage.clear()                  # wipe everything
 ```
+
+**Namespaces.** Two components of one app used to share a single flat key space,
+so a "clear cache" button wiped the login token as well. Scope a store and
+`clear()` only touches its own keys:
+
+```python
+tokens = Storage("state.json", namespace="auth")
+cache  = Storage("state.json", namespace="cache")
+cache["page"] = 2
+cache.clear()                        # the auth keys are untouched
+```
+
+`Storage.mutate(key, fn)` updates a value in place, so read-modify-write does
+not race with another thread doing the same:
+
+```python
+app.storage.mutate("visits", lambda count: count + 1, default=0)   # 1, then 2
+app.storage.increment("visits")                                    # the same, spelled out
+```
+
+**Schema versions.** A store that grows fields needs an upgrade path, and doing
+it by hand means a try/except around every read:
+
+```python
+Storage(
+    "profile.json",
+    schema_version=2,
+    migrations={
+         1: lambda data: {**data, "units": "metric"},   # a step is keyed by the
+        2: lambda data: {**data, "theme": "dark"},     # version it *reaches*
+    },
+)
+```
+
+Opening a file stamped with an older version runs the migrations it needs and
+stamps the new number; a file *newer* than the code is left untouched and raises
+a `PyMobileError` naming the version, because guessing at a future format is how
+data gets destroyed.
 
 Data persists across app restarts. On Android it uses the app's private files
 directory; on desktop `~/.pymobile/<package>.json` with the dots replaced by
@@ -1729,6 +1845,83 @@ amplitudes — several devices silently ignore the default.
 
 ---
 
+## Files, audio, the clipboard and sharing
+
+Six things every phone app can do and the framework could not: choose a file,
+play a sound, record one, copy to the clipboard, share a link, and draw.
+
+### Picking a file
+
+```python
+file = app.pick_file("audio/*")          # PickedFile or None
+if file is not None:
+    print(file.path, file.name, file.size, file.mime)
+
+picked = app.pick_files(".wav,.mp3")     # several at once
+photo = app.pick_image()                 # camera or gallery
+```
+
+`accept` takes a MIME type (`"audio/*"`), a comma-separated list, or an
+extension (`".wav"`) that is translated for you. The result is a
+`PickedFile(path, name, size, mime)` pointing at a copy in the app's own cache:
+a `content://` URI stops being readable the moment the activity goes away, and a
+plain path behaves like a packaged asset. The call blocks until the user
+answers, the same way a permission dialog already did, so app code stays top to
+bottom. A cancelled picker returns `None` — never an exception.
+
+Reading and saving is ordinary Python:
+
+```python
+from pathlib import Path
+
+seconds = len(Path(file.path).read_bytes()) / 16000   # a rough WAV estimate
+```
+
+### Playing audio
+
+```python
+player = app.audio("assets/beep.wav", on_end=lambda: print("done"), volume=0.8)
+player.play()                 # returns at once — the UI keeps running
+player.pause()                # keeps the position
+player.seek(12_000)           # milliseconds
+player.position, player.duration
+player.volume = 0.3
+player.release()
+```
+
+`play()` never blocks: Android's `MediaPlayer` is prepared asynchronously and
+the position is published from the app's own timer, so `on_tick(position_ms)`
+works on every Android version and a metronome can follow it. `loop=True`,
+`mute()`/`unmute()` and `app.audio(...)` (which wires the player to the app's
+timers) are there too. A `https://` source streams.
+
+### Recording
+
+```python
+recorder = app.recorder()
+recorder.start()              # asks for RECORD_AUDIO first
+...
+take = recorder.stop()        # a PickedFile: same shape as a picked one
+recorder.cancel()             # throw the take away
+```
+
+A denied microphone raises a `PlatformError` that says which line of
+`pymobile.toml` to add, instead of writing a zero-length file.
+
+### Clipboard and the share sheet
+
+```python
+app.copy("https://example.com/room/42")   # True when it stuck
+app.clipboard()
+app.share(url="https://example.com/a b")  # the space is escaped for you
+app.share("Look at this", "https://example.com", subject="Room")
+```
+
+`share()` opens the system sheet, sends the link both as the body text and as a
+link stream (SMS and QR scanners read the body, messengers read the stream),
+and returns `False` when the platform has nothing to share it with — so a
+"Share" button can tell the truth instead of silently doing nothing.
+
 ## Permissions
 
 ```python
@@ -2114,7 +2307,7 @@ allow_backup = false            # keep the private store out of cloud/adb backup
 
 # --- build ---
 abis = ["arm64-v8a"]
-output_dir = "build"
+output_dir = "apk"                # not "build": that name is in most .gitignore files
 optimize = false                # ship bytecode instead of sources (needs Python 3.14 on the
                                 # build host, or PYMOBILE_PYTHON pointing at it)
 strip_debug = true              # -OO: drop docstrings and asserts
@@ -2137,10 +2330,10 @@ exclude_only = false                    # true = use exclude as written
 | `icon` | *(none)* | path to a square PNG |
 | `allow_backup` | `false` | let Android back up the app's private data |
 | `abis` | `["arm64-v8a"]` | architectures |
-| `output_dir` | `build` | where the APK is written |
+| `output_dir` | `apk` | where the APK is written (used to be `build`; the build warns when an older APK is still sitting there) |
 | `optimize` | `false` | package `.pyc` when enabled; for `--native` the bytecode must match the device's Python 3.14 — the build uses the running interpreter when it is 3.14, or a `python3.14`/`PYMOBILE_PYTHON` interpreter when the host differs, and only falls back to sources with a warning when neither exists (which is why the `init` template ships `optimize = false`) |
 | `strip_debug` | `true` | compile with `-OO` |
-| `exclude` | *(none)* | glob patterns to skip, **added to** the built-in list (`**/__pycache__/**`, `**/*.pyc`, `**/tests/**`, `tests/**`, `**/test_*.py`, `.git/**`, `.venv/**`, `venv/**`, `build/**`, `dist/**`) |
+| `exclude` | *(none)* | glob patterns to skip, **added to** the built-in list (`**/__pycache__/**`, `**/*.pyc`, `**/tests/**`, `tests/**`, `**/test_*.py`, `.git/**`, `.venv/**`, `venv/**`, `build/**`, `dist/**`, `apk/**`) |
 | `exclude_only` | `false` | `true` = `exclude` replaces the built-in list (advanced; the build then warns if `output_dir` would ship itself) |
 
 Every value is validated **before** the build starts, and each error carries a
@@ -2153,7 +2346,7 @@ fix:
 
 `exclude` **adds** to the built-in patterns: writing `exclude = ["docs/**"]`
 never drops the `build/**` rule, so the output directory (and the previous APK
-inside it) is not packaged. `exclude_only = true` turns that off and the build
+inside it) is not packaged. The default `apk/` is excluded for the same reason. `exclude_only = true` turns that off and the build
 then warns when it can see that `output_dir` would ship itself. The defaults are
 exported as `pymobile.core.config.DEFAULT_EXCLUDE`.
 
@@ -2378,7 +2571,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.9.6", "platform": "android",
+# {"framework_version": "0.10.0", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 
@@ -2406,6 +2599,7 @@ import:
 | `pymobile_bridge` | the recording `StubBridge`: `calls_named(...)`, `notifications`, `last_tree` |
 | `pymobile_driver` | a `Driver`: `open`, `press`, `change`, `back`, `navigate`, `find` |
 | `pymobile_snapshot` | compares the current screen's text picture with a golden file |
+| `pymobile_png` | compares the current screen's mockup **picture** with a golden PNG — catches colour changes the text picture cannot |
 
 ```python
 def test_the_quiz_flow(pymobile_session):
@@ -2418,6 +2612,11 @@ def test_the_quiz_flow(pymobile_session):
 def test_the_menu_looks_right(pymobile_session, pymobile_snapshot):
     pymobile_session.start(Menu())
     pymobile_snapshot()            # snapshots/test_menu__test_the_menu_looks_right.txt
+
+
+def test_the_menu_keeps_its_colours(pymobile_session, pymobile_png):
+    pymobile_session.start(Menu())
+    pymobile_png()                 # snapshots/test_menu__test_the_menu_keeps_its_colours.png
 
 
 def test_open_a_screen_directly(pymobile_session):
@@ -2445,6 +2644,17 @@ warning — unless the `CI` environment variable is set, where a snapshot nobody
 committed is a failure. A changed screen fails with a diff; accept it with
 `pytest --pymobile-update-snapshots` (or `PYMOBILE_UPDATE_SNAPSHOTS=1`) and
 commit the file.
+
+`pymobile_png(...)` is the same workflow for the *picture*: the screen is drawn
+with the mockup renderer and compared byte-for-byte with a golden PNG, so a
+button that quietly turned grey or a chip that lost its background fails —
+changes the text picture cannot see. It takes the same name, the same
+`--pymobile-update-snapshots` flag and the same CI rule, plus two escape hatches
+for a font that renders one pixel differently elsewhere: `tolerance=8` (per
+channel) and `max_diff_ratio=0.001`. A difference writes `<name>.diff.png` and
+`<name>.new.png` next to the golden file. It needs Pillow
+(`pip install 'pymobile-framework[icons]'`), and lives in `pymobile.testing`
+(`assert_png_snapshot`) for use without pytest.
 
 **Isolation.** After every test the app is stopped, the process-wide bridge is
 reset and the language the test switched to is undone; the store lives in
@@ -2721,6 +2931,19 @@ on its own. Widget ids are carried into `data-wid` attributes, so the browser
 inspector tells you exactly which widget a node is.
 
 ### Hot reload
+
+`pymobile dev` is the loop most people want: it opens a real window with the
+running app and reloads it whenever a source file changes, so you edit in your
+editor and look at the result — no `Ctrl+C`, no re-run.
+
+```bash
+pymobile dev                    # GUI window + reload on save
+pymobile dev --screen Settings  # start on another screen
+pymobile dev --set score=7      # constructor arguments, like `preview`
+```
+
+It needs a display (Tk). Without one it says so and falls back to
+`pymobile watch`, which keeps working over SSH.
 
 `pymobile watch` re-renders every time you save:
 

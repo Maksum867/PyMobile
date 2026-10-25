@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,6 +27,32 @@ jobs:
       - run: ruff check pymobile
       # Tests intentionally use concise untyped pytest fixtures; production
       # package code is held to the strict configuration.
+      - run: mypy pymobile --exclude 'pymobile/tests'
+
+  # The next interpreter, separately: actions/setup-python has no stable alias
+  # for a pre-release, and it is allowed to fail without hiding a failure on a
+  # supported version. 3.16 was checked by hand against 3.16.0a1 (the whole
+  # suite, ruff and mypy are clean); this job keeps the framework honest as the
+  # alphas land, and the matrix above keeps the promise for released versions.
+  pre-release:
+    name: Python ${{ matrix.python }} (pre-release, allowed to fail)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.15", "3.16"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+          check-latest: true
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: pytest
+      - run: ruff check pymobile
       - run: mypy pymobile --exclude 'pymobile/tests'
       - run: python -m build
       - run: python -m twine check --strict dist/*

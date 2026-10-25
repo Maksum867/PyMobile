@@ -2,6 +2,7 @@ package org.pymobile.app;
 
 import android.app.Activity;
 import android.app.ActivityManager;
+import android.content.Intent;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Color;
@@ -354,6 +355,16 @@ public class MainActivity extends Activity {
      * started the interpreter again, losing the navigation stack and every
      * piece of state that was not saved.
      */
+    /**
+     * Picker answers arrive here: the file pickers used to have no path back
+     * into Python at all, so every "choose a file" flow was a dead end.
+     */
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        MediaServices.onPickResult(requestCode, resultCode, data);
+    }
+
     @Override
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);

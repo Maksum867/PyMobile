@@ -21,11 +21,13 @@ from typing import Any
 
 from ..errors import PyMobileError
 from ..log import configure, get_logger
+from .api.audio import AudioPlayer, AudioRecorder
 from .api.notifications import Notifications
 from .api.permissions import Permission, PermissionManager
+from .api.share import Share
 from .api.storage import Storage, default_storage_path
 from .api.vibration import Vibration
-from .bridge import Bridge, get_bridge
+from .bridge import Bridge, PickedFile, get_bridge, pick_filters
 from .dispatcher import UiDispatcher
 from .events import Event, EventBus, Subscription
 from .i18n import translations
@@ -297,6 +299,8 @@ class App:
         self.dispatcher = UiDispatcher()
         self.navigator = Navigator(self, on_change=self._on_screen_change)
         self.notifications = Notifications(self.bridge, channel_name=name)
+        #: Share sheet + clipboard (``app.share(...)``, ``app.copy(...)``).
+        self.social = Share(self.bridge)
         self.vibration = Vibration(self.bridge)
         self.permissions = PermissionManager(self.bridge)
         self.http = HttpClient(base_url=base_url, deliver=self._deliver)
@@ -1209,6 +1213,69 @@ class App:
     def vibrate(self, milliseconds: int = 100) -> None:
         """Vibrate the device once."""
         self.vibration.vibrate(milliseconds)
+
+    # -- files -------------------------------------------------------------
+    def pick_file(self, accept: str = "*/*", *, multiple: bool = False) -> PickedFile | None:
+        """Ask the user for a file; ``None`` when they cancel.
+
+        ``accept`` is a MIME type (``"audio/*"``), a comma-separated list, or an
+        extension (``".wav"``) for convenience. With ``multiple=True`` the first
+        file is returned and :meth:`pick_files` gives the whole selection.
+        """
+        picked = self.pick_files(accept, multiple=multiple)
+        return picked[0] if picked else None
+
+    def pick_files(self, accept: str = "*/*", *, multiple: bool = True) -> list[PickedFile]:
+        """Ask the user for files; an empty list when they cancel."""
+        filters = pick_filters(accept)
+        return self.bridge.pick_file(",".join(filters), multiple=multiple)
+
+    def pick_image(self) -> PickedFile | None:
+        """Take a photo or pick a picture; ``None`` when the user cancels."""
+        picked = self.bridge.pick_image()
+        return picked[0] if picked else None
+
+    # -- clipboard and the share sheet -------------------------------------
+    def copy(self, text: str) -> bool:
+        """Put ``text`` on the clipboard (what a "Copy" button needs)."""
+        return self.social.copy(text)
+
+    def copy_to_clipboard(self, text: str) -> bool:
+        """Alias of :meth:`copy`, named after the platform call."""
+        return self.social.copy(text)
+
+    def share(self, text: str = "", url: str = "", *, subject: str = "") -> bool:
+        """Open the system share sheet with ``text`` and/or a link."""
+        return self.social.sheet(text, url, subject=subject)
+
+    def clipboard(self) -> str:
+        """What the clipboard currently holds."""
+        return self.social.clipboard()
+
+    # -- audio -------------------------------------------------------------
+    def audio(
+        self,
+        source: str | Path,
+        *,
+        on_tick: Callable[[int], None] | None = None,
+        on_end: Callable[[], None] | None = None,
+        loop: bool = False,
+        volume: float = 1.0,
+    ) -> AudioPlayer:
+        """A player for ``source``, wired to this app's timers."""
+        return AudioPlayer(
+            source,
+            on_tick=on_tick,
+            on_end=on_end,
+            loop=loop,
+            volume=volume,
+            bridge=self.bridge,
+            app=self,
+        )
+
+    def recorder(self, *, directory: str | Path | None = None) -> AudioRecorder:
+        """A microphone recorder; ``stop()`` returns a :class:`PickedFile`."""
+        return AudioRecorder(bridge=self.bridge, directory=directory)
 
     def require_permissions(self, *permissions: str | Permission) -> None:
         """Request permissions and fail loudly if any is denied."""

@@ -692,6 +692,7 @@ else:
         framework_sources = (
             "Native.java",
             "DeviceServices.java",
+            "MediaServices.java",
             "ViewBuilder.java",
             "AdvancedViews.java",
             "PythonRuntime.java",

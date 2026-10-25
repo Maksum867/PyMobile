@@ -203,13 +203,37 @@ class Toolchain:
 
 
 def _sdk_root(explicit: str | Path | None = None) -> Path | None:
-    """Locate the Android SDK from an argument, the environment or defaults."""
+    """Locate the Android SDK from an argument, the environment or defaults.
+
+    This is **the** resolver: ``build``/``doctor`` (through
+    :func:`find_toolchain`) and ``adb``/``emulator`` in the CLI all end up
+    here, so ``PYMOBILE_SDK_HOME`` — which ``setup-sdk`` writes into — is
+    honoured everywhere. It used to be read by ``setup-sdk`` alone, and a
+    ``build --native`` in the same shell then failed with "Android SDK not
+    found" until the user exported ``ANDROID_HOME`` by hand.
+    """
     if explicit:
         return Path(explicit).expanduser().resolve()
+    # ``PYMOBILE_SDK_HOME`` is the directory PyMobile installs the toolchain
+    # into (default ``~/.andro``); the SDK itself lives in its ``sdk`` folder.
+    installed = os.environ.get("PYMOBILE_SDK_HOME")
+    managed: Path | None = None
+    if installed:
+        base = Path(installed).expanduser().resolve()
+        managed = base / "sdk"
+        if managed.is_dir():
+            return managed
     for variable in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
         value = os.environ.get(variable)
         if value:
             return Path(value).expanduser().resolve()
+    # No standard variable set: accept PYMOBILE_SDK_HOME itself when it is a
+    # real SDK (build-tools/ or platforms/ inside), so pointing it straight at
+    # an Android SDK works too.
+    if installed:
+        base = Path(installed).expanduser().resolve()
+        if (base / "build-tools").is_dir() or (base / "platforms").is_dir():
+            return base
     return _first_existing(
         Path.home() / ".andro" / "sdk",
         Path.home() / "Android" / "Sdk",

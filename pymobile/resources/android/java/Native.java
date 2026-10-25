@@ -131,6 +131,132 @@ public final class Native {
         return DeviceServices.openUrl(MainActivity.current(), url);
     }
 
+    // -- files, clipboard, sharing ---------------------------------------
+
+    /** Ask the user for files; returns absolute paths (empty on cancel). */
+    public static String[] pickFile(String mimeTypes, boolean multiple) {
+        return MediaServices.pickFile(MainActivity.current(), mimeTypes, multiple);
+    }
+
+    /** Take a photo or pick a picture; returns absolute paths (empty on cancel). */
+    public static String[] pickImage() {
+        return MediaServices.pickImage(MainActivity.current());
+    }
+
+    /** Put text on the clipboard; false when it could not be copied. */
+    public static boolean copyToClipboard(String text) {
+        return DeviceServices.copyToClipboard(MainActivity.current(), text);
+    }
+
+    /** Read the clipboard (empty when Android forbids it right now). */
+    public static String clipboardText() {
+        return DeviceServices.clipboardText(MainActivity.current());
+    }
+
+    /** Open the system share sheet; false when nothing could share it. */
+    public static boolean share(String text, String url, String subject) {
+        return DeviceServices.share(MainActivity.current(), text, url, subject);
+    }
+
+    // -- audio ------------------------------------------------------------
+
+    /**
+     * Open a player and return an opaque handle (its index), or -1.
+     *
+     * Handles rather than objects cross the JNI boundary: the compiled bridge
+     * passes an int back and forth, and the player itself stays in this JVM
+     * where MediaPlayer wants to live.
+     */
+    public static int audioOpen(String source, boolean looping) {
+        MainActivity activity = MainActivity.current();
+        if (activity == null) {
+            return -1;
+        }
+        return MediaServices.open(activity, source, looping);
+    }
+
+    public static void audioPlay(int handle) {
+        MediaServices.Player player = MediaServices.get(handle);
+        if (player != null) {
+            player.play();
+        }
+    }
+
+    public static void audioPause(int handle) {
+        MediaServices.Player player = MediaServices.get(handle);
+        if (player != null) {
+            player.pause();
+        }
+    }
+
+    public static void audioStop(int handle) {
+        MediaServices.Player player = MediaServices.get(handle);
+        if (player != null) {
+            player.stop();
+        }
+    }
+
+    public static void audioSeek(int handle, int positionMs) {
+        MediaServices.Player player = MediaServices.get(handle);
+        if (player != null) {
+            player.seek(positionMs);
+        }
+    }
+
+    public static int audioPosition(int handle) {
+        MediaServices.Player player = MediaServices.get(handle);
+        return player == null ? 0 : player.position();
+    }
+
+    public static int audioDuration(int handle) {
+        MediaServices.Player player = MediaServices.get(handle);
+        return player == null ? 0 : player.duration();
+    }
+
+    public static boolean audioIsPlaying(int handle) {
+        MediaServices.Player player = MediaServices.get(handle);
+        return player != null && player.isPlaying();
+    }
+
+    public static void audioVolume(int handle, float level) {
+        MediaServices.Player player = MediaServices.get(handle);
+        if (player != null) {
+            player.setVolume(level);
+        }
+    }
+
+    public static void audioLooping(int handle, boolean looping) {
+        MediaServices.Player player = MediaServices.get(handle);
+        if (player != null) {
+            player.setLooping(looping);
+        }
+    }
+
+    public static void audioRelease(int handle) {
+        MediaServices.release(handle);
+    }
+
+    public static int recorderStart(String directory) {
+        MainActivity activity = MainActivity.current();
+        return activity == null ? -1 : MediaServices.startRecording(activity, directory);
+    }
+
+    public static String recorderStop(int handle) {
+        return MediaServices.stopRecording(handle);
+    }
+
+    public static void recorderCancel(int handle) {
+        MediaServices.cancelRecording(handle);
+    }
+
+    public static boolean recorderIsRecording(int handle) {
+        return MediaServices.isRecording(handle);
+    }
+
+    public static int recorderElapsed(int handle) {
+        return MediaServices.elapsed(handle);
+    }
+
     /** Ask the launcher Activity to finish (the root back button). */
     public static void finishApp() {
         MainActivity.finishApp();

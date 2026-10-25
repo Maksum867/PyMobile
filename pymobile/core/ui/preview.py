@@ -384,10 +384,47 @@ def _node_lines(node: dict[str, Any], *, show_ids: bool = False) -> list[str]:
     else:
         rows = _leaf_lines(node, show_ids=show_ids)
 
+    if _is_tappable(node):
+        # C-3: a container with on_press is a touch target; show that in the
+        # picture, the way (Button) already marks a button.
+        rows = _mark_tappable(rows, node.get("props", {}))
     if show_ids and rows:
         tag = f"({node.get('id', '?')}) "
         rows = [tag + rows[0], *rows[1:]]
     return rows
+
+
+#: Container types that C-3 made tappable. A Button also serialises
+#: ``on_press`` — it is drawn as ``(label)`` already, and must not gain a frame.
+_TAPPABLE_CONTAINERS = frozenset(
+    {"Column", "Row", "Container", "Stack", "Dialog", "Grid", "Wrap", "ScrollView", "SafeArea"}
+)
+
+
+def _is_tappable(node: dict[str, Any]) -> bool:
+    """Whether a *container* node carries a tap handler (C-3)."""
+    if node.get("type") not in _TAPPABLE_CONTAINERS:
+        return False
+    props = node.get("props")
+    if not isinstance(props, dict):
+        return False
+    return bool(props.get("on_press") or props.get("on_long_press"))
+
+
+def _mark_tappable(rows: list[str], props: dict[str, Any]) -> list[str]:
+    """Wrap a tappable container's block in a ``▸ … ◂`` frame.
+
+    Only when the container has no visible children of its own does an extra
+    ``on tap`` line appear — otherwise the frame is enough and the picture stays
+    honest about what takes space.
+    """
+    if not rows:
+        return rows
+    width = max(len(row) for row in rows)
+    top = "▸" + "─" * (width + 1)
+    bottom = "◂" + "─" * (width + 1)
+    body = [f"│ {row.ljust(width)}│" for row in rows]
+    return [top, *body, bottom]
 
 
 def _join_vertical(blocks: list[list[str]]) -> list[str]:
@@ -471,7 +508,14 @@ def _leaf_lines(node: dict[str, Any], show_ids: bool = False) -> list[str]:
     props = node.get("props", {})
     disabled = not node.get("enabled", True)
 
-    if node_type in ("Icon", "IconButton", "AutoComplete", "RangeSlider", "Chart"):
+    if node_type in (
+        "Icon",
+        "IconButton",
+        "AutoComplete",
+        "RangeSlider",
+        "Chart",
+        "Canvas",
+    ):
         return extra_ascii(node)
 
     if node_type == "Label":

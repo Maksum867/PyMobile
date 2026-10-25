@@ -286,7 +286,15 @@ class GuiPreview:
         props = node.get("props", {})
         kind = node.get("type")
 
-        if kind in ("Icon", "IconButton", "AutoComplete", "RangeSlider", "PageView", "Chart"):
+        if kind in (
+            "Icon",
+            "IconButton",
+            "AutoComplete",
+            "RangeSlider",
+            "PageView",
+            "Chart",
+            "Canvas",
+        ):
             patch_extra_gui(self, node)
         elif kind == "RatingBar" and widget is not None:
             self._paint_stars(widget, props.get("rating", 0))
@@ -397,7 +405,15 @@ class GuiPreview:
                 self._build_scroll(parent, node, background)
             return
 
-        if kind in ("Icon", "IconButton", "AutoComplete", "RangeSlider", "PageView", "Chart"):
+        if kind in (
+            "Icon",
+            "IconButton",
+            "AutoComplete",
+            "RangeSlider",
+            "PageView",
+            "Chart",
+            "Canvas",
+        ):
             build_extra_gui(self, parent, node, background)
             return
 
@@ -405,6 +421,9 @@ class GuiPreview:
             frame = tk.Frame(parent, bg=background)
             frame.pack(fill="both" if kind != "Column" else "x", expand=kind != "Column", pady=pad)
             self._build_children(frame, node, background)
+            # C-3: a tappable container is clickable in the Tk window too, so
+            # the preview shows the same interaction as the phone.
+            self._bind_tap(frame, node, widget_id)
             return
 
         if kind == "Row":
@@ -826,6 +845,36 @@ class GuiPreview:
                 self._tk.Frame(frame, height=spacing, bg=background).pack()
             self._build(frame, child)
 
+    def _bind_tap(self, widget: Any, node: dict[str, Any], widget_id: str) -> None:
+        """Make a container with ``on_press``/``on_long_press`` tappable (C-3).
+
+        Tk reports a press on the innermost widget, so the binding walks up to
+        the container that has a handler; a Button inside a tappable Card keeps
+        handling its own taps instead of firing both.
+        """
+        props = node.get("props", {})
+        handlers = {
+            "press": bool(props.get("on_press")),
+            "long_press": bool(props.get("on_long_press")),
+        }
+        if not any(handlers.values()):
+            return
+        if not node.get("enabled", True):
+            return
+        widget.configure(cursor="hand2")
+        if handlers["press"]:
+            widget.bind(
+                "<Button-1>",
+                lambda _event, target=widget_id: self._dispatch(target, "press", ""),
+            )
+        if handlers["long_press"]:
+            # The Tk window has no touch, so a right click stands in for a hold,
+            # which is what the browser preview does as well.
+            widget.bind(
+                "<Button-3>",
+                lambda _event, target=widget_id: self._dispatch(target, "long_press", ""),
+            )
+
     def _build_row(self, parent: tk.Misc, node: dict[str, Any], background: str) -> None:
         """A horizontal band; Expanded/Flexible children share the leftovers."""
         tk = self._tk
@@ -842,6 +891,7 @@ class GuiPreview:
                 padx=(spacing if index else 0, 0),
             )
             self._build(cell, child)
+        self._bind_tap(frame, node, node.get("id", ""))
 
     def _build_grid(
         self, parent: tk.Misc, node: dict[str, Any], props: dict[str, Any], background: str

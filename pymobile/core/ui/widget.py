@@ -15,14 +15,19 @@ coalesced.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from difflib import get_close_matches
 from itertools import count
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 
-from ...errors import WidgetNotFoundError, WidgetParentError, WidgetTypeError
+from ...errors import (
+    WidgetKeywordError,
+    WidgetNotFoundError,
+    WidgetParentError,
+    WidgetTypeError,
+)
 from ...log import get_logger
 from .contract import SerializedValue, WidgetNode, WidgetProps
 from .registry import widget_types
@@ -49,6 +54,7 @@ def _error_node(widget_id: str, type_name: str, exc: BaseException) -> WidgetNod
         "props": {"text": f"⚠ {type_name}: {type(exc).__name__}: {exc}"},
         "style": {"color": "#F44336"},
     }
+
 
 #: Fallback counter, used when no screen scope is active.
 _ids = count(1)
@@ -145,6 +151,240 @@ def _setter_names(cls: type) -> frozenset[str]:
     return names
 
 
+#: Keywords every widget understands through :class:`Widget.__init__`.
+_WIDGET_KEYWORDS = frozenset(
+    {
+        "id",
+        "style",
+        "visible",
+        "enabled",
+        "animate_visibility",
+        "animation_duration_ms",
+        "accessibility_label",
+        "extra",
+    }
+)
+
+#: ``type_name`` → accepted keywords (including ``kwargs``), filled lazily.
+_KEYWORDS: dict[str, frozenset[str]] = {}
+
+
+def accepted_keywords(cls: type) -> frozenset[str]:
+    """Every keyword ``cls`` accepts, the base ones included.
+
+    Used to name the valid arguments in :class:`~pymobile.errors.WidgetKeywordError`
+    and by ``check-ui`` to flag a keyword a built-in would refuse.
+    """
+    names = _KEYWORDS.get(cls.type_name) if hasattr(cls, "type_name") else None
+    if names is not None:
+        return names
+    taken = set(_WIDGET_KEYWORDS)
+    for klass in cls.__mro__:
+        if klass is object:
+            continue
+        try:
+            # ``vars()`` reads the unbound function out of the class dict;
+            # ``klass.__init__`` would trip mypy's "could be a subclass" rule.
+            initialiser = vars(klass).get("__init__") or inspect.getattr_static(
+                klass, "__init__"
+            )
+            signature = inspect.signature(initialiser)
+        except (TypeError, ValueError):  # pragma: no cover - C classes
+            continue
+        for name, parameter in signature.parameters.items():
+            if name == "self" or parameter.kind in (
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            ):
+                continue
+            taken.add(name)
+    names = frozenset(taken)
+    if hasattr(cls, "type_name"):
+        _KEYWORDS[cls.type_name] = names
+    return names
+
+
+#: A typo is explained with the argument it most likely meant, plus a sentence
+#: about where the value belongs when it is a real prop of a *different* widget.
+def _keyword_hint(name: str, candidates: Sequence[str]) -> str | None:
+    close = get_close_matches(name, candidates, n=1, cutoff=0.7)
+    return f"Did you mean {close[0]!r}?" if close else None
+
+
+#: Style attributes people pass as widget keywords by mistake.
+_STYLE_WORDS = frozenset(
+    {
+        "background",
+        "color",
+        "colour",
+        "bold",
+        "italic",
+        "font_size",
+        "padding",
+        "margin",
+        "width",
+        "height",
+        "min_width",
+        "max_width",
+        "min_height",
+        "max_height",
+        "aspect_ratio",
+        "align",
+        "corner_radius",
+        "elevation",
+        "weight",
+    }
+)
+
+#: Containers that really do take ``spacing`` themselves.
+SPACING_CONTAINERS = (
+    "Column",
+    "Row",
+    "Grid",
+    "Wrap",
+    "ScrollView",
+    "Card",
+    "Dialog",
+    "Container",
+    "Stack",
+)
+
+
+def _keyword_hint_for(name: str, keyword: str, valid: Collection[str]) -> str | None:
+    """The sentence printed under "unexpected keyword argument" (C-1, C-2).
+
+    Three cases carry most of the weight: a misspelling, ``spacing`` on a
+    widget that has no children, and an ``on_*`` handler on something that is
+    not interactive. Each one names the widget or prop to use instead, so the
+    message answers "what do I write?" and not only "what is wrong?".
+    """
+    handlers = sorted(prop for prop in valid if prop.startswith("on_"))
+    if keyword.startswith("on_"):
+        typo = _keyword_hint(keyword, handlers)
+        if typo is not None:
+            return typo
+        if not handlers:
+            return (
+                f"{name} is not interactive: {keyword!r} would never fire. Use a widget "
+                "with that callback (Button, Chip, ListTile, Link, IconButton) or wrap "
+                "the contents in a tappable Card/Container."
+            )
+        return f"{name} takes {', '.join(handlers)} — not {keyword!r}."
+    hint = _keyword_hint(keyword, sorted(valid))
+    if hint is not None:
+        return hint
+    # A misspelt Style attribute (colr=, fontsize=) still reads as one.
+    close_style = get_close_matches(keyword, sorted(_STYLE_WORDS), n=1, cutoff=0.8)
+    if close_style:
+        return (
+            f"Did you mean Style({close_style[0]}=…) or {name}(…, {close_style[0]}=…)? "
+            f"Style attributes are passed through style= on {name}."
+        )
+    # Colour, size and spacing are *Style* attributes, not keywords: this is
+    # the "colr='red' rendered a black label" case with an answer attached.
+    style_field = keyword.split("_")[0] if keyword not in _STYLE_WORDS else keyword
+    if style_field in _STYLE_WORDS or keyword in _STYLE_WORDS:
+        attribute = keyword if keyword in _STYLE_WORDS else style_field
+        return (
+            f"{keyword!r} is a Style attribute, not a keyword of {name}: write "
+            f"{name}(…, style=Style({attribute}=…)). Style holds the visual "
+            "attributes; the widget keywords are layout and behaviour."
+        )
+    if keyword == "spacing" and name not in SPACING_CONTAINERS:
+        return (
+            "spacing is a prop of "
+            + ", ".join(SPACING_CONTAINERS)
+            + ": put the children in that container instead of adding spacing "
+            "to a leaf widget."
+        )
+    return None
+
+
+def check_keywords(cls: type[Widget], props: Mapping[str, Any]) -> None:
+    """Raise :class:`~pymobile.errors.WidgetKeywordError` for an unknown keyword.
+
+    Public because the previews and ``check-ui`` ask the same question the
+    constructor does — "would this built-in widget accept this keyword?" — and
+    the answer must come from one place. It is a no-op for types that are not
+    built-ins: their keywords are their own business.
+    """
+    name = cls.__name__
+    if getattr(cls, "type_name", None) not in widget_types():
+        return
+    if not cls.__module__.startswith("pymobile."):
+        return
+    valid = accepted_keywords(cls)
+    for keyword in sorted(props):
+        if keyword in valid:
+            continue
+        raise WidgetKeywordError(
+            name,
+            keyword,
+            valid=sorted(valid - _WIDGET_KEYWORDS),
+            hint=_keyword_hint_for(name, keyword, valid),
+        )
+
+
+def _is_builtin(widget: Widget) -> bool:
+    """Whether ``widget`` is a framework component, not an application's own.
+
+    A built-in is a serialised type the framework renders (``widget_types()``)
+    *and* a class that ships with the framework — the module check keeps a
+    project's ``class TrackRow(Card)`` from being policed as if it were ``Card``
+    while still catching Card itself, which forwards its kwargs here. Anything
+    else keeps ``**kwargs`` as extension props: that is the documented contract
+    for custom widgets (see ``register_widget_type``).
+    """
+    cls = type(widget)
+    if getattr(cls, "type_name", None) not in widget_types():
+        return False
+    # The framework's own components live in pymobile.core.ui.*; a project's
+    # ``class TrackRow(Card)`` — or one of the framework's own tests — is a
+    # custom widget whose kwargs are extension props by contract.
+    return cls.__module__.startswith("pymobile.core.ui")
+
+
+def _reject_unknown_keywords(widget: Widget, props: Mapping[str, Any]) -> None:
+    """Refuse keywords a built-in widget has no prop for (C-1).
+
+    ``Widget`` subclasses that are not built-ins — a project's own widget, a
+    plugin's — keep ``**kwargs`` as extension props: that is how their Java or
+    preview renderer receives data. Built-in types are in ``widget_types()``,
+    and there an unknown keyword is a typo nine times out of ten; it used to be
+    stored silently and ignored by every renderer.
+    """
+    name = type(widget).__name__
+    if not _is_builtin(widget):
+        return
+    for keyword in sorted(props):
+        valid = accepted_keywords(type(widget))
+        if keyword in valid:
+            continue
+        raise WidgetKeywordError(
+            name,
+            keyword,
+            valid=sorted(valid - _WIDGET_KEYWORDS),
+            hint=_keyword_hint_for(name, keyword, valid),
+        )
+
+
+def _extra_props(extra: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Validate the explicit ``extra={...}`` escape hatch."""
+    if extra is None:
+        return {}
+    if not isinstance(extra, Mapping):
+        raise TypeError(
+            "extra must be a mapping of extension props, "
+            f"got {type(extra).__name__}; write Widget(extra={{'key': value}})"
+        )
+    for key in extra:
+        if not isinstance(key, str):
+            raise TypeError(f"extension prop names must be strings, got {key!r}")
+        if not key or not key.isidentifier() or key.startswith("_"):
+            raise ValueError("widget extension prop names must be public identifiers")
+    return dict(extra)
+
+
 class Widget:
     """Base class for every UI component."""
 
@@ -175,10 +415,19 @@ class Widget:
         animate_visibility: bool = False,
         animation_duration_ms: int = 220,
         accessibility_label: str | None = None,
+        extra: Mapping[str, Any] | None = None,
         **props: Any,
     ) -> None:
         if accessibility_label is not None and not isinstance(accessibility_label, str):
             raise TypeError("accessibility_label must be a string or None")
+        extension = _extra_props(extra)
+        for name in props:
+            if name in extension:
+                raise TypeError(
+                    f"{name!r} was passed both as a keyword argument and in extra=; "
+                    "keep the explicit keyword form."
+                )
+        extension.update(props)
         self._explicit_id = id is not None
         self.id = id or auto_id(type(self).__name__.lower())
         self.style = style or Style()
@@ -198,7 +447,8 @@ class Widget:
         self._parent: Widget | None = None
         self._screen: Screen | None = None
         self._props: WidgetProps = {}
-        for name, value in props.items():
+        _reject_unknown_keywords(self, props)
+        for name, value in extension.items():
             self.set_prop(name, value, invalidate=False)
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -523,16 +773,74 @@ class Widget:
 
 
 class Container(Widget):
-    """A widget that owns and lays out children."""
+    """A widget that owns and lays out children.
+
+    A container can be tappable: ``on_press`` (and ``on_long_press``) turn the
+    whole surface into one target, so a card-shaped row of labels and buttons
+    no longer has to be rebuilt as a ``ListTile`` with the real content hidden
+    in a ``Button`` just to become a tap. Those keywords are part of the
+    container itself, not extension props, so they are not the "did you mean"
+    of a misspelling — the handler runs when the surface (and not one of the
+    interactive children) is tapped::
+
+        Card(Label(song.title), Label(song.artist), on_press=lambda: open(song))
+
+    ``press()``/``long_press()`` are public, so tests and ``Driver.press()``
+    reach a tappable container the same way they reach a Button.
+    """
 
     type_name = "Container"
 
-    __slots__ = ("_children",)
+    __slots__ = ("_children", "on_press", "on_long_press", "spacing")
 
-    def __init__(self, *children: Widget, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *children: Widget,
+        spacing: int | None = None,
+        on_press: Callable[[], object] | None = None,
+        on_long_press: Callable[[], object] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if spacing is not None and (
+            isinstance(spacing, bool) or not isinstance(spacing, int) or spacing < 0
+        ):
+            raise ValueError("spacing must be a non-negative int")
         super().__init__(**kwargs)
+        # A subclass that lays its children out itself (Column/Row/Grid/Wrap)
+        # has already set ``spacing`` before calling up; only a bare Container
+        # or Stack takes it from here, and the default must not overwrite the
+        # value the subclass computed.
+        if spacing is not None or not hasattr(self, "spacing"):
+            self.spacing = 0 if spacing is None else spacing
+        self.on_press = on_press
+        self.on_long_press = on_long_press
         self._children: list[Widget] = []
         self.extend(children)
+
+    @property
+    def pressable(self) -> bool:
+        """Whether the container has a tap handler (and draws a touch target)."""
+        return self.on_press is not None or self.on_long_press is not None
+
+    def press(self) -> None:
+        """Simulate a tap on the surface; ignored while disabled."""
+        if self.enabled and self.on_press is not None:
+            self.on_press()
+
+    def long_press(self) -> None:
+        """Simulate a long press on the surface; ignored while disabled."""
+        if self.enabled and self.on_long_press is not None:
+            self.on_long_press()
+
+    def props(self) -> WidgetProps:
+        result = super().props()
+        if self.spacing:
+            result["spacing"] = self.spacing
+        if self.on_press is not None:
+            result["on_press"] = callback_name(self.on_press)
+        if self.on_long_press is not None:
+            result["on_long_press"] = callback_name(self.on_long_press)
+        return result
 
     @property
     def children(self) -> Sequence[Widget]:
@@ -546,7 +854,7 @@ class Container(Widget):
                 f"{type(self).__name__} received None as a child; "
                 "every child must be a Widget instance. "
                 "Check for conditional expressions like "
-                "'Label(\'x\') if condition else None' \u2014 use 'visible' instead."
+                "'Label('x') if condition else None' \u2014 use 'visible' instead."
             )
         if child is self:
             raise ValueError("a container cannot contain itself")

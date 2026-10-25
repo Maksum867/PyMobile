@@ -60,6 +60,9 @@ final class AdvancedViews {
         private final float density;
         private int desiredSize = 24;
         private int desiredHeight = 220;
+        private int desiredWidth = 320;
+        /** Background a Canvas asked for; null means transparent. */
+        private Integer canvasBackground = null;
         private int defaultColor = Color.DKGRAY;
 
         VectorView(Context context, String kind) {
@@ -89,6 +92,14 @@ final class AdvancedViews {
             drawing = next == null ? new JSONObject() : next;
             desiredSize = props.optInt("size", button ? 48 : 24);
             desiredHeight = props.optInt("height", 220);
+            desiredWidth = props.optInt("width", 320);
+            if ("Canvas".equals(kind)) {
+                // A canvas brings its own surface colour: the drawing is meant
+                // to look the same as it does in the preview.
+                String background = props.optString("background", "");
+                canvasBackground = background.isEmpty() ? null : Integer.valueOf(color(background, 0));
+                setBackgroundColor(canvasBackground == null ? 0 : canvasBackground.intValue());
+            }
             String label = props.optString("label", "");
             setContentDescription(label);
             setImportantForAccessibility(label.isEmpty() && !button
@@ -98,8 +109,9 @@ final class AdvancedViews {
         }
 
         @Override protected void onMeasure(int widthSpec, int heightSpec) {
-            int w = Math.round(("Chart".equals(kind) ? 320 : desiredSize) * density);
-            int h = Math.round(("Chart".equals(kind) ? desiredHeight : desiredSize) * density);
+            boolean surface = "Chart".equals(kind) || "Canvas".equals(kind);
+            int w = Math.round((surface ? desiredWidth : desiredSize) * density);
+            int h = Math.round((surface ? desiredHeight : desiredSize) * density);
             setMeasuredDimension(resolveSize(w, widthSpec), resolveSize(h, heightSpec));
         }
 

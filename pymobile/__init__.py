@@ -18,7 +18,7 @@ Build it with ``pymobile build``.
 
 from __future__ import annotations
 
-__version__ = "0.9.6"
+__version__ = "0.10.0"
 __author__ = "MAKSYM KHLYSTUN"
 __license__ = "MIT"
 
@@ -28,11 +28,14 @@ from .core.api import (
     Notifications,
     Permission,
     PermissionManager,
+    Share,
     Storage,
     Vibration,
     default_storage_path,
 )
+from .core.api.audio import AudioPlayer, AudioRecorder
 from .core.app import App
+from .core.bridge import PickedFile
 from .core.config import ProjectConfig, load_config
 from .core.events import Event, EventBus
 from .core.i18n import (
@@ -65,11 +68,14 @@ from .core.ui import (
     BottomNavigation,
     BottomSheet,
     Button,
+    ButtonVariant,
     Calendar,
+    Canvas,
     Card,
     Carousel,
     Checkbox,
     Chip,
+    Circle,
     Color,
     Column,
     ConfirmDialog,
@@ -93,6 +99,7 @@ from .core.ui import (
     IconButton,
     Image,
     Label,
+    Line,
     LineChart,
     Link,
     List,
@@ -100,22 +107,27 @@ from .core.ui import (
     MultiSelect,
     Navigator,
     PageView,
+    Path,
     PieChart,
+    Polygon,
     ProgressBar,
     ProgressText,
     RadioButton,
     RadioGroup,
     RangeSlider,
     RatingBar,
+    Rect,
     Row,
     SafeArea,
     Screen,
     ScrollView,
     SearchBar,
     SegmentedButtons,
+    Shape,
     Skeleton,
     Slider,
     Snackbar,
+    Space,
     Spacer,
     Stack,
     Stepper,
@@ -124,6 +136,7 @@ from .core.ui import (
     Tabs,
     TabView,
     TextInput,
+    TextScale,
     Theme,
     TimePicker,
     UiIssue,
@@ -158,7 +171,10 @@ from .errors import (
 from .log import get_diagnostics
 
 __all__ = [
+    "ButtonVariant",
     "ICON_NAMES",
+    "Space",
+    "TextScale",
     "Icon",
     "IconButton",
     "FloatingActionButton",
@@ -181,6 +197,13 @@ __all__ = [
     "BarChart",
     "LineChart",
     "PieChart",
+    "Canvas",
+    "Circle",
+    "Line",
+    "Path",
+    "Polygon",
+    "Rect",
+    "Shape",
 
     "__version__",
     # application
@@ -199,6 +222,10 @@ __all__ = [
     # android apis
     "Notifications",
     "Vibration",
+    "Share",
+    "AudioPlayer",
+    "AudioRecorder",
+    "PickedFile",
     "Permission",
     "PermissionManager",
     "Storage",

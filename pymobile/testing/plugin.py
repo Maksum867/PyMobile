@@ -34,6 +34,7 @@ import pytest
 from ..core.app import App
 from ..core.bridge import StubBridge
 from ..core.driver import Driver
+from .png_snapshots import PngSnapshotChecker
 from .session import Session, app_session
 from .snapshots import UPDATE_ENV, SnapshotChecker, env_flag
 
@@ -43,6 +44,7 @@ __all__ = [
     "pymobile_driver",
     "pymobile_session",
     "pymobile_snapshot",
+    "pymobile_png",
 ]
 
 
@@ -52,7 +54,10 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--pymobile-update-snapshots",
         action="store_true",
         default=False,
-        help=f"rewrite the golden files of pymobile_snapshot (or set {UPDATE_ENV}=1)",
+        help=(
+            "rewrite the golden files of pymobile_snapshot and pymobile_png "
+            f"(or set {UPDATE_ENV}=1)"
+        ),
     )
 
 
@@ -91,6 +96,25 @@ def pymobile_snapshot(
     ) or env_flag(UPDATE_ENV)
     return SnapshotChecker(
         getattr(request, "path", None) or request.node.fspath,  # .path needs pytest 7
+        request.node.name,
+        pymobile_session.bridge,
+        update=update,
+    )
+
+
+@pytest.fixture
+def pymobile_png(request: pytest.FixtureRequest, pymobile_session: Session) -> PngSnapshotChecker:
+    """``pymobile_png()`` compares the current screen's mockup with a golden PNG.
+
+    The text snapshot catches a layout change; this one catches a *colour* one —
+    a button that turned grey, a chip that lost its background, a theme that
+    stopped applying. Same update flag and CI rule as ``pymobile_snapshot``.
+    """
+    update = bool(
+        request.config.getoption("--pymobile-update-snapshots", default=False)
+    ) or env_flag(UPDATE_ENV)
+    return PngSnapshotChecker(
+        getattr(request, "path", None) or request.node.fspath,
         request.node.name,
         pymobile_session.bridge,
         update=update,

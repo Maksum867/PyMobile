@@ -24,7 +24,7 @@ import math
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from ...log import get_logger
 from .contract import text_value
@@ -184,6 +184,17 @@ def render_mockup(
 # ---------------------------------------------------------------------------
 # colours
 # ---------------------------------------------------------------------------
+def _blend(base: _Colour, over: _Colour, amount: float) -> _Colour:
+    """Mix ``over`` into ``base``; ``amount`` is how much of ``over`` survives."""
+    keep = max(0.0, min(1.0, amount))
+    return (
+        round(base[0] * (1 - keep) + over[0] * keep),
+        round(base[1] * (1 - keep) + over[1] * keep),
+        round(base[2] * (1 - keep) + over[2] * keep),
+        255,
+    )
+
+
 def _rgba(value: Any, fallback: _Colour = (0, 0, 0, 255)) -> _Colour:
     """``#RGB``/``#RRGGBB``/``#AARRGGBB`` (Android order) → RGBA."""
     if isinstance(value, tuple) and len(value) == 4:
@@ -247,6 +258,12 @@ def _palette(theme: Any) -> dict[str, Any]:
             colours.get("TEXT_MUTED"), (0x9E, 0x9E, 0x9E, 255) if dark else (0x75, 0x75, 0x75, 255)
         ),
         "ON_PRIMARY": white,
+        # Semantic accents, so a danger button or a success badge is the same
+        # colour as on the phone (P1: the palette only knew PRIMARY).
+        "ACCENT": _rgba(colours.get("ACCENT"), (0xFF, 0x40, 0x81, 255)),
+        "SUCCESS": _rgba(colours.get("SUCCESS"), (0x2E, 0x7D, 0x32, 255)),
+        "WARNING": _rgba(colours.get("WARNING"), (0xF9, 0xA8, 0x25, 255)),
+        "ERROR": _rgba(colours.get("ERROR"), (0xC6, 0x28, 0x28, 255)),
         # Material widget colours of Theme.Material(.Light).
         "BUTTON": (0x5A, 0x59, 0x5B, 255) if dark else (0xD6, 0xD7, 0xD7, 255),
         "BUTTON_TEXT": white if dark else (0, 0, 0, 0xDE),
@@ -556,6 +573,21 @@ class _Painter:
                 fill = style.get("_surface")
             if fill is not None:
                 self.rect(bx, by, box.w, box.h, fill, radius=radius)
+        if style.get("_tappable"):
+            # A hairline in the accent colour, drawn under the children: it
+            # shows that the whole surface takes a tap without inventing a
+            # background the app did not ask for. The palette lives on the
+            # layout, not on the painter.
+            self.rect(
+                bx,
+                by,
+                box.w,
+                box.h,
+                None,
+                outline=_rgba(style.get("_tappable_colour"), (0, 0, 0, 80)),
+                radius=radius,
+                width=1,
+            )
         if box.paint is not None:
             box.paint(self, bx, by, box)
         if box.clip:
@@ -596,6 +628,20 @@ class _Painter:
 # layout
 # ---------------------------------------------------------------------------
 _VERTICAL = ("Column", "Container", "SafeArea", "RadioGroup", "List")
+#: Containers that C-3 made tappable: the mockup outlines them so the touch
+#: target is visible. A Button serialises ``on_press`` too and is already drawn
+#: as a button, so it stays out of this set.
+_TAPPABLE_CONTAINERS = (
+    "Column",
+    "Row",
+    "Container",
+    "Stack",
+    "Dialog",
+    "Grid",
+    "Wrap",
+    "ScrollView",
+    "SafeArea",
+)
 _BUTTON_LIKE = ("Button", "Chip", "DatePicker", "TimePicker")
 
 
@@ -719,6 +765,19 @@ class _Layout:
 
         box.margin = margin
         box.style = style
+        # C-3: a tappable container is a touch target on the phone, so the
+        # mockup outlines it in the accent colour — the same hint the ASCII
+        # preview shows as a ▸ … ◂ frame.
+        props = node.get("props") or {}
+        if (
+            kind in _TAPPABLE_CONTAINERS
+            and isinstance(props, dict)
+            and (props.get("on_press") or props.get("on_long_press"))
+        ):
+            style = dict(style)
+            style["_tappable"] = True
+            style["_tappable_colour"] = self.p["PRIMARY"]
+            box.style = style
         if style.get("elevation") and style.get("background") is None:
             style["_surface"] = self.p["SURFACE"]
         if not node.get("enabled", True):
@@ -754,7 +813,7 @@ class _Layout:
         if kind == "Wrap":
             return self._wrap(props, style, children, w, fill)
         if kind == "Stack":
-            return self._stack(style, children, w, fill, force_h)
+            return self._stack(props, style, children, w, fill, force_h)
         if kind == "PageView":
             return self._vertical("Column", node, props, style, children[:1], w, True, force_h)
         if kind in ("Expanded", "Flexible"):
@@ -1099,6 +1158,7 @@ class _Layout:
 
     def _stack(
         self,
+        props: dict[str, Any],
         style: dict[str, Any],
         children: list[dict[str, Any]],
         w: float,
@@ -1119,8 +1179,11 @@ class _Layout:
         height = inner_h if inner_h is not None else max([b.outer_h for b in laid] + [0.0])
         for child_box in laid:
             child_box.set_outer_h(height)
-        box = _Box(cw + pad[0] + pad[2], height + pad[1] + pad[3])
-        box.kids = [(pad[0], pad[1], b) for b in laid]
+        # C-2: ``spacing`` in a Stack separates the layers along the frame, so
+        # a badge/overlay does not sit exactly on top of what it annotates.
+        spacing = float(props.get("spacing", 0) or 0)
+        box = _Box(cw + pad[0] + pad[2], height + pad[1] + pad[3] + spacing * max(0, len(laid) - 1))
+        box.kids = [(pad[0], pad[1] + index * spacing, child) for index, child in enumerate(laid)]
         return box
 
     # -- leaves ------------------------------------------------------------
@@ -1169,6 +1232,15 @@ class _Layout:
 
         return _Box(box_w, box_h, paint)
 
+    #: Fill and text colour of each ButtonVariant in the picture (P1).
+    _VARIANTS: ClassVar[dict[str, tuple[str | None, str | _Colour | None]]] = {
+        "primary": ("PRIMARY", (255, 255, 255, 255)),
+        "tonal": ("_TONAL", None),
+        "outlined": (None, "PRIMARY"),
+        "text": (None, "PRIMARY"),
+        "danger": ("ERROR", (255, 255, 255, 255)),
+    }
+
     def _button(
         self,
         text: str,
@@ -1179,16 +1251,46 @@ class _Layout:
         fill_colour: _Colour | None = None,
         text_colour: _Colour | None = None,
         flat: bool = False,
+        variant: str = "primary",
     ) -> _Box:
+        # An explicit Style(background=…) always wins; without one the variant
+        # decides. Before this, ``custom`` made the painter skip the button
+        # background entirely, which is why every button came out grey.
         custom = style.get("background") is not None or style.get("corner_radius") is not None
+        fill_key, text_key = self._VARIANTS.get(variant, self._VARIANTS["primary"])
+        transparent = variant == "text"
+        if fill_colour is None and fill_key is not None and not custom:
+            fill_colour = (
+                _blend(self.p["PRIMARY"], self.p["SURFACE"], 0.82)
+                if fill_key == "_TONAL"
+                else self.p[fill_key]
+            )
+        if text_colour is None and text_key is not None and not custom:
+            text_colour = self.p[text_key] if isinstance(text_key, str) else text_key
+        if variant == "tonal" and not custom and text_colour is None:
+            # White on a light lavender fill is unreadable; Material uses the
+            # primary colour for tonal labels.
+            text_colour = self.p["PRIMARY"]
+        elif text_colour is None and fill_key is not None and not custom and fill_colour:
+            text_colour = (255, 255, 255, 255)
         bg = fill_colour or self.p["BUTTON"]
+        outline = None
+        if variant == "outlined" and not custom:
+            outline = self.p["PRIMARY"]
         inset_x, inset_y = (0.0, 0.0) if (custom or flat) else (4.0, 6.0)
 
         def background(p: _Painter, x: float, y: float, b: _Box) -> None:
             if custom:
                 return  # painted from the style (GradientDrawable) by the painter
+            if transparent:
+                return  # a text button is just its label
             if flat:
-                p.rect(x, y, b.w, b.h, bg)
+                p.rect(x, y, b.w, b.h, bg, outline=outline, radius=2)
+                return
+            if outline is not None:
+                # An outlined button is a hairline, not a raised surface.
+                p.rect(x + inset_x, y + inset_y, b.w - 2 * inset_x, b.h - 2 * inset_y,
+                       None, outline=outline, radius=2)
                 return
             p.shadow(
                 x + inset_x,
@@ -1226,7 +1328,14 @@ class _Layout:
     ) -> _Box:
         p = self.p
         text = text_value(props.get("text", ""))
-        if kind in ("Icon", "IconButton", "AutoComplete", "RangeSlider", "Chart"):
+        if kind in (
+            "Icon",
+            "IconButton",
+            "AutoComplete",
+            "RangeSlider",
+            "Chart",
+            "Canvas",
+        ):
             from .extras_preview import extra_mockup
 
             drawn: _Box | None = extra_mockup(self, kind, node, w, fill)
@@ -1237,7 +1346,8 @@ class _Layout:
         if kind == "Link":
             return self._text_box(text, 16, p["PRIMARY"], style, w, fill)
         if kind == "Button":
-            return self._button(text, style, w, fill)
+            variant = text_value(props.get("variant")) or "primary"
+            return self._button(text, style, w, fill, variant=variant)
         if kind == "Chip":
             if props.get("selected"):
                 return self._button(
@@ -1249,7 +1359,20 @@ class _Layout:
                     fill_colour=_rgba(props.get("selectedColor"), p["PRIMARY"]),
                     text_colour=(255, 255, 255, 255),
                 )
-            return self._button(text, style, w, fill)
+            # P1: a Chip used to be drawn as a plain grey pill whatever the app
+            # asked for — its Style(background=…) and Style(color=…) were
+            # dropped, so a palette of coloured chips came out uniformly grey.
+            own_background = _rgba(style.get("background"), (0, 0, 0, 0))
+            own_text = style.get("color")
+            return self._button(
+                text,
+                style,
+                w,
+                fill,
+                flat=True,
+                fill_colour=own_background if own_background[3] else self.p["BUTTON"],
+                text_colour=_rgba(own_text, p["BUTTON_TEXT"]) if own_text else None,
+            )
         if kind in ("DatePicker", "TimePicker"):
             value = str(
                 props.get("value") or ("Pick date" if kind == "DatePicker" else "Pick time")

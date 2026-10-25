@@ -28,7 +28,7 @@ import os
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -114,11 +114,52 @@ class Storage:
     inside it is rolled back and nothing reaches the disk.
     """
 
-    __slots__ = ("_path", "_data", "_loaded", "_lock", "_tx_depth", "_tx_dirty", "_disk_stamp")
+    __slots__ = (
+        "_path",
+        "_data",
+        "namespace",
+        "_loaded",
+        "_lock",
+        "_tx_depth",
+        "_tx_dirty",
+        "_disk_stamp",
+        "_schema_version",
+        "_migrations",
+    )
 
-    def __init__(self, path: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        namespace: str | None = None,
+        schema_version: int = 0,
+        migrations: Mapping[int, Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
+    ) -> None:
         self._path = _resolve_store_path(path)
         self._data: dict[str, Any] = {}
+        # C-2 (P1): a namespaced store keeps its keys under one prefix inside a
+        # shared file, so two domains (settings, cache, a feature module) can
+        # live in the same JSON file without the app prefixing names by hand.
+        if namespace is not None and (not isinstance(namespace, str) or not namespace.strip()):
+            raise ValueError("namespace must be a non-empty string")
+        self.namespace = namespace
+        # P1 migrations: the version this store writes, and the functions that
+        # bring an older file up to it. Keyed by the version they *reach*.
+        if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+            raise TypeError("schema_version must be an int")
+        if schema_version < 0:
+            raise ValueError("schema_version must not be negative")
+        self._schema_version = schema_version
+        self._migrations: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = dict(
+            migrations or {}
+        )
+        for version in self._migrations:
+            if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+                raise ValueError("migration keys are the target version, an int >= 1")
+            if version > schema_version:
+                raise ValueError(
+                    f"migration {version} reaches past schema_version {schema_version}"
+                )
         self._loaded = False
         # A re-entrant lock makes every single operation atomic, and backs the
         # explicit `transaction()` block for multi-step sequences.
@@ -169,6 +210,7 @@ class Storage:
             self._data.update(data)
             self._loaded = True
             self._disk_stamp = self._stamp()
+            self._migrate()
 
     def _quarantine(self, reason: Exception) -> None:
         """Move an unparsable store aside instead of letting a write replace it."""
@@ -262,14 +304,111 @@ class Storage:
         _fsync_dir(self._path.parent)
         self._disk_stamp = self._stamp()
 
+    # -- schema migrations -------------------------------------------------
+    @property
+    def schema_version(self) -> int:
+        """The version this store writes (``0`` when it has no migrations)."""
+        return self._schema_version
+
+    def _meta_key(self, name: str) -> str:
+        prefix = f"{self.namespace}." if self.namespace else ""
+        return f"{prefix}{name}"
+
+    def _scope_prefix(self) -> str:
+        return f"{self.namespace}." if self.namespace else ""
+
+    def _scoped(self, data: Mapping[str, Any]) -> dict[str, Any]:
+        """The part of ``data`` this store owns (everything, when unscoped)."""
+        prefix = self._scope_prefix()
+        if not prefix:
+            return dict(data)
+        return {
+            key[len(prefix):]: value for key, value in data.items() if key.startswith(prefix)
+        }
+
+    def _migrate(self) -> None:
+        """Bring the loaded data up to :attr:`schema_version`; caller holds ``_lock``.
+
+        The file stores its version under ``__schema_version__`` (inside the
+        namespace when there is one). A file from a newer release is refused
+        rather than silently downgraded — writing it back would drop whatever
+        the newer version added. Every step runs inside one transaction, so a
+        migration that raises leaves the file exactly as it was.
+        """
+        if not self._migrations and not self._schema_version:
+            return
+        stored = self._data.get(self._meta_key("__schema_version__"), 0)
+        if not isinstance(stored, int) or stored < 0:
+            stored = 0
+        if stored == self._schema_version:
+            return
+        if stored > self._schema_version:
+            raise PyMobileError(
+                f"storage {self._path} was written by a newer release "
+                f"(schema {stored}, this app understands {self._schema_version})",
+                hint="Update the app, or point it at a different file; it was left untouched.",
+            )
+        scoped = self._scoped(self._data)
+        with self.transaction():
+            for version in range(stored + 1, self._schema_version + 1):
+                step = self._migrations.get(version)
+                if step is None:
+                    raise PyMobileError(
+                        f"no migration to schema {version} in {self._path}",
+                        hint=(
+                            "Migrations are keyed by the version they reach: "
+                            "Storage(migrations={1: step_one, 2: step_two}, "
+                            f"schema_version={self._schema_version})"
+                        ),
+                    )
+                result = step(_copy(scoped))
+                if not isinstance(result, Mapping):
+                    raise PyMobileError(
+                        f"migration to schema {version} returned "
+                        f"{type(result).__name__}, not a mapping",
+                        hint="A migration takes the data dict and returns the new dict.",
+                    )
+                scoped = dict(result)
+            prefix = self._scope_prefix()
+            if prefix:
+                for key in [key for key in self._data if key.startswith(prefix)]:
+                    del self._data[key]
+                self._data.update({f"{prefix}{key}": value for key, value in scoped.items()})
+            else:
+                self._data.clear()
+                self._data.update(scoped)
+            self._data[self._meta_key("__schema_version__")] = self._schema_version
+            self._persist()
+        _log.info(
+            "storage %s migrated from schema %s to %s",
+            self._path,
+            stored,
+            self._schema_version,
+        )
+
     # -- mapping API -------------------------------------------------------
+    def _full_key(self, key: str) -> str:
+        """The key as it appears in the shared file (namespaced, when scoped)."""
+        return f"{self._scope_prefix()}{key}" if self.namespace else key
+
+    def _visible_keys(self) -> list[str]:
+        """Keys this store exposes: its own namespace only, metadata hidden."""
+        prefix = self._scope_prefix()
+        hidden = self._meta_key("__schema_version__")
+        return [
+            key[len(prefix):] if prefix else key
+            for key in self._data
+            if (not prefix or key.startswith(prefix)) and key != hidden
+        ]
+
     def get(self, key: str, default: Any = None) -> Any:
         """Return the value for ``key``, or ``default`` when absent."""
         with self._lock:
             self._load()
-            if key not in self._data:
+            full = self._full_key(key)
+            if full not in self._data:
                 return default
-            return _copy(self._data[key])
+            return _copy(self._data[full])
 
     def set(self, key: str, value: Any) -> Any:
         """Set ``key`` atomically within this process and persist it.
@@ -284,7 +423,7 @@ class Storage:
         stored = _checked_copy(key, value)
         with self._lock:
             self._load()
-            self._apply_locked(key, stored)
+            self._apply_locked(self._full_key(key), stored)
             return value
 
     def _apply_locked(self, key: str, value: Any) -> None:
@@ -315,13 +454,14 @@ class Storage:
         """
         with self._lock:
             self._load()
-            if key not in self._data:
+            full = self._full_key(key)
+            if full not in self._data:
                 return False
-            previous = self._data.pop(key)
+            previous = self._data.pop(full)
             try:
                 self._persist()
             except BaseException:
-                self._data[key] = previous
+                self._data[full] = previous
                 raise
             return True
 
@@ -329,7 +469,7 @@ class Storage:
         """Whether ``key`` is present."""
         with self._lock:
             self._load()
-            return key in self._data
+            return self._full_key(key) in self._data
 
     def exists(self, key: str) -> bool:
         """Whether ``key`` is present (alias of :meth:`contains`).
@@ -346,11 +486,25 @@ class Storage:
         return self.contains(key)
 
     def clear(self) -> None:
-        """Remove every entry and persist the empty store (all-or-nothing)."""
+        """Remove every entry of *this store* and persist (all-or-nothing).
+
+        A namespaced store empties its own namespace and leaves the other
+        domains in the shared file alone; the schema-version stamp survives so
+        a cleared store is still recognised as migrated.
+        """
         with self._lock:
             self._load()
             previous = self._data
-            self._data = {}
+            if self.namespace:
+                prefix = self._scope_prefix()
+                stamp = self._meta_key("__schema_version__")
+                kept = {key: value for key, value in previous.items() if key == stamp}
+                self._data = kept
+                self._data.update(
+                    {key: value for key, value in previous.items() if not key.startswith(prefix)}
+                )
+            else:
+                self._data = {}
             try:
                 self._persist()
             except BaseException:
@@ -411,10 +565,21 @@ class Storage:
         caller's own lambda. Pass ``default=None`` explicitly to keep the old
         behaviour.
         """
+        if not callable(function):
+            # ``storage.update("k", {...})`` reads like dict.update and was the
+            # mistake that prompted mutate(): name the function, or use set().
+            raise TypeError(
+                f"update() expects a function, got {type(function).__name__}; "
+                f"write store.update({key!r}, lambda current: …) or "
+                f"store.set({key!r}, value) to replace the value outright "
+                "(store.mutate is the same call under a name that cannot be "
+                "confused with dict.update)"
+            )
         with self._lock:
             self._load()
-            if key in self._data:
-                current = _copy(self._data[key])
+            full = self._full_key(key)
+            if full in self._data:
+                current = _copy(self._data[full])
             elif default is _UNSET:
                 raise PyMobileError(
                     f"Storage key {key!r} does not exist",
@@ -429,8 +594,19 @@ class Storage:
             # Validate before touching memory: a non-JSON result must not end
             # up in the store and break every later write of any key.
             stored = _checked_copy(key, new_value)
-            self._apply_locked(key, stored)
+            self._apply_locked(full, stored)
             return new_value
+
+    def mutate(self, key: str, function: Callable[[Any], Any], default: Any = _UNSET) -> Any:
+        """Replace ``key`` with ``function(current)`` — the name for :meth:`update`.
+
+        Exactly the same call; the name exists because ``update(key, function)``
+        is too easy to read as ``dict.update({key: value})``. ``mutate`` says
+        what happens: the stored value is transformed in place, atomically::
+
+            store.mutate("cart", lambda items: [*items, new], default=[])
+        """
+        return self.update(key, function, default)
 
     def increment(self, key: str, amount: float = 1) -> float:
         """Atomically add ``amount`` to a numeric entry and return the result.
@@ -464,29 +640,37 @@ class Storage:
         stored = _checked_copy(key, default)
         with self._lock:
             self._load()
-            if key in self._data:
-                return _copy(self._data[key])
-            self._apply_locked(key, stored)
+            full = self._full_key(key)
+            if full in self._data:
+                return _copy(self._data[full])
+            self._apply_locked(full, stored)
             return _copy(stored)
 
     def keys(self) -> list[str]:
-        """All stored keys."""
+        """All stored keys (this namespace's, without the internal stamp)."""
         with self._lock:
             self._load()
-            return list(self._data.keys())
+            return self._visible_keys()
 
     def items(self) -> list[tuple[str, Any]]:
-        """All ``(key, value)`` pairs."""
+        """All ``(key, value)`` pairs of this store."""
         with self._lock:
             self._load()
-            return [(key, _copy(value)) for key, value in self._data.items()]
+            return [
+                (
+                    self._full_key(key)[len(self._scope_prefix()) :],
+                    _copy(self._data[self._full_key(key)]),
+                )
+                for key in self._visible_keys()
+            ]
 
     def __getitem__(self, key: str) -> Any:
         with self._lock:
             self._load()
-            if key not in self._data:
+            full = self._full_key(key)
+            if full not in self._data:
                 raise KeyError(key)
-            return _copy(self._data[key])
+            return _copy(self._data[full])
 
     def __setitem__(self, key: str, value: Any) -> None:
         self.set(key, value)
@@ -507,7 +691,7 @@ class Storage:
     def __len__(self) -> int:
         with self._lock:
             self._load()
-            return len(self._data)
+            return len(self._visible_keys())
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<Storage path={self._path}>"

@@ -96,6 +96,7 @@ def browser_url(host: str, port: int, token: str = "") -> str:
     suffix = f"/?t={token}" if token else ""
     return f"http://{host}:{port}{suffix}"
 
+
 _PAGE = """<!doctype html>
 <html lang="en">
 <head>
@@ -311,9 +312,6 @@ def _alignment(value: str | None) -> str:
     }.get(value or "", "flex-start")
 
 
-
-
-
 def _js_value(value: str) -> str:
     """Escape ``value`` for embedding inside a single-quoted JS string.
 
@@ -415,6 +413,12 @@ def _render_html_node(node: dict[str, Any]) -> str:
         gap = props.get("spacing", 0)
         align = _alignment(props.get("cross_align"))
         extra = f"gap:{gap}px;align-items:{align};{css}"
+        tap = _tap_attributes(kind, props, widget_id, disabled)
+        if tap:
+            # C-3: a tappable container is one touch target. role=button keeps
+            # it reachable by keyboard and screen readers, like the phone.
+            extra += ";cursor:pointer"
+            return f'<div class="col" role="button" tabindex="0" style="{extra}"{tap}>{inner}</div>'
         return f'<div class="col" style="{extra}">{inner}</div>'
 
     if kind == "ScrollView":
@@ -431,6 +435,13 @@ def _render_html_node(node: dict[str, Any]) -> str:
         gap = props.get("spacing", 0)
         justify = _alignment(props.get("align"))
         align = _alignment(props.get("cross_align")) if props.get("cross_align") else "center"
+        tap = _tap_attributes(kind, props, widget_id, disabled)
+        if tap:
+            css = f"{css};cursor:pointer"
+            return (
+                f'<div class="row" role="button" tabindex="0" style="gap:{gap}px;'
+                f'justify-content:{justify};align-items:{align};{css}"{tap}>{inner}</div>'
+            )
         return (
             f'<div class="row" style="gap:{gap}px;justify-content:{justify};'
             f'align-items:{align};{css}">{inner}</div>'
@@ -475,8 +486,9 @@ def _render_html_node(node: dict[str, Any]) -> str:
 
     if kind == "Button":
         label = escape(text_value(props.get("text", "")))
+        look = _button_css(props.get("variant"))
         return (
-            f'<button class="w" data-wid="{widget_id}"{disabled} style="{css}" '
+            f'<button class="w" data-wid="{widget_id}"{disabled} style="{look}{css}" '
             f"onclick=\"send(this.dataset.wid,'press','')\">{label}</button>"
         )
 
@@ -570,7 +582,7 @@ def _render_html_node(node: dict[str, Any]) -> str:
         selected = text_value(props.get("value", ""))
         items = "".join(
             f'<option value="{escape(val, quote=True)}"'
-            f'{" selected" if val == selected else ""}>{escape(lbl)}</option>'
+            f'{" selected" if val == selected else ""}>{escape(lbl)}</option>' 
             for val, lbl in zip(options, labels, strict=False)
         )
         return (
@@ -744,10 +756,13 @@ def _render_html_node(node: dict[str, Any]) -> str:
         radius = "16px 16px 0 0" if sheet else "12px"
         margin = "24px 0 0" if sheet else "12px 0"
         head = f'<h4 style="margin:0 0 8px">{title}</h4>' if title else ""
+        gap = props.get("spacing", 0)
+        # C-2: the dialog's own spacing separates its children, like a Column.
+        body = f'<div class="col" style="gap:{gap}px">{inner}</div>' if gap else inner
         return (
             f'<section style="border:1px solid #b0bec5;border-radius:{radius};'
-            f"padding:12px;margin:{margin};box-shadow:0 6px 18px rgba(0,0,0,.18);{css}\">"
-            f"{head}{inner}</section>"
+            f'padding:12px;margin:{margin};box-shadow:0 6px 18px rgba(0,0,0,.18);{css}">'
+            f"{head}{body}</section>"
         )
 
     if kind == "DatePicker":
@@ -766,10 +781,59 @@ def _render_html_node(node: dict[str, Any]) -> str:
             f"onchange=\"send(this.dataset.wid,'change',this.value)\">"
         )
 
-    if kind in ("Icon", "IconButton", "AutoComplete", "RangeSlider", "PageView", "Chart"):
+    if kind in (
+        "Icon",
+        "IconButton",
+        "AutoComplete",
+        "RangeSlider",
+        "PageView",
+        "Chart",
+        "Canvas",
+    ):
         return render_extra_html(node, render_html, css)
 
     return f'<div class="muted">&lt;{escape(kind)}&gt;</div>'
+
+
+#: Colours of the five ButtonVariant roles in the browser preview.
+_BUTTON_VARIANTS = {
+    "primary": (
+        "background:#3F51B5;color:#fff;border:1px solid #3F51B5;"
+        "box-shadow:0 1px 3px rgba(0,0,0,.24);"
+    ),
+    "tonal": "background:#e3e6f5;color:#26305e;border:1px solid #c9cfe9;",
+    "outlined": "background:transparent;color:#3F51B5;border:1px solid #3F51B5;",
+    "text": "background:transparent;color:#3F51B5;border:1px solid transparent;",
+    "danger": (
+        "background:#C62828;color:#fff;border:1px solid #C62828;"
+        "box-shadow:0 1px 3px rgba(0,0,0,.24);"
+    ),
+}
+
+
+def _button_css(variant: object) -> str:
+    """The preview look of a button variant (P1: every button was the same grey)."""
+    name = str(variant or "primary").lower()
+    return _BUTTON_VARIANTS.get(name, _BUTTON_VARIANTS["primary"]) + "border-radius:10px;"
+
+
+def _tap_attributes(kind: str, props: dict[str, Any], widget_id: str, disabled: str) -> str:
+    """``onclick``/``oncontextmenu`` for a container that has a tap handler (C-3).
+
+    Empty when the container is not tappable, so a plain layout stays inert.
+    The event is sent for the container's own id, which is how ``press()`` —
+    and therefore a long press, a test and the device — finds the handler.
+    """
+    if not (props.get("on_press") or props.get("on_long_press")):
+        return ""
+    parts = []
+    if props.get("on_press"):
+        parts.append("onclick=\"send(this.dataset.wid,'press','')\"")
+    if props.get("on_long_press"):
+        parts.append("oncontextmenu=\"send(this.dataset.wid,'long_press','');return false\"")
+    if disabled:
+        parts.append('aria-disabled="true"')
+    return f' data-wid="{widget_id}"' + (" " + " ".join(parts) if parts else "")
 
 
 def render_html(node: dict[str, Any]) -> str:
@@ -1064,10 +1128,14 @@ class WebPreview:
             _log.debug("refusing a request from origin with scheme %s", origin_scheme)
             return False
         host = (
+            (
             headers.get("X-Forwarded-Host")
             or headers.get("X-Forwarded-Server")
             or headers.get("Host", "")
-        ).split(",")[0].strip()
+            )
+            .split(",")[0]
+            .strip()
+        )
         # Host header sometimes carries :port — compare host and port
         # against the origin host which may include a port.
         if origin_host != host:

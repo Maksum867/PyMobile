@@ -80,11 +80,18 @@ def render_extra_html(
     label = escape(
         str(props.get("accessibility_label") or props.get("label", "")), quote=True
     )
-    if kind in ("RangeSlider", "PageView", "Chart", "AutoComplete"):
+    if kind in ("RangeSlider", "PageView", "Chart", "AutoComplete", "Canvas"):
         # A column aligns its children to the start and would shrink these to nothing.
         css = f"width:100%;{css}"
-    if kind in ("Icon", "IconButton", "Chart"):
+    if kind in ("Icon", "IconButton", "Chart", "Canvas"):
         svg = drawing_svg(props["drawing"], label=str(props.get("label", "")))
+        if kind == "Canvas":
+            # A canvas is a surface, not an icon: keep its own aspect ratio and
+            # paint the background it asked for instead of a sheet of white.
+            background = escape(str(props.get("background") or "transparent"), quote=True)
+            return (
+                f'<div data-wid="{wid}" style="background:{background};{css}">{svg}</div>'
+            )
         if kind == "IconButton":
             return (
                 f'<button class="w" data-wid="{wid}" title="{label}" aria-label="{label}" '
@@ -222,6 +229,24 @@ def extra_ascii(node: dict[str, Any]) -> list[str]:
         return [
             f"[● {props['low']:g} ━━ {props['high']:g} ●] ({props['minimum']:g}..{props['maximum']:g})"
         ]
+    if kind == "Canvas":
+        shapes = props.get("drawing", {}).get("shapes", [])
+        lines = sum(1 for shape in shapes if shape.get("type") == "line")
+        rects = sum(1 for shape in shapes if shape.get("type") == "rect")
+        circles = sum(1 for shape in shapes if shape.get("type") == "circle")
+        texts = sum(1 for shape in shapes if shape.get("type") == "text")
+        counts = [
+            f"{count} {name}"
+            for count, name in (
+                (lines, "line" if lines == 1 else "lines"),
+                (rects, "rect" if rects == 1 else "rects"),
+                (circles, "circle" if circles == 1 else "circles"),
+                (texts, "label" if texts == 1 else "labels"),
+            )
+            if count
+        ]
+        box = f"[{props.get('width', 0)}×{props.get('height', 0)} canvas"
+        return [f"{box}: " + (", ".join(counts) if counts else "empty") + "]"]
     if kind == "Chart":
         title = props.get("title") or (str(props["kind"]).capitalize() + "Chart")
         rows = [str(title)]
@@ -321,10 +346,18 @@ def build_extra_gui(preview: Any, parent: Any, node: dict[str, Any], background:
     wid = str(node["id"])
     enabled = bool(node.get("enabled", True))
     state = "normal" if enabled else "disabled"
-    if kind in ("Icon", "IconButton", "Chart"):
+    if kind in ("Icon", "IconButton", "Chart", "Canvas"):
         size = int(props.get("size", 24))
-        width = 320 if kind == "Chart" else size
-        height = int(props.get("height", 220)) if kind == "Chart" else size
+        if kind == "Icon" or kind == "IconButton":
+            width = height = size
+        elif kind == "Chart":
+            width = 320
+            height = int(props.get("height", 220))
+        else:
+            # A canvas knows its own aspect ratio; it is not an icon and not
+            # always 320 wide.
+            width = int(props.get("width", 320))
+            height = int(props.get("height", 120))
         bg = _tk_color(str(props.get("background", "")), background)
         canvas = tk.Canvas(
             parent,
@@ -520,7 +553,9 @@ def patch_extra_gui(preview: Any, node: dict[str, Any]) -> None:
     if widget is None:
         return
     kind = node["type"]
-    if kind in ("Icon", "IconButton", "Chart"):
+    if kind in ("Icon", "IconButton", "Chart", "Canvas"):
+        if kind == "Canvas" and props.get("background"):
+            widget.configure(bg=_tk_color(str(props["background"]), "#FFFFFF"))
         paint_tk(
             widget,
             props["drawing"],
@@ -570,14 +605,20 @@ def extra_mockup(layout: Any, kind: str, node: dict[str, Any], w: float, fill: b
             )
 
         return _Box(width, 64, paint)
-    if kind in ("Icon", "IconButton", "Chart"):
+    if kind in ("Icon", "IconButton", "Chart", "Canvas"):
         drawing = props["drawing"]
-        height = (
-            float(props.get("height", 220)) if kind == "Chart" else float(props.get("size", 24))
-        )
-        width = (w if fill else min(w, 320)) if kind == "Chart" else float(props.get("size", 24))
+        if kind == "Icon" or kind == "IconButton":
+            height = float(props.get("size", 24))
+        else:
+            height = float(props.get("height", 220))
+        if kind == "Icon" or kind == "IconButton":
+            width = float(props.get("size", 24))
+        else:
+            width = w if fill else min(w, float(props.get("width", 320)))
 
         def paint(p: Any, x: float, y: float, b: Any) -> None:
+            if kind == "Canvas" and props.get("background"):
+                p.rect(x, y, b.w, b.h, _rgba(props.get("background"), (0, 0, 0, 0)))
             scale = min(b.w / drawing["width"], b.h / drawing["height"])
             if kind == "IconButton":
                 scale = min(scale, 1)

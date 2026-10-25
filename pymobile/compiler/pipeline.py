@@ -1042,6 +1042,33 @@ def _framework_inputs() -> list[Path]:
     return sorted({*android_files, *icon_files, *framework_asset_files()})
 
 
+def _warn_about_stale_output_dir(config: ProjectConfig) -> None:
+    """Point at an APK left behind in the old default ``build/`` directory.
+
+    ``output_dir`` changed from ``build`` to ``apk`` because ``build/`` is in
+    nearly every ``.gitignore``. A project upgraded from an older release still
+    has its previous output there, and a cached build in it would silently be
+    ignored (the new directory starts empty), so say where it went instead of
+    letting the user hunt for a file that "disappeared".
+    """
+    current = config.output_path
+    legacy = config.root / "build"
+    if current.name == "build" or not legacy.is_dir():
+        return
+    try:
+        stale = sorted(legacy.glob("*.apk"))
+    except OSError:  # pragma: no cover - unreadable directory
+        return
+    if not stale:
+        return
+    _log.warning(
+        "the default output directory is %r now; an older build is still in %s — "
+        "delete it or set output_dir = \"build\" to keep using it",
+        current.name,
+        legacy,
+    )
+
+
 def build_apk(
     config: ProjectConfig, *, use_cache: bool = True, native: bool = False
 ) -> BuildResult:
@@ -1050,4 +1077,5 @@ def build_apk(
     With ``native=True`` the full Android toolchain is used and the result is a
     signed, installable APK; otherwise a fast structural package is produced.
     """
+    _warn_about_stale_output_dir(config)
     return BuildPipeline(config, use_cache=use_cache, native=native).run()

@@ -50,5 +50,7 @@ def project(tmp_path: Path) -> ProjectConfig:
         name="Demo App",
         package="com.example.demo",
         root=tmp_path,
+        # The fixtures assert on "build" explicitly; the *default* is "apk"
+        # (P1), so a test that cares about the default must say so itself.
         output_dir="build",
     )

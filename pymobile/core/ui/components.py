@@ -189,26 +189,57 @@ class Label(Widget):
         return {**super().props(), "text": self._text}
 
 
+class ButtonVariant:
+    """The five button styles every Android app needs.
+
+    ``Button(..., variant=ButtonVariant.DANGER)`` draws a filled button in the
+    theme's ``ERROR`` colour; ``TONAL`` a filled surface in ``PRIMARY``;
+    ``OUTLINED`` a bordered transparent one; ``TEXT`` a bare label. Plain
+    strings are accepted too (``variant="outlined"``), so a project can keep its
+    variants in a variable or a config file.
+    """
+
+    PRIMARY = "primary"
+    TONAL = "tonal"
+    OUTLINED = "outlined"
+    TEXT = "text"
+    DANGER = "danger"
+
+    ALL = (PRIMARY, TONAL, OUTLINED, TEXT, DANGER)
+
+
 class Button(Widget):
     """A tappable button.
 
     ``on_press`` may return a value, so ``Button("Back", on_press=self.app.pop)``
     type-checks as is — no ``lambda: self.app.pop()`` wrapper needed.
+
+    ``variant`` picks the visual role (:class:`ButtonVariant`): a primary
+    action, a tonal one, an outlined or text button, or a destructive one. It
+    used to be impossible to say — ``Style(background=…)`` on a button drew the
+    platform's grey button on the phone, so every button looked the same.
     """
 
     type_name = "Button"
-    __slots__ = ("_text", "on_press")
+    __slots__ = ("_text", "on_press", "variant")
 
     def __init__(
         self,
         text: str = "",
         *,
         on_press: Callable[[], object] | None = None,
+        variant: str = ButtonVariant.PRIMARY,
         **kwargs: Any,
     ) -> None:
+        if not isinstance(variant, str) or variant not in ButtonVariant.ALL:
+            raise ValueError(
+                f"invalid variant {variant!r}; expected one of "
+                f"{', '.join(ButtonVariant.ALL)} (use ButtonVariant.* constants)"
+            )
         super().__init__(**kwargs)
         self._text = "" if text is None else str(text)
         self.on_press = on_press
+        self.variant = variant
 
     @property
     def text(self) -> str:
@@ -236,6 +267,7 @@ class Button(Widget):
             **super().props(),
             "text": self._text,
             "on_press": callback_name(self.on_press),
+            "variant": self.variant,
         }
 
 

@@ -27,9 +27,10 @@ from __future__ import annotations
 
 import ast
 import importlib
+import importlib.util
 import re
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from difflib import get_close_matches
 from pathlib import Path
@@ -165,13 +166,58 @@ def _import_project_module(root: Path, path: Path) -> None:
     if not parts:
         return
     name = ".".join(parts)
+    # ``import_module`` caches by *name*, and sys.path keeps every root we have
+    # ever been asked about. Two projects (or two test directories) with a file
+    # of the same name therefore collided: the second lookup returned the first
+    # project's module, so its screens were never discovered and the preview
+    # said "no screen called ..." for a class that plainly exists.
+    same_file = _module_is(path)
+
+    def owner_is_this_file() -> bool:
+        existing = sys.modules.get(name)
+        return existing is not None and same_file(existing)
+
+    if owner_is_this_file():
+        return  # this very file is already imported
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
     try:
         importlib.invalidate_caches()
+        if name in sys.modules:
+            # A different file already owns this name: import this one under an
+            # alias instead of silently reusing the other project's module.
+            alias = f"{name}__{_path_token(path)}"
+            spec = importlib.util.spec_from_file_location(alias, path)
+            if spec is None or spec.loader is None:
+                return
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[alias] = module
+            spec.loader.exec_module(module)
+            return
         importlib.import_module(name)
     except Exception as error:  # a broken module must not break the preview
         _log.debug("could not import %s while looking for screens: %s", path, error)
+
+
+def _module_is(path: Path) -> Callable[[object], bool]:
+    """A predicate telling whether a module object was loaded from ``path``."""
+    wanted = path.resolve()
+
+    def matches(module: object) -> bool:
+        origin = getattr(module, "__file__", "") or ""
+        try:
+            return bool(origin) and Path(origin).resolve() == wanted
+        except OSError:  # pragma: no cover - a synthetic module
+            return False
+
+    return matches
+
+
+def _path_token(path: Path) -> str:
+    """A short, stable suffix that makes an aliased module name unique."""
+    import hashlib
+
+    return hashlib.blake2s(str(path.resolve()).encode("utf-8"), digest_size=4).hexdigest()
 
 
 def find_screen_class(
@@ -390,12 +436,15 @@ class Driver:
         return widget
 
     def press(self, widget_id: str) -> None:
-        """Tap a widget (a button, a chip, a list row, a link…)."""
+        """Tap a widget (a button, a chip, a list row, a link, a tappable card…)."""
         widget = self._usable(widget_id, "press")
-        if not hasattr(widget, "press"):
+        if not getattr(widget, "pressable", True) or not hasattr(widget, "press"):
             raise PyMobileError(
                 f"{widget_id!r} is a {type(widget).__name__}, which cannot be pressed",
-                hint="Only widgets with a press() — Button, Chip, ListTile, Link… — take a tap.",
+                hint=(
+                    "Only widgets with a press() — Button, Chip, ListTile, Link, or a "
+                    "Row/Column/Container/Card/Dialog/Stack given on_press= — take a tap."
+                ),
             )
         self.app.handle_ui_event(widget_id, "press", "")
 

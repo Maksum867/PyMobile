@@ -175,6 +175,51 @@ def _natural_width(node: Mapping[str, Any], available: float) -> float | None:
     return estimate + padding[0] + padding[2] + margin[0] + margin[2]
 
 
+#: Relative-luminance helpers for the WCAG contrast check (P1).
+def _rgb(colour: Any) -> tuple[int, int, int] | None:
+    """Parse ``#RGB``/``#RRGGBB``/``#AARRGGBB`` into RGB, or ``None``."""
+    if not isinstance(colour, str):
+        return None
+    value = colour.strip().lstrip("#")
+    if len(value) == 8:
+        value = value[2:]  # drop the alpha: the surfaces here are opaque
+    if len(value) == 3:
+        value = "".join(character * 2 for character in value)
+    if len(value) != 6:
+        return None
+    try:
+        return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+    except ValueError:
+        return None
+
+
+def relative_luminance(colour: Any) -> float | None:
+    """WCAG 2.1 relative luminance of a colour, or ``None`` when unparsable."""
+    rgb = _rgb(colour)
+    if rgb is None:
+        return None
+
+    def linear(channel: int) -> float:
+        value = channel / 255.0
+        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * linear(rgb[0]) + 0.7152 * linear(rgb[1]) + 0.0722 * linear(rgb[2])
+
+
+def contrast_ratio(foreground: Any, background: Any) -> float | None:
+    """WCAG contrast ratio between two colours (1:1 … 21:1), or ``None``."""
+    first = relative_luminance(foreground)
+    second = relative_luminance(background)
+    if first is None or second is None:
+        return None
+    lighter, darker = max(first, second), min(first, second)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+#: Text sizes at or above this are "large" for WCAG AA (3:1 instead of 4.5:1).
+_LARGE_TEXT = 18.0
+
+
 def audit_ui(
     widget_or_tree: Widget | Mapping[str, Any],
     *,
@@ -217,7 +262,39 @@ def audit_ui(
             seen.add(identity)
             issues.append(UiIssue(code, widget_id, message, hint))
 
-    def visit(node: Mapping[str, Any], available: float) -> None:
+    def check_contrast(
+        node: Mapping[str, Any], style: Mapping[str, Any], background: str | None
+    ) -> None:
+        """Warn when this node's text is too close to what it is drawn on (P1).
+
+        ``background`` is inherited down the tree, exactly as the renderers do
+        it: the nearest ancestor with a background wins. Only text colours that
+        were set explicitly are judged — an unset colour follows the theme,
+        which ``check-ui`` cannot see, and guessing would cry wolf.
+        """
+        foreground = style.get("color")
+        if not foreground or not background:
+            return
+        ratio = contrast_ratio(foreground, background)
+        if ratio is None:
+            return
+        size = _number(style.get("font_size")) or 0.0
+        bold = bool(style.get("bold"))
+        required = 3.0 if size >= _LARGE_TEXT or (bold and size >= _LARGE_TEXT - 4) else 4.5
+        if ratio >= required:
+            return
+        report(
+            "contrast",
+            node,
+            f"text {foreground} on {background} is {ratio:.2f}:1, below WCAG AA {required:g}:1",
+            (
+                "Lighten the text or darken the surface until the ratio clears "
+                f"{required:g}:1 (WCAG AA). Pure white on #191322 is 15.6:1; "
+                "#9C92B0 on #191322 is 6.9:1 and passes."
+            ),
+        )
+
+    def visit(node: Mapping[str, Any], available: float, background: str | None = None) -> None:
         if not node.get("visible", True):
             return
         kind = str(node.get("type", ""))
@@ -226,6 +303,9 @@ def audit_ui(
         margin = _insets(style, "margin")
         padding = _insets(style, "padding")
         limit = max(0.0, available - margin[0] - margin[2])
+        # The nearest background wins, exactly as the renderers paint it.
+        surface = style.get("background") or background
+        check_contrast(node, style, surface)
         fixed_width = _number(style.get("width"))
         min_width = _number(style.get("min_width"))
         if fixed_width is not None and fixed_width > limit:
@@ -324,7 +404,7 @@ def audit_ui(
                     if child.get("type") not in {"Expanded", "Flexible"}
                     else content_width
                 )
-                visit(child, child_limit)
+                visit(child, child_limit, surface)
                 child_width = _natural_width(child, remaining)
                 if child_width is not None and child.get("type") not in {"Expanded", "Flexible"}:
                     remaining = max(0.0, remaining - child_width - spacing)
@@ -335,14 +415,14 @@ def audit_ui(
                 gap = _number(props.get("spacing")) or 0.0
             cell_width = max(0.0, (content_width - gap * (columns - 1)) / columns)
             for child in visible:
-                visit(child, cell_width)
+                visit(child, cell_width, surface)
         elif kind == "ScrollView" and props.get("horizontal"):
             # Horizontal scrolling is an explicit overflow strategy.
             for child in visible:
-                visit(child, max(content_width, float(width)))
+                visit(child, max(content_width, float(width)), surface)
         else:
             for child in visible:
-                visit(child, content_width)
+                visit(child, content_width, surface)
 
     visit(root, float(width))
     return issues

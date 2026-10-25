@@ -16,8 +16,10 @@ from pymobile.core.bridge import StubBridge, get_bridge
 from pymobile.core.i18n import translations
 from pymobile.testing import (
     Driver,
+    PngSnapshotChecker,
     SnapshotChecker,
     app_session,
+    assert_png_snapshot,
     assert_snapshot,
     parse_steps,
     render_ascii,
@@ -221,6 +223,104 @@ class TestSnapshotChecker:
     )
     def test_names_are_made_file_safe(self, raw: str, safe: str) -> None:
         assert snapshot_name(raw) == safe
+
+
+# --------------------------------------------------------------------------
+# PngSnapshotChecker — the same golden workflow, for the picture
+# --------------------------------------------------------------------------
+class TestPngSnapshotChecker:
+    def checker(self, tmp_path: Path, **options: object) -> PngSnapshotChecker:
+        return PngSnapshotChecker(tmp_path / "test_sample.py", "test_home", **options)  # type: ignore[arg-type]
+
+    def golden(self, tmp_path: Path, name: str = "test_home") -> Path:
+        return tmp_path / "snapshots" / f"test_sample__{name}.png"
+
+    def test_a_missing_golden_image_is_written_with_a_warning(self, tmp_path: Path) -> None:
+        with pytest.warns(UserWarning, match="did not exist and has been written"):
+            path = self.checker(tmp_path, ci=False)(Home())
+        assert path == self.golden(tmp_path)
+        assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_a_matching_picture_passes_quietly(self, tmp_path: Path, recwarn: object) -> None:
+        with pytest.warns(UserWarning):
+            self.checker(tmp_path, ci=False)(Home())
+        self.checker(tmp_path)(Home())  # no warning: identical render
+
+    def test_a_changed_picture_names_the_diff_file(self, tmp_path: Path) -> None:
+        with pytest.warns(UserWarning):
+            self.checker(tmp_path, ci=False)(Button("v1", id="go"))
+        with pytest.raises(AssertionError) as caught:
+            self.checker(tmp_path, ci=False)(Button("something else entirely", id="go"))
+        message = str(caught.value)
+        assert "pixels" in message and "test_sample__test_home.diff.png" in message
+        assert (tmp_path / "snapshots" / "test_sample__test_home.diff.png").exists()
+        assert (tmp_path / "snapshots" / "test_sample__test_home.new.png").exists()
+
+    def test_a_colour_change_alone_is_caught(self, tmp_path: Path) -> None:
+        """The whole point: the text snapshot matches, the picture does not."""
+        from pymobile.core.ui.style import Style
+
+        with pytest.warns(UserWarning):
+            self.checker(tmp_path, ci=False)(Button("Go", id="go"))
+        recoloured = Button("Go", id="go", style=Style(background="#FF0000"))
+        with pytest.raises(AssertionError, match="pixels"):
+            self.checker(tmp_path, ci=False)(recoloured)
+
+    def test_update_rewrites_the_golden_image(self, tmp_path: Path) -> None:
+        with pytest.warns(UserWarning):
+            self.checker(tmp_path, ci=False)(Button("v1", id="go"))
+        self.checker(tmp_path, update=True)(Button("v2", id="go"))
+        self.checker(tmp_path)(Button("v2", id="go"))  # now the golden picture
+
+    def test_ci_does_not_invent_missing_pictures(self, tmp_path: Path) -> None:
+        with pytest.raises(AssertionError, match="CI does not create them"):
+            self.checker(tmp_path, ci=True)(Home())
+        assert not (tmp_path / "snapshots").exists()
+
+    def test_ci_still_compares_existing_ones_and_update_still_creates(self, tmp_path: Path) -> None:
+        self.checker(tmp_path, ci=True, update=True)(Home())
+        self.checker(tmp_path, ci=True)(Home())
+        with pytest.raises(AssertionError, match="changed"):
+            self.checker(tmp_path, ci=True)(Label("other", id="x"))
+
+    def test_tolerance_accepts_a_tiny_difference(self, tmp_path: Path) -> None:
+        from PIL import Image
+
+        with pytest.warns(UserWarning):
+            self.checker(tmp_path, ci=False)(Button("Go", id="go"))
+        golden = self.golden(tmp_path)
+        with Image.open(golden) as image:
+            bumped = image.convert("RGB")
+        pixel = bumped.getpixel((1, 1))
+        bumped.putpixel((1, 1), tuple(min(255, channel + 8) for channel in pixel))
+        bumped.save(golden)
+        self.checker(tmp_path, tolerance=16)(Button("Go", id="go"))  # still passes
+        with pytest.raises(AssertionError, match="pixels"):
+            self.checker(tmp_path, tolerance=0)(Button("Go", id="go"))
+
+    def test_nothing_rendered_yet_is_explained(self, tmp_path: Path) -> None:
+        check = PngSnapshotChecker(
+            tmp_path / "t.py", "t", StubBridge(verbose=False), update=True
+        )
+        with pytest.raises(AssertionError, match="nothing has been rendered yet"):
+            check()
+
+    def test_it_uses_the_last_frame_or_an_explicit_widget(self, tmp_path: Path) -> None:
+        with app_session(tmp_path) as session:
+            session.start(Home())
+            check = PngSnapshotChecker(
+                tmp_path / "t.py", "t", session.bridge, update=True
+            )
+            from_last_frame = check()  # the screen the app drew
+            explicit = check(Home(), "screen")
+        assert from_last_frame.exists() and explicit.exists()
+        assert from_last_frame.name == "t__t.png"
+        assert explicit.name == "t__screen.png"
+
+    def test_it_matches_the_older_helper(self, tmp_path: Path) -> None:
+        module = tmp_path / "test_sample.py"
+        PngSnapshotChecker(module, "x", update=True)(Home(), "page")
+        assert_png_snapshot(Home(), str(module), "page")  # accepts the same file
 
 
 class TestEnvironment:

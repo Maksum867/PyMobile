@@ -28,7 +28,9 @@ permissions = [
 
 # Build settings.
 abis = ["arm64-v8a"]
-output_dir = "build"
+# Where the APK lands. "apk" rather than "build": build/ is in nearly every
+# .gitignore and CI artefact rule, where a finished APK looks like it vanished.
+output_dir = "apk"
 optimize = false      # true ships bytecode; needs a Python 3.14 host (the device's version)
 strip_debug = true    # strip docstrings and asserts (-OO)
 
@@ -41,4 +43,5 @@ exclude = [
     ".git/**",
     ".venv/**",
     "build/**",
+    "apk/**",
 ]

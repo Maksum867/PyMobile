@@ -40,12 +40,21 @@ class Dialog(Container):
     __slots__ = ("_title", "sheet", "_resolved")
 
     def __init__(
-        self, *children: Widget, title: str = "", sheet: bool = False, **kwargs: Any
+        self,
+        *children: Widget,
+        title: str = "",
+        sheet: bool = False,
+        spacing: int | None = None,
+        **kwargs: Any,
     ) -> None:
         # Dialogs are modal by nature and were visible on construction,
         # so a freshly built dialog "nobody opened" appeared on screen.
         # Hidden until open() unless the caller passes visible= explicitly.
         kwargs.setdefault("visible", False)
+        # A dialog stacks its children vertically, so ``spacing`` is what it
+        # obviously means — wrapping them in a Column just to separate two
+        # lines was the alternative. An explicit Column inside still wins.
+        kwargs.setdefault("spacing", spacing)
         super().__init__(*children, **kwargs)
         self._title = title
         self.sheet = sheet
@@ -89,7 +98,10 @@ class Dialog(Container):
         self.close()
 
     def props(self) -> dict[str, Any]:
-        return {**super().props(), "title": self._title, "sheet": self.sheet}
+        props = {**super().props(), "title": self._title, "sheet": self.sheet}
+        if not props.get("spacing"):
+            props.pop("spacing", None)
+        return props
 
 
 class AlertDialog(Dialog):

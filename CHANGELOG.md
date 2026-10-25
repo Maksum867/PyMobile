@@ -3,6 +3,157 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.10.0] — 2026-10-25
+
+### Added
+
+**Drawing**
+
+- **`Canvas`, `Line`, `Path`, `Shape`, `Rect`, `Circle`, `Polygon`.** Declarative
+  vector drawing for the things a layout cannot express: a waveform, a progress
+  ring, a sparkline. Elements serialise into the same primitives `Chart` and
+  `Icon` already produced, so a drawing renders identically on Android, in the
+  browser preview, in the Tk window, in the ASCII picture and in a golden PNG
+  snapshot. `opacity` is folded into the alpha channel, so a 50 % stroke is
+  really half transparent everywhere. Drawing a 40-sample waveform used to mean
+  forty `Container` strips of differing width — one nested layout per sample.
+
+**Files, audio and the system**
+
+- **`app.pick_file(accept=…)`, `app.pick_files()`, `app.pick_image()`.** The
+  system picker and the camera. The answer is a `PickedFile(path, name, size,
+  mime)` pointing at a copy in the app's own cache, because a `content://` URI
+  is unreadable the moment the activity goes away. `accept` takes a MIME type
+  (`"audio/*"`), a comma-separated list, or an extension (`".wav"`). A cancelled
+  picker returns `None` — never an exception.
+- **`AudioPlayer` (`app.audio(...)`).** `play`, `pause`, `seek`, `position`,
+  `duration`, `volume`, `loop`, and `on_tick`/`on_end` callbacks. Playback is
+  prepared asynchronously and the position is published from the app's own
+  timer, so `play()` returns at once and `on_tick` works on every Android
+  version instead of only the newest one.
+- **`AudioRecorder` (`app.recorder()`).** The microphone. It asks for
+  `RECORD_AUDIO` first and raises a `PlatformError` naming the `pymobile.toml`
+  line to add, instead of writing a zero-length file; `stop()` returns the same
+  `PickedFile` a picker does, so recording and picking need one code path.
+- **`app.copy()`, `app.clipboard()`.** The real clipboard. A "Copy" button used
+  to show a snackbar saying "copied" without copying anything.
+- **`app.share(text=…, url=…)`.** The system share sheet. The link is escaped
+  (a space in a URL used to break it), travels as both the body text and the
+  link stream — SMS and QR scanners read the body, messengers read the stream —
+  and `False` comes back when nothing can share it, so a "Share" button can tell
+  the truth.
+
+**API design**
+
+- **`Button(variant=…)`** — `primary`, `tonal`, `outlined`, `text`, `danger`,
+  with `ButtonVariant.*` constants. One keyword instead of a `Style(...)` recipe
+  per call site, and it means the same thing on Android, in the browser, in the
+  mockup picture and in the ASCII picture. A typo names the ones that exist:
+  `invalid variant 'primry'; expected one of primary, tonal, outlined, text,
+  danger`.
+- **Design tokens: `Space.*` and `TextScale.*`.** `Space.xs/sm/md/lg/xl`
+  (4/8/12/16/24) and `TextScale.caption/body/title/headline` (12/14/22/28) as
+  plain numbers, so `spacing=Space.md` and `font_size=TextScale.title` read as
+  intent rather than as magic numbers.
+- **`Theme.dark_from(light)`** derives a dark theme from a light one instead of
+  two hand-maintained palettes that drift apart.
+- **`Storage(path, namespace=…)`, `Storage.mutate(key, fn)`.** Two components
+  of one app shared a single flat key space, so `Storage("cache").clear()` wiped
+  the other one's data; keys are now scoped and `clear()` only touches its own
+  namespace. Every write is atomic.
+- **`schema_version` and `migrations` on `Storage`.** An upgrade runs the
+  migrations it needs and stamps the file; a file *newer* than the code is left
+  untouched and explained instead of being silently wiped.
+
+**Tooling**
+
+- **`pymobile dev`.** A GUI window with the running app that reloads whenever a
+  source file changes, with a Tk-less fallback to `pymobile watch` for SSH.
+- **`pymobile_png` fixture and `pymobile.testing.assert_png_snapshot`.**
+  Golden-image snapshots next to the text ones. The text snapshot catches a
+  layout change; this one catches a colour one — a button that turned grey, a
+  chip that lost its background. Same file naming, same
+  `--pymobile-update-snapshots` flag, same "CI does not invent goldens" rule,
+  plus `tolerance`/`max_diff_ratio` for font differences and a `*.diff.png`
+  written next to the golden file when a picture changes.
+- **WCAG contrast checking in `check-ui`.** Every text widget is measured
+  against the background it is actually drawn on (a `Style(color=…)` inside a
+  `Card` is checked against the card, not against the screen) and reported when
+  below AA: 4.5:1, or 3:1 for large text.
+
+### Changed
+
+- **An unknown keyword argument on a built-in widget is a `TypeError`**
+  (`WidgetKeywordError`, also a `PyMobileError`), not a silent extension prop.
+  The message names the keyword, lists the ones the widget takes and suggests
+  the closest match or the right `Style(...)` attribute — `Label("hi",
+  colr="red")` used to render a black label and say nothing. Custom widget
+  types, subclasses of built-ins and `set_prop()` keep extension props.
+- **`spacing` on `Card`, `Dialog`, `BottomSheet`, `Container` and `Stack`**, so
+  a `Column` that existed only to hold a gap is gone. `Container` also gained a
+  native Android branch: it used to draw `[Container: no native renderer]` on
+  the phone while working in every preview.
+- **Tappable containers.** `on_press`/`on_long_press` on `Container`, `Card`,
+  `Row`, `Column`, `Stack` and `Dialog`, with `press()`/`long_press()` for tests
+  and `Driver.press()`, wired through every front end.
+- **`EdgeInsets.only()`**, with `leading`/`trailing`/`start`/`end` aliases and
+  `horizontal`/`vertical` groups. `EdgeInsets.top(8)` used to raise
+  `'member_descriptor' object is not callable`, because `top` is a dataclass
+  field; it now raises a `TypeError` naming `EdgeInsets.only(top=8)`.
+- **`Widget(extra={...})`** as the explicit spelling of an extension prop.
+- **`output_dir` defaults to `apk/`, not `build/`.** `build/` is in nearly every
+  `.gitignore`, so the APK people wanted to install was the one path Git would
+  never show them. The new default is written by `pymobile init` too (the
+  template, not the dataclass, decided the directory), `apk/**` is in the
+  built-in exclude list, and a project that still has an APK in the old
+  `build/` gets a warning naming the file instead of a build that looks like it
+  produced nothing.
+- **One Android SDK resolver.** `pymobile build`, the toolchain probe and the
+  device commands each had their own idea of where the SDK was; they now share
+  one lookup that honours `PYMOBILE_SDK_HOME` first and agrees with itself.
+- **The mockup picture no longer lies about colour.** `Chip` ignored
+  `Style(background=…)`, `Button` was painted the same grey whatever its intent,
+  and the palette had no `ACCENT`/`SUCCESS`/`WARNING`/`ERROR` at all, so a
+  themed chip and a danger button both came out colourless.
+- **New native sources are part of the build.** `MediaServices.java` (pickers,
+  players behind int handles, recorder) and the clipboard/share additions to
+  `DeviceServices.java` are listed in the build's javac sources — a class left
+  out of that list compiles fine on its own and is simply missing from the APK.
+
+### Fixed
+
+- **Two projects with a file of the same name no longer hide each other's
+  screens.** `discover_screens()` imported project modules by bare name, and
+  `sys.modules` caches by name, so the second project's `lazy_screens.py`
+  resolved to the first one's module: `pymobile preview --screen ResultScreen`
+  reported "no screen called 'ResultScreen'" for a class that plainly exists. A
+  module already owned by another file is now imported under a path-derived
+  alias.
+- **`PickedFile` derives what the path already says.** `name` and `mime` are
+  filled in from the path when a caller (or a stub bridge) does not pass them,
+  so `PickedFile("/tmp/note.wav").mime` is `audio/x-wav` rather than `""`.
+- **`Canvas` is declared for every renderer.** It is in the widget registry with
+  the same capabilities as `Chart`, which is what keeps `App` from warning about
+  an unknown type and keeps the browser/Tk previews from falling back to the
+  `<Canvas>` placeholder.
+- **The Android/JNI surface is checked in CI.** No compiler in CI sees
+  `pymobile_jni.c`, `MediaServices.java` and `android.py` together (JNI headers
+  and `android.jar` are not there), so a Python method with no C wrapper, or a C
+  wrapper calling a Java method that does not exist, would only fail on a phone
+  — as a silent no-op. A test now parses the three files and fails instead.
+
+### Compatibility
+
+- **Verified on CPython 3.16.0a1**, built from python.org: the full suite passes
+  (1673 passed, 8 skipped — the same result as on 3.13), `ruff` and `mypy` are
+  clean under it, and `pymobile init`, `preview`, `check-ui` and a structural
+  `build` all work. Nothing needed changing for 3.16; the CI matrix now covers
+  3.10–3.15, with a separate allowed-to-fail job on the 3.15/3.16 pre-releases
+  so the next alpha cannot break the framework silently.
+- The *phone* runtime is unchanged: the APK still bundles CPython 3.14, which
+  is what the compiled runtime and the prebuilt `classes.dex` are built against.
+- No public API was removed in this release.
+
 ## [0.9.6] — 2026-10-17
 
 ### Added

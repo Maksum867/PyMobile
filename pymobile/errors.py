@@ -8,6 +8,8 @@ prints it right under the message.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 __all__ = [
     "PyMobileError",
     "ConfigError",
@@ -20,6 +22,7 @@ __all__ = [
     "WidgetNotFoundError",
     "WidgetTypeError",
     "WidgetParentError",
+    "WidgetKeywordError",
 ]
 
 
@@ -109,3 +112,34 @@ class WidgetParentError(PyMobileError, ValueError):
     def __init__(self, widget_id: str, *, hint: str | None = None) -> None:
         super().__init__(f"widget {widget_id!r} already has a parent", hint=hint)
         self.widget_id = widget_id
+
+
+class WidgetKeywordError(PyMobileError, TypeError):
+    """A keyword argument that a built-in widget does not have.
+
+    ``Label("hi", colr="red")`` used to be accepted as an *extension prop* and
+    silently ignored by every renderer; ``Card(…, spacing=8)`` reached
+    ``Widget.__init__`` with a function in it and raised a message about
+    JSON-like values. Both are keyword mistakes, so both raise this — a
+    :class:`TypeError` (``except TypeError`` keeps working) that names the
+    widget, the argument, the arguments the widget does take, and the closest
+    match. Extension props stay available explicitly: ``Widget(extra={...})``
+    or ``widget.set_prop(...)``.
+    """
+
+    def __init__(
+        self,
+        widget_name: str,
+        argument: str,
+        *,
+        valid: Sequence[str] = (),
+        hint: str | None = None,
+    ) -> None:
+        listed = f". It takes: {', '.join(valid)}" if valid else ""
+        super().__init__(
+            f"{widget_name}() got an unexpected keyword argument {argument!r}{listed}",
+            hint=hint,
+        )
+        self.widget_name = widget_name
+        self.argument = argument
+        self.valid = tuple(valid)

@@ -73,7 +73,9 @@ WIDGET_CAPABILITIES: tuple[WidgetCapability, ...] = (
     WidgetCapability("Flexible", web=True, gui=True),
     WidgetCapability("Divider", web=True, gui=True),
     WidgetCapability("SafeArea", web=True, gui=True),
-    WidgetCapability("Container", android=False, web=True, gui=True),
+    # ViewBuilder.java now has a case for it (a vertical layout with spacing,
+    # C-2); before that an explicit Container was a placeholder on the phone.
+    WidgetCapability("Container", web=True, gui=True),
     WidgetCapability("Slider", web=True, gui=True),
     WidgetCapability("Checkbox", web=True, gui=True),
     WidgetCapability("RatingBar", web=True, gui=True),
@@ -101,6 +103,10 @@ WIDGET_CAPABILITIES: tuple[WidgetCapability, ...] = (
     WidgetCapability("RangeSlider", web=True, gui=True),
     WidgetCapability("PageView", web=True, gui=True),
     WidgetCapability("Chart", web=True, gui=True),
+    # Declarative vector drawing (Canvas + Line/Path/Shape); it serialises into
+    # the same primitives Chart does, so every renderer already knew how to
+    # draw it once the type had a branch of its own.
+    WidgetCapability("Canvas", web=True, gui=True),
 )
 
 #: Types an application declared as handled by renderer code of its own.

@@ -4,6 +4,8 @@ import android.app.Activity;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.os.Build;
@@ -285,5 +287,104 @@ final class DeviceServices {
         }
         String country = locale.getCountry();
         return (country == null || country.isEmpty()) ? language : language + "-" + country;
+    }
+
+
+    // -- clipboard ---------------------------------------------------------
+
+    /**
+     * Put text on the system clipboard.
+     *
+     * Android 13 shows its own "copied" confirmation when the app writes to the
+     * clipboard, so the framework does not toast on top of it (an app can still
+     * say something itself). Returns false when there is nothing to copy or the
+     * clipboard service is unavailable, which a caller can report honestly
+     * instead of claiming a copy that never happened.
+     */
+    static boolean copyToClipboard(Context context, String text) {
+        if (context == null || text == null || text.isEmpty()) {
+            return false;
+        }
+        try {
+            ClipboardManager manager =
+                    (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
+            if (manager == null) {
+                return false;
+            }
+            manager.setPrimaryClip(ClipData.newPlainText("text", text));
+            return true;
+        } catch (Exception error) {
+            Log.w(TAG, "could not copy to the clipboard", error);
+            return false;
+        }
+    }
+
+    /** Whatever the clipboard holds, or an empty string. */
+    static String clipboardText(Context context) {
+        if (context == null) {
+            return "";
+        }
+        try {
+            ClipboardManager manager =
+                    (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
+            if (manager == null || !manager.hasPrimaryClip()) {
+                return "";
+            }
+            ClipData clip = manager.getPrimaryClip();
+            if (clip == null || clip.getItemCount() == 0) {
+                return "";
+            }
+            CharSequence text = clip.getItemAt(0).coerceToText(context);
+            return text == null ? "" : text.toString();
+        } catch (Exception error) {
+            // Android 10+ refuses clipboard reads to apps that are not in the
+            // foreground; that is a policy, not a bug, so it stays quiet.
+            Log.i(TAG, "clipboard is not readable right now");
+            return "";
+        }
+    }
+
+    // -- share sheet -------------------------------------------------------
+
+    /**
+     * Open the system share sheet.
+     *
+     * ``url`` travels both as the body text and as an ``EXTRA_TEXT`` link, so a
+     * target that only reads the body (SMS, a QR scanner) still gets the link,
+     * while a browser or a messenger shows a preview. The chooser is created
+     * with FLAG_ACTIVITY_NEW_TASK because it may be started from the Python
+     * thread, which has no activity context of its own.
+     */
+    static boolean share(Context context, String text, String url, String subject) {
+        if (context == null) {
+            return false;
+        }
+        String body = text == null ? "" : text;
+        String link = url == null ? "" : url;
+        if (body.isEmpty() && link.isEmpty()) {
+            return false;
+        }
+        try {
+            android.content.Intent send = new android.content.Intent(
+                    android.content.Intent.ACTION_SEND);
+            send.setType("text/plain");
+            send.putExtra(android.content.Intent.EXTRA_TEXT,
+                    body.isEmpty() ? link : body);
+            if (!link.isEmpty()) {
+                // Some targets read only the link stream.
+                send.putExtra(android.content.Intent.EXTRA_STREAM, link);
+            }
+            if (subject != null && !subject.isEmpty()) {
+                send.putExtra(android.content.Intent.EXTRA_SUBJECT, subject);
+            }
+            android.content.Intent chooser =
+                    android.content.Intent.createChooser(send, subject);
+            chooser.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivity(chooser);
+            return true;
+        } catch (Exception error) {
+            Log.w(TAG, "could not open the share sheet", error);
+            return false;
+        }
     }
 }

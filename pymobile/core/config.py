@@ -73,6 +73,9 @@ DEFAULT_EXCLUDE: tuple[str, ...] = (
     "venv/**",
     "build/**",
     "dist/**",
+    # the default output_dir; a project that keeps the default must not ship
+    # the previous APK (see BuildPipeline._warn_unexcluded_output)
+    "apk/**",
     # secret-like files (П-03)
     ".env",
     ".env.*",
@@ -152,7 +155,11 @@ class ProjectConfig:
 
     # -- build -------------------------------------------------------------
     abis: list[str] = field(default_factory=lambda: ["arm64-v8a"])
-    output_dir: str = "build"
+    #: Where the APK lands. ``apk`` rather than ``build`` on purpose: ``build/``
+    #: is in nearly every ``.gitignore`` and CI artefact rule, so a finished APK
+    #: there looks like it vanished. ``build`` is still honoured when a project
+    #: asks for it explicitly.
+    output_dir: str = "apk"
     optimize: bool = False
     strip_debug: bool = True
     #: Drop desktop-only stdlib packages (pydoc, unittest, venv, ...) — ~1.7 MB.

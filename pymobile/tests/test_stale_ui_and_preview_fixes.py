@@ -357,8 +357,18 @@ class TestScreenDiscovery:
         )
         from pymobile.core.driver import find_screen_class
 
+        # The pool is passed explicitly so the assertion is about *discovery*,
+        # not about what an earlier test in the same process happened to
+        # import: every module keeps its classes alive in ``sys.modules``, and
+        # an unrelated test directory with a file of the same name is enough to
+        # make the global pool look pre-populated.
+        others = [
+            cls
+            for cls in screen_classes(project_only=False)
+            if cls.__name__ != "ResultScreen"
+        ]
         with pytest.raises(PyMobileError, match="no screen called"):
-            find_screen_class("ResultScreen", screen_classes(project_only=False))
+            find_screen_class("ResultScreen", others)
 
         found = discover_screens([tmp_path], exclude=[tmp_path / "main.py"])
         assert any(cls.__name__ == "ResultScreen" for cls in found)

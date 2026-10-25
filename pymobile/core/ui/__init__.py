@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from .audit import UiIssue, audit_ui
+from .canvas import Canvas, Circle, Line, Path, Polygon, Rect, Shape
 from .charts import BarChart, LineChart, PieChart
 from .components import (
     Avatar,
     Badge,
     Button,
+    ButtonVariant,
     Checkbox,
     Chip,
     DataTable,
@@ -73,7 +75,7 @@ from .registry import (
 from .screen import Navigator, Screen
 from .snackbar import Snackbar
 from .style import Align, Color, EdgeInsets, Style
-from .theme import Theme
+from .theme import Space, TextScale, Theme
 from .widget import Container, Widget
 
 __all__ = [
@@ -99,6 +101,13 @@ __all__ = [
     "Calendar",
     "DateRangePicker",
     "Carousel",
+    "Canvas",
+    "Circle",
+    "Line",
+    "Path",
+    "Polygon",
+    "Rect",
+    "Shape",
     "BarChart",
     "LineChart",
     "PieChart",
@@ -107,11 +116,14 @@ __all__ = [
     "Container",
     "Label",
     "Button",
+    "ButtonVariant",
     "TextInput",
     "Image",
     "Switch",
     "ProgressBar",
     "Spacer",
+    "Space",
+    "TextScale",
     "Slider",
     "Checkbox",
     "RatingBar",

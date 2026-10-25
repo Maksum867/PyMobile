@@ -16,6 +16,7 @@ from pymobile import (
     AlertDialog,
     App,
     Button,
+    Card,
     Checkbox,
     Column,
     ConfirmDialog,
@@ -35,7 +36,7 @@ from pymobile.compiler.pipeline import build_apk
 from pymobile.core.bridge import StubBridge
 from pymobile.core.config import DEFAULT_EXCLUDE, ProjectConfig
 from pymobile.core.ui.contract import text_value
-from pymobile.errors import NetworkError, PyMobileError
+from pymobile.errors import NetworkError, PyMobileError, WidgetKeywordError
 
 
 def _configure_logging() -> None:
@@ -63,10 +64,20 @@ class TestExcludeDefaults:
         assert set(DEFAULT_EXCLUDE) <= set(config.exclude)
 
     def test_the_output_directory_is_not_packaged(self, tmp_path: Path) -> None:
-        """The README example used to ship build/ (and the previous APK) inside."""
+        """The README example used to ship build/ (and the previous APK) inside.
+
+        The directory name is read from the result rather than hard-coded: the
+        default moved to "apk" (P1) and the test must follow it, not assume.
+        """
         result = build_apk(self._project(tmp_path, 'name = "Demo"\nexclude = ["tests/**"]\n'))
+        output = result.apk.parent.name + "/"
         with zipfile.ZipFile(result.apk) as archive:
-            assert not [name for name in archive.namelist() if "build/" in name]
+            packed = [
+                name
+                for name in archive.namelist()
+                if f"/{output}" in name or name.startswith(output)
+            ]
+            assert not packed
         assert not any("output directory" in warning for warning in result.warnings)
 
     def test_exclude_only_replaces_the_defaults(self, tmp_path: Path) -> None:
@@ -157,29 +168,42 @@ class TestCheckedCoercion:
 
 
 # --------------------------------------------------------------------------
-# 4. a misspelled kwarg on a built-in widget is named
+# 4. a misspelled kwarg on a built-in widget is refused, not silently ignored
 # --------------------------------------------------------------------------
 class TestUnknownProps:
-    def test_a_typo_is_reported(self, capsys: pytest.CaptureFixture[str]) -> None:
-        _configure_logging()
-        capsys.readouterr()
-        Label("hi", colr="red").to_dict()
-        err = capsys.readouterr().err
-        assert "Label has no prop 'colr'" in err
+    """C-1: an unknown keyword on a built-in is a TypeError, not an extension prop.
 
-    def test_the_report_happens_once(self, capsys: pytest.CaptureFixture[str]) -> None:
-        _configure_logging()
-        label = Label("unique-for-this-test", labl="x")
-        capsys.readouterr()
-        label.to_dict()
-        label.to_dict()
-        assert capsys.readouterr().err.count("has no prop") == 1
+    It used to be stored as an extension prop and ignored by every renderer, so
+    ``Label("hi", colr="red")`` rendered a black label and said nothing (only a
+    log line, at render time). Now the constructor refuses it and names what the
+    widget does take; extension props stay available on purpose (``extra=``,
+    ``set_prop``, custom types).
+    """
 
-    def test_a_close_match_is_suggested(self, capsys: pytest.CaptureFixture[str]) -> None:
-        _configure_logging()
-        capsys.readouterr()
-        Column(cross_alig="center").to_dict()
-        assert "Did you mean 'cross_align'?" in capsys.readouterr().err
+    def test_a_typo_is_refused(self) -> None:
+        with pytest.raises(WidgetKeywordError, match="'colr'") as caught:
+            Label("hi", colr="red")
+        assert caught.value.widget_name == "Label"
+        assert caught.value.argument == "colr"
+        # The message lists the keywords the widget really takes.
+        assert "It takes: text" in str(caught.value)
+        assert "text" in caught.value.valid
+
+    def test_it_is_still_a_type_error(self) -> None:
+        with pytest.raises(TypeError):
+            Label("hi", labl="x")
+        assert issubclass(WidgetKeywordError, TypeError)
+        assert issubclass(WidgetKeywordError, PyMobileError)
+
+    def test_a_close_match_is_suggested(self) -> None:
+        with pytest.raises(WidgetKeywordError) as caught:
+            Column(cross_alig="center")
+        assert caught.value.hint == "Did you mean 'cross_align'?"
+
+    def test_a_style_attribute_is_pointed_at_style(self) -> None:
+        with pytest.raises(WidgetKeywordError) as caught:
+            Label("hi", colr="red")
+        assert "Style(color=" in (caught.value.hint or "")
 
     def test_custom_widget_types_keep_extension_props(self) -> None:
         class BarChart(Widget):
@@ -191,14 +215,51 @@ class TestUnknownProps:
         chart = BarChart(legend="bottom")  # an extension prop: its own renderer's job
         assert chart.to_dict()["props"]["legend"] == "bottom"
 
+    def test_a_subclass_of_a_builtin_is_a_custom_widget(self) -> None:
+        """A project's ``class TrackRow(Card)`` is not policed as ``Card``."""
+
+        class TrackRow(Card):
+            pass
+
+        row = TrackRow(Label("title"), highlight="today")
+        assert row.to_dict()["props"]["highlight"] == "today"
+
     def test_a_callable_typo_names_the_argument(self) -> None:
-        with pytest.raises(TypeError, match="'on_pres' is not a prop of Button"):
+        with pytest.raises(WidgetKeywordError) as caught:
             Button("b", on_pres=lambda: None)  # type: ignore[call-arg]
+        assert caught.value.argument == "on_pres"
+        assert caught.value.hint == "Did you mean 'on_press'?"
+
+    def test_a_handler_on_a_non_interactive_widget_says_so(self) -> None:
+        with pytest.raises(WidgetKeywordError) as caught:
+            Label("hi", on_press=lambda: None)  # type: ignore[call-arg]
+        assert "is not interactive" in (caught.value.hint or "")
 
     def test_extension_props_still_work_when_set_on_purpose(self) -> None:
         widget = Label("hi")
         widget.set_prop("hint", "x")
         assert widget.to_dict()["props"]["hint"] == "x"
+
+    def test_the_explicit_extra_mapping_is_accepted(self) -> None:
+        widget = Label("hi", extra={"colr": "red", "rank": 3})
+        assert widget.to_dict()["props"]["colr"] == "red"
+        assert widget.to_dict()["props"]["rank"] == 3
+
+    def test_extra_and_a_keyword_cannot_collide(self) -> None:
+        # Only a custom widget can receive the same name twice (a built-in
+        # refuses the keyword first), so the guard is checked on Widget itself.
+        with pytest.raises(TypeError, match="both"):
+            Widget(extra={"priority": 1}, priority=2)
+
+    def test_extra_must_be_a_mapping(self) -> None:
+        with pytest.raises(TypeError, match="extra must be a mapping"):
+            Label("hi", extra=["colr"])  # type: ignore[arg-type]
+
+    def test_a_stray_prop_set_after_construction_still_renders(self) -> None:
+        """``set_prop`` stays the escape hatch: no log line, no exception."""
+        widget = Label("hi")
+        widget.set_prop("legend", "bottom")
+        assert widget.to_dict()["props"]["legend"] == "bottom"
 
 
 # --------------------------------------------------------------------------

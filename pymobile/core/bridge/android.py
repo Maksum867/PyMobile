@@ -10,13 +10,20 @@ there is no reflection cost on the hot render path.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from typing import Any
 
+from ...errors import BridgeError
 from ...log import get_logger
-from .base import Bridge, NotificationSpec
+from .base import Bridge, NotificationSpec, PickedFile
 
-__all__ = ["AndroidBridge", "native_module"]
+__all__ = [
+    "AndroidBridge",
+    "NativeAudioPlayer",
+    "NativeAudioRecorder",
+    "native_module",
+]
 
 _log = get_logger("bridge.android")
 
@@ -166,6 +173,90 @@ class AndroidBridge(Bridge):
             results[permission] = granted or bool(self._native.has_permission(permission))
         return results
 
+
+    # -- files -------------------------------------------------------------
+    def pick_file(self, request: str = "*/*", *, multiple: bool = False) -> list[PickedFile]:
+        """Open the system picker and copy the answer into the app's cache.
+
+        The native side blocks until the user answers and returns absolute
+        paths, so this is a plain call — a type error here (an older
+        ``libpymobile.so`` without the picker) becomes "the user picked
+        nothing" rather than a crash in the middle of a screen.
+        """
+        if self._native is None:
+            return []
+        picker = getattr(self._native, "pick_file", None)
+        if picker is None:  # pragma: no cover - prebuilt bridge without pickers
+            _log.warning("this runtime has no file picker; returning no files")
+            return []
+        paths = picker(request, bool(multiple)) or []
+        return [self._describe(path) for path in paths if path]
+
+    def pick_image(self) -> list[PickedFile]:
+        if self._native is None:
+            return []
+        picker = getattr(self._native, "pick_image", None)
+        if picker is None:  # pragma: no cover - prebuilt bridge without pickers
+            return []
+        return [self._describe(path) for path in (picker() or []) if path]
+
+    @staticmethod
+    def _describe(path: str) -> PickedFile:
+        """Fill in name/size/mime from the path the platform handed back."""
+        import mimetypes
+        from pathlib import Path as _Path
+
+        file = _Path(str(path))
+        size = -1
+        with contextlib.suppress(OSError):  # pragma: no cover - a vanished cache file
+            size = file.stat().st_size
+        mime = mimetypes.guess_type(file.name)[0] or ""
+        return PickedFile(path=str(file), name=file.name, size=size, mime=mime)
+
+    # -- clipboard ---------------------------------------------------------
+    def copy_to_clipboard(self, text: str) -> bool:
+        if self._native is None:
+            return False
+        copy = getattr(self._native, "copy_to_clipboard", None)
+        if copy is None:  # pragma: no cover - older runtime
+            return False
+        return bool(copy(text))
+
+    def clipboard_text(self) -> str:
+        if self._native is None:
+            return ""
+        getter = getattr(self._native, "clipboard_text", None)
+        if getter is None:  # pragma: no cover - older runtime
+            return ""
+        return str(getter() or "")
+
+    # -- share sheet -------------------------------------------------------
+    def share(self, text: str = "", url: str = "", subject: str = "") -> bool:
+        if self._native is None:
+            return False
+        share = getattr(self._native, "share", None)
+        if share is None:  # pragma: no cover - older runtime
+            return False
+        return bool(share(text, url, subject))
+
+    # -- audio -------------------------------------------------------------
+    def audio_player(self, source: str, **options: Any) -> Any:
+        """Open a native player; the returned object is the Python-side handle."""
+        if self._native is None:
+            raise BridgeError(
+                "the native audio player is not available in this runtime",
+                hint="rebuild the APK, or play audio only on a device",
+            )
+        return NativeAudioPlayer(self._native, source, **options)
+
+    def audio_recorder(self, *, directory: str = "") -> Any:
+        if self._native is None:
+            raise BridgeError(
+                "the native recorder is not available in this runtime",
+                hint="rebuild the APK, or record only on a device",
+            )
+        return NativeAudioRecorder(self._native, directory)
+
     # -- locale ------------------------------------------------------------
     def device_language(self) -> str:
         """Ask Android for the current locale, e.g. ``uk-UA``."""
@@ -216,3 +307,108 @@ class AndroidBridge(Bridge):
             return None
         widget_id, kind, value = result
         return str(widget_id), str(kind), str(value)
+
+
+class NativeAudioPlayer:
+    """The on-device half of :class:`~pymobile.core.api.audio.AudioPlayer`.
+
+    The native module keeps the ``MediaPlayer`` and hands Python an int handle;
+    closing over that handle here keeps the JNI surface a list of small,
+    strongly-typed calls instead of object juggling across the boundary.
+    """
+
+    def __init__(self, native: Any, source: str, **options: Any) -> None:
+        self._native = native
+        open_audio = getattr(native, "audio_open", None)
+        if open_audio is None:  # pragma: no cover - older runtime
+            raise BridgeError(
+                "this runtime cannot play audio",
+                hint="rebuild the APK so libpymobile.so includes audio_open()",
+            )
+        self.handle = int(open_audio(source, bool(options.get("looping", False))))
+        if self.handle < 0:
+            raise BridgeError(
+                f"could not open {source!r} for playback",
+                hint="check that the file exists in the APK (assets/…) or is a reachable URL",
+            )
+        self._on_end = options.get("on_end")
+        self._on_error = options.get("on_error")
+        self.set_volume(float(options.get("volume", 1.0)))
+
+    # MediaPlayer has no end callback Python can safely re-enter, so the API
+    # layer's polling detects the end; these are the plain transport calls.
+    def play(self) -> None:
+        self._native.audio_play(self.handle)
+
+    def pause(self) -> None:
+        self._native.audio_pause(self.handle)
+
+    def stop(self) -> None:
+        self._native.audio_stop(self.handle)
+
+    def seek(self, position_ms: int) -> None:
+        self._native.audio_seek(self.handle, int(position_ms))
+
+    def position(self) -> int:
+        return int(self._native.audio_position(self.handle))
+
+    def duration(self) -> int:
+        return int(self._native.audio_duration(self.handle))
+
+    def is_playing(self) -> bool:
+        return bool(self._native.audio_is_playing(self.handle))
+
+    def set_volume(self, level: float) -> None:
+        self._native.audio_volume(self.handle, float(level))
+
+    def set_looping(self, looping: bool) -> None:
+        self._native.audio_looping(self.handle, bool(looping))
+
+    def release(self) -> None:
+        if self.handle >= 0:
+            self._native.audio_release(self.handle)
+            self.handle = -1
+
+
+class NativeAudioRecorder:
+    """The on-device half of :class:`~pymobile.core.api.audio.AudioRecorder`."""
+
+    def __init__(self, native: Any, directory: str = "") -> None:
+        self._native = native
+        self._directory = directory
+        self.handle = -1
+
+    def start(self) -> None:
+        starter = getattr(self._native, "recorder_start", None)
+        if starter is None:  # pragma: no cover - older runtime
+            raise BridgeError("this runtime cannot record audio")
+        self.handle = int(starter(self._directory))
+        if self.handle < 0:
+            raise BridgeError(
+                "the microphone recorder could not start",
+                hint="check that RECORD_AUDIO is declared and granted",
+            )
+
+    def stop(self) -> str:
+        if self.handle < 0:
+            return ""
+        path = str(self._native.recorder_stop(self.handle) or "")
+        self.handle = -1
+        return path
+
+    def cancel(self) -> None:
+        if self.handle >= 0:
+            cancel = getattr(self._native, "recorder_cancel", None)
+            if cancel is not None:
+                cancel(self.handle)
+            self.handle = -1
+
+    def is_recording(self) -> bool:
+        if self.handle < 0:
+            return False
+        return bool(self._native.recorder_is_recording(self.handle))
+
+    def elapsed_ms(self) -> int:
+        if self.handle < 0:
+            return 0
+        return int(self._native.recorder_elapsed(self.handle))

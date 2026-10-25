@@ -62,7 +62,9 @@ class TestBuild:
     def test_builds_apk(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         create_project(tmp_path, "Build Me")
         assert main(["-c", str(tmp_path), "build"]) == 0
-        assert list((tmp_path / "build").glob("*.apk"))
+        # P1: the default output directory is apk/, not build/ — the latter is
+        # in almost every .gitignore, where a finished APK looks lost.
+        assert list((tmp_path / "apk").glob("*.apk"))
         assert "✓" in capsys.readouterr().out
 
     def test_second_build_reports_cache(
@@ -148,7 +150,7 @@ class TestInfoCleanDoctor:
         create_project(tmp_path, "Clean Me")
         main(["-c", str(tmp_path), "build"])
         assert main(["-c", str(tmp_path), "clean"]) == 0
-        assert not (tmp_path / "build").exists()
+        assert not (tmp_path / "apk").exists()
 
     def test_clean_when_nothing_to_do(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
