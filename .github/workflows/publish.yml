@@ -20,6 +20,13 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install --upgrade pip build twine
+      - name: Validate before publishing
+        run: |
+          python -m pip install -e ".[dev]"
+          python -m pytest
+          python -m ruff check pymobile
+          python -m mypy pymobile
+          python -m pymobile.compiler.rebuild_dex --check
       - run: python -m build
       # Never push an artifact whose metadata PyPI would reject anyway.
       - run: python -m twine check --strict dist/*

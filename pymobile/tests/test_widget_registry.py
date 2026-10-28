@@ -27,6 +27,8 @@ from pymobile.core.ui.registry import (
     widget_types,
 )
 
+from .java_sources import renderer_source
+
 
 @pytest.fixture(autouse=True)
 def _clean_declarations() -> None:
@@ -213,8 +215,7 @@ class TestJavaRenderer:
     """The renderer itself must not silently drop an unknown type either."""
 
     def _source(self) -> str:
-        root = Path(__file__).resolve().parents[1]
-        return (root / "resources/android/java/ViewBuilder.java").read_text(encoding="utf-8")
+        return renderer_source()
 
     def test_the_default_branch_builds_a_visible_placeholder(self) -> None:
         source = self._source()

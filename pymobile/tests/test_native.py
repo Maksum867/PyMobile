@@ -20,6 +20,8 @@ from pymobile.compiler.toolchain import Toolchain, ToolchainError, find_toolchai
 from pymobile.core.config import ProjectConfig
 from pymobile.errors import PyMobileError
 
+from .java_sources import renderer_source
+
 
 def _toolchain_available() -> bool:
     """Whether a usable SDK + NDK is installed on this machine."""
@@ -1030,14 +1032,15 @@ class TestRendererContract:
     def _source(self, name: str) -> str:
         from pymobile.resources import resource_path
 
-        return resource_path("android", "java", name).read_text(encoding="utf-8")
+        return (renderer_source() if name == "ViewBuilder.java"
+                else resource_path("android", "java", name).read_text(encoding="utf-8"))
 
     def test_leaf_widgets_do_not_set_layout_params(self) -> None:
         """Regression: a Spacer setting ViewGroup.LayoutParams made
         LinearLayout raise ClassCastException, so every sibling after it
         vanished from the screen. Only containers may assign params."""
         source = self._source("ViewBuilder.java")
-        builder = source[source.index("private View buildSpacer") :]
+        builder = source[source.index("View buildSpacer") :]
         builder = builder[: builder.index("\n    }")]
         # Strip comments first: the method documents why it must not call this.
         code = "\n".join(line for line in builder.splitlines() if not line.strip().startswith("//"))
@@ -1046,7 +1049,7 @@ class TestRendererContract:
     def test_children_are_built_defensively(self) -> None:
         """One failing widget must not blank the whole screen."""
         source = self._source("ViewBuilder.java")
-        assert "private View buildChild(" in source
+        assert "View buildChild(" in source
         # every container adds children through the guarded helper
         for call in ("content.addView(buildChild(", "frame.addView(buildChild("):
             assert call in source
@@ -1059,7 +1062,7 @@ class TestRendererContract:
         cross-axis alignment are resolved for every child of a Row/Column.
         """
         source = self._source("ViewBuilder.java")
-        params = _method_body(source, "private LinearLayout.LayoutParams childParams")
+        params = _method_body(source, "LinearLayout.LayoutParams childParams")
         assert '"Spacer".equals(type)' in params
         assert 'childProps.optInt("size", 8)' in params
 
@@ -1105,7 +1108,7 @@ class TestRendererContract:
     def test_grid_columns_share_width_by_weight(self) -> None:
         """Equal columns are what Row(weight=1) could not guarantee."""
         source = self._source("ViewBuilder.java")
-        grid = _method_body(source, "private View buildGrid")
+        grid = _method_body(source, "View buildGrid")
         assert "new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)" in grid
 
     def test_safe_area_uses_real_window_insets(self) -> None:
@@ -1126,16 +1129,16 @@ class TestRendererContract:
         They belong on the params built by childParams().
         """
         source = self._source("ViewBuilder.java")
-        assert "private void applyMargin(" in source
+        assert "void applyMargin(" in source
         assert "applyBoxStyle(params, style)" in source
 
         # ...and the old, ineffective path must not come back.
-        assert "getLayoutParams()" not in _method_body(source, "private void applyStyle(")
+        assert "getLayoutParams()" not in _method_body(source, "void applyStyle(")
 
     def test_margin_adds_to_spacing_instead_of_replacing_it(self) -> None:
         """A container's spacing and a widget's margin must both survive."""
         source = self._source("ViewBuilder.java")
-        margin = _method_body(source, "private void applyMargin(")
+        margin = _method_body(source, "void applyMargin(")
         for field in ("leftMargin", "topMargin", "rightMargin", "bottomMargin"):
             assert f"params.{field} +=" in margin
 
@@ -1144,7 +1147,7 @@ class TestRendererContract:
         source = self._source("ViewBuilder.java")
         assert 'dimension(style, "width")' in source
         assert 'dimension(style, "height")' in source
-        assert "MATCH_PARENT" in source[source.index("private int dimension(") :]
+        assert "MATCH_PARENT" in source[source.index("int dimension(") :]
 
     def test_elevation_is_applied(self) -> None:
         source = self._source("ViewBuilder.java")
@@ -1153,12 +1156,12 @@ class TestRendererContract:
     def test_scrollview_children_use_the_shared_sizing_rules(self) -> None:
         """A scrolled child gets the same margins and flex as a Column child."""
         source = self._source("ViewBuilder.java")
-        scroll = _method_body(source, "private View buildScroll")
+        scroll = _method_body(source, "View buildScroll")
         assert "childParams(childNode, orientation" in scroll
 
     def test_grid_cells_keep_their_margin(self) -> None:
         source = self._source("ViewBuilder.java")
-        assert "applyMargin(params" in _method_body(source, "private View buildGrid")
+        assert "applyMargin(params" in _method_body(source, "View buildGrid")
 
 
 class TestDeviceFixes:
@@ -1167,7 +1170,8 @@ class TestDeviceFixes:
     def _java(self, name: str) -> str:
         from pymobile.resources import resource_path
 
-        return resource_path("android", "java", name).read_text(encoding="utf-8")
+        return (renderer_source() if name == "ViewBuilder.java"
+                else resource_path("android", "java", name).read_text(encoding="utf-8"))
 
     def _jni(self) -> str:
         from pymobile.resources import resource_path

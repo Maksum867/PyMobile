@@ -34,6 +34,8 @@ from pymobile import (
 )
 from pymobile.core.ui.contract import text_value
 
+from .java_sources import renderer_source
+
 
 # ---------------------------------------------------------------------------
 # 1. unknown keywords on a built-in widget are refused, with the valid names
@@ -226,11 +228,8 @@ class TestTappableContainers:
         assert not any(line.startswith("▸") for line in lines)
 
     def test_the_device_renderer_binds_the_tap(self) -> None:
-        from pathlib import Path
 
-        source = (
-            Path(__file__).resolve().parents[1] / "resources/android/java/ViewBuilder.java"
-        ).read_text(encoding="utf-8")
+        source = renderer_source()
         assert "bindContainerTap" in source
         assert 'dispatchEvent(id, "long_press", "")' in source
 

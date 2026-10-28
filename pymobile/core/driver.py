@@ -380,7 +380,14 @@ class Driver:
         Raises :class:`~pymobile.errors.WidgetNotFoundError` — with the closest
         ids that do exist — when there is none.
         """
-        return self.screen.get(widget_id)
+        resolved = self.app._resolve_wire_id(widget_id)
+        if resolved is None:
+            from ..errors import WidgetNotFoundError
+
+            raise WidgetNotFoundError(
+                widget_id, hint="Stale frame; read tree() again for the current widget id."
+            )
+        return self.screen.get(resolved)
 
     def tree(self) -> dict[str, Any]:
         """The current screen as the renderer receives it (and draw it once)."""

@@ -1,0 +1,4 @@
+# Stable Java checkouts and no text conversion for shipped Android binaries.
+*.java text eol=lf
+*.dex binary
+*.so binary

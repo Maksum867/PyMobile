@@ -9,6 +9,8 @@ import pytest
 from pymobile import Column, RatingBar
 from pymobile.core.ui.preview import render_ascii
 
+from .java_sources import renderer_source
+
 JAVA = Path(__file__).resolve().parents[1] / "resources" / "android" / "java"
 
 
@@ -41,7 +43,7 @@ def test_android_uses_a_hand_drawn_star_view() -> None:
     """android.widget.RatingBar tiles stars while its clip follows the view's
     width, so a stretched or overflowing bar painted a fraction of the next
     star. The replacement draws every star itself."""
-    builder = (JAVA / "ViewBuilder.java").read_text(encoding="utf-8")
+    builder = renderer_source()
     views = (JAVA / "AdvancedViews.java").read_text(encoding="utf-8")
     assert "class StarView" in views
     assert "new RatingBar(" not in builder
@@ -51,5 +53,5 @@ def test_android_uses_a_hand_drawn_star_view() -> None:
 
 
 def test_android_star_view_is_wrapped_not_stretched() -> None:
-    builder = (JAVA / "ViewBuilder.java").read_text(encoding="utf-8")
+    builder = renderer_source()
     assert '"RatingBar".equals(type) && vertical' in builder

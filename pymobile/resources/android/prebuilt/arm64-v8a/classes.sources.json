@@ -1,0 +1,26 @@
+{
+  "build_tools": "35.0.0",
+  "dex_sha256": "0d12b02aac70dbd5ea0b75a6668325eaed835bba94de9e7ba192851b0916bf99",
+  "min_sdk": 24,
+  "schema": 1,
+  "sources": {
+    "AdvancedViews.java": "eeab1df7304cec0089d502c10a2b9416e0c2258ae7257365529f6e5543ce028c",
+    "CustomWidgetRegistry.java": "27f6ab93a47a4a77f60796f4431ee83e7c100592acd24e59fa8908121b1342d0",
+    "DeviceServices.java": "1f51f92e16d9f9ac1040e456ed0a66f93e0041e01354237b01049b8b6acba69b",
+    "FlowViews.java": "de78e1da96789dc9efdbe041f0def53a68a9888aca6ea28f69b7e75817b38096",
+    "MainActivity.java": "419c699de94ed8f598d55f5be02b743670ec3538ebd102cd18cdd7c3c1ccc411",
+    "MediaServices.java": "0cde7bc480812e919f890692b31e0ab2e00e2296bb3f0df248a1ff7446a400d1",
+    "Native.java": "6e4ea4077f14d8ed63ba51265139d56318fad307748e8c5ce958f338617b8b78",
+    "PythonRuntime.java": "298bff8d082fdb5b65fe7aeae1434e7c62f337989e116437a7bde17dab9fd6d9",
+    "ViewBuilder.java": "5b176f78c4e3811e9585e7e3f65fb96bab4063235b493f698a5ca50801bf51e2",
+    "ViewContainers.java": "540aeda34b371263b91925168d6d24b5d8e752478af43f8dbadeb0e30156480f",
+    "ViewControls.java": "a0a37d5c3d871c3e09ed4f27e18f9d30746996cb0e4738e0d572ec33b37cbc20",
+    "ViewGestures.java": "73ba735939e25113a7f8d4a7c46cb878a19c2eacfd69510de1a20863204a2bc2",
+    "ViewInputs.java": "0c967595160cb714b3dbca0ea3a0231992c448e4fe5d1202afb633b620fae497",
+    "ViewLists.java": "35cbe5a1e08ab61ae615035ec7703f61074f35e5603ef5fc01418b7ab4e696c8",
+    "ViewOverlays.java": "9784c8ee364b90d7784c276b2f2c9994852ff1996c1a60b5969bd469e20305cd",
+    "ViewStyles.java": "e51dff60c7d0c3293e5dccb5bdd1139a37f91af3a369ccc0f2ebe7e724038e0c",
+    "ViewUpdates.java": "930b143b7d7e7eaa4b7a6bbe34a7fd0172d929f4175907f2da989dd1f8f49a1d",
+    "WidgetRenderer.java": "2dc2d7bdaa7980fa5497bb223926a6b6add8329e0096f974488ad7f5f0e9f2b7"
+  }
+}

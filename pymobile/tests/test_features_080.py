@@ -49,6 +49,8 @@ from pymobile.core.ui.snackbar import SNACKBAR_ID
 from pymobile.core.ui.web import render_html
 from pymobile.errors import PyMobileError
 
+from .java_sources import renderer_source
+
 PACKAGE = Path(__file__).resolve().parents[1]
 ANDROID_DIR = PACKAGE / "resources" / "android"
 JAVA_DIR = ANDROID_DIR / "java"
@@ -370,7 +372,7 @@ def test_previews_show_the_snackbar_and_the_gestures() -> None:
 
 
 def test_java_renders_the_snackbar_and_the_gestures() -> None:
-    builder = (JAVA_DIR / "ViewBuilder.java").read_text(encoding="utf-8")
+    builder = renderer_source()
     activity = (JAVA_DIR / "MainActivity.java").read_text(encoding="utf-8")
     for needle in (
         "void syncSnackbar(",

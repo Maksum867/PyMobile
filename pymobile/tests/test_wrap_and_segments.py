@@ -31,6 +31,8 @@ from pymobile.core.ui.preview import render_ascii
 from pymobile.core.ui.registry import supported_by, unknown_types, widget_types
 from pymobile.core.ui.web import render_html
 
+from .java_sources import renderer_source
+
 ANDROID = Path(pymobile.__file__).resolve().parent / "resources" / "android"
 VIEW_BUILDER = ANDROID / "java" / "ViewBuilder.java"
 SUBJECTS = ["Географія", "Історія", "Математика", "Біологія", "Хімія"]
@@ -385,11 +387,13 @@ def method_body(source: str, signature: str) -> str:
 
 
 class TestAndroid:
-    source = VIEW_BUILDER.read_text(encoding="utf-8")
+    source = renderer_source() + (ANDROID / "java/FlowViews.java").read_text(
+        encoding="utf-8"
+    )
 
     def test_wrap_has_a_renderer_branch(self) -> None:
         assert 'case "Wrap":\n                view = buildWrap(node, props);' in self.source
-        build = method_body(self.source, "private View buildWrap(")
+        build = method_body(self.source, "View buildWrap(")
         assert "new FlowLayout(" in build
         assert '"run_spacing"' in build
         assert "applyBoxStyle(" in build  # child margins and explicit sizes still apply
@@ -406,7 +410,7 @@ class TestAndroid:
             assert marker in flow, marker
 
     def test_segments_scroll_instead_of_squeezing(self) -> None:
-        build = method_body(self.source, "private View buildSegmented(")
+        build = method_body(self.source, "View buildSegmented(")
         assert "new HorizontalScrollView(context)" in build
         assert "new FlowLayout(context, 0, 0, FlowLayout.ALIGN_START)" in build  # wrap=true
         assert 'props.optBoolean("wrap", false)' in build
@@ -415,7 +419,7 @@ class TestAndroid:
         assert "return row;\n        }\n\n        final HorizontalScrollView" in build
 
     def test_the_in_place_update_finds_the_buttons_and_rebuilds_on_new_labels(self) -> None:
-        assert "private static ViewGroup segmentRow(View view)" in self.source
+        assert "static ViewGroup segmentRow(View view)" in self.source
         update = self.source[self.source.index('if ("SegmentedButtons".equals(type)') :]
         update = update[: update.index('if ("DataTable".equals(type)')]
         assert "segmentRow(view)" in update
@@ -444,7 +448,9 @@ class TestAndroid:
 @pytest.mark.skipif(shutil.which("javac") is None, reason="needs a JDK to compile FlowMath")
 def test_java_flow_math_breaks_lines_exactly_like_python(tmp_path: Path) -> None:
     """The phone and the previews must break lines in the same places."""
-    source = VIEW_BUILDER.read_text(encoding="utf-8")
+    source = renderer_source() + (ANDROID / "java/FlowViews.java").read_text(
+        encoding="utf-8"
+    )
     body = method_body(source, "static final class FlowMath")
     body = body.replace("FlowLayout.ALIGN_CENTER", "1").replace("FlowLayout.ALIGN_END", "2")
     assert "android" not in body, "FlowMath must stay free of Android classes"

@@ -14,13 +14,11 @@ user who typed a wrong package name is not helpful.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import platform
 import shutil
 import sys
-import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -28,7 +26,7 @@ from typing import Any
 from . import __version__
 from .compiler.pipeline import BuildPipeline
 from .compiler.scaffold import create_project
-from .core.config import CONFIG_FILENAME, ProjectConfig, load_config
+from .core.config import ProjectConfig, load_config
 from .errors import PyMobileError
 from .log import configure, get_logger, supports_color
 
@@ -181,6 +179,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         config,
         use_cache=not args.no_cache and not args.clean,
         native=native,
+        check_startup=getattr(args, "check_startup", None),
         on_stage=lambda stage: _out.info(f"{stage}…") if args.verbose else None,
         keystore=Path(args.keystore) if getattr(args, "keystore", None) else None,
         keystore_password=getattr(args, "ks_pass", None),
@@ -190,6 +189,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     try:
         result = pipeline.run()
     except Exception as exc:
+        from .compiler.startup import StartupCheckError
         from .compiler.toolchain import ToolchainError
         from .compiler.widgets import MissingRendererError
 
@@ -200,15 +200,13 @@ def cmd_build(args: argparse.Namespace) -> int:
                     f"Run `{_invocation()} setup-sdk` to install it automatically."
                 )
             raise type(exc)(str(exc), hint=hint.strip()) from exc
-        if native and not isinstance(exc, MissingRendererError):
+        if native and not isinstance(exc, (MissingRendererError, StartupCheckError)):
             from .errors import PyMobileError as _PyErr
 
             if isinstance(exc, _PyErr) and exc.hint and "setup-sdk" not in exc.hint:
                 exc.hint = f"{exc.hint} (for native: {_invocation()} setup-sdk)"
             elif isinstance(exc, _PyErr) and not exc.hint:
-                exc.hint = (
-                    f"Run `{_invocation()} setup-sdk` to install the Android SDK."
-                )
+                exc.hint = f"Run `{_invocation()} setup-sdk` to install the Android SDK."
         raise
 
     for warning in result.warnings:
@@ -238,309 +236,59 @@ def cmd_build(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    """Import the entry point and render the first screen on the desktop."""
-    config = _load(args)
-    entry = _entrypoint(config)
+    """Compatibility entry point; implementation is in cli_preview."""
+    from . import cli_preview
 
-    if getattr(args, "web", False):
-        return _run_web(config, entry, args)
-    if getattr(args, "gui", False):
-        return _run_gui(config, entry, args)
-
-    _out.info(f"running {entry.name} in desktop preview mode")
-    _execute(config, entry)
-    _navigate(args, config)
-
-    from .core.bridge import get_bridge
-    from .core.ui.preview import render_ascii
-
-    # last_tree lives on the stub bridges; the abstract Bridge has no such
-    # attribute, so read it defensively.
-    tree = getattr(get_bridge(), "last_tree", None)
-    if tree is None:
-        raise PyMobileError(
-            "The app rendered nothing.",
-            hint="Make sure the entry point calls App(...).run(SomeScreen()).",
-        )
-    from .core.app import App
-
-    app = App.current()
-    print(render_ascii(tree, title=app.name if app is not None else config.name))
-    _out.hint("use --gui for a clickable window")
-    return 0
+    return cli_preview.cmd_run(args)
 
 
 def _run_gui(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> int:
-    """Run the app in an interactive Tkinter window."""
-    from .core.bridge import GuiBridge, set_bridge
-    from .core.ui.gui import GuiPreview, tkinter_available
+    """Compatibility entry point; implementation is in cli_preview."""
+    from . import cli_preview
 
-    if not tkinter_available():
-        raise PyMobileError(
-            "Tkinter is not available in this Python installation",
-            hint="Install it (Debian/Ubuntu: `sudo apt install python3-tk`), "
-            "or use `pymobile preview` for a text picture.",
-        )
-
-    from .core.app import App
-
-    bridge = GuiBridge(verbose=False)
-    set_bridge(bridge)
-    _execute(config, entry)
-    _navigate(args, config)
-    app = App.current()
-    if app is None:
-        raise PyMobileError(
-            "No running application was found in the entry point.",
-            hint="Make sure it calls App(...).run(SomeScreen()) before returning.",
-        )
-
-    _out.ok(f"{app.name} is running — close the window to stop")
-    try:
-        preview = GuiPreview(app, title=app.name)
-        bridge.attach(preview)
-        preview.run()
-    except Exception as error:  # pragma: no cover - display problems
-        raise PyMobileError(
-            f"Could not open the preview window: {error}",
-            hint="On a headless machine use `pymobile preview` instead.",
-        ) from error
-    return 0
+    return cli_preview._run_gui(config, entry, args)
 
 
 def _run_web(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> int:
-    """Serve the app to a browser."""
-    from .core.app import App
-    from .core.bridge import WebBridge, set_bridge
-    from .core.ui.web import WebPreview, browser_url
+    """Compatibility entry point; implementation is in cli_preview."""
+    from . import cli_preview
 
-    bridge = WebBridge(verbose=False)
-    set_bridge(bridge)
-    _execute(config, entry)
-    _navigate(args, config)
-    app = App.current()
-    if app is None:
-        raise PyMobileError(
-            "No running application was found in the entry point.",
-            hint="Make sure it calls App(...).run(SomeScreen()) before returning.",
-        )
-
-    preview = WebPreview(
-        app,
-        host=args.host,
-        port=args.port,
-        token=getattr(args, "token", None),
-        require_token=not getattr(args, "no_token", False),
-        allow_origins=tuple(getattr(args, "allow_origin", None) or ()),
-        frame_options="" if getattr(args, "embed", False) else "DENY",
-    )
-    bridge.attach(preview)
-    _out.ok(f"{app.name} is running at {browser_url(args.host, preview.port, preview.token)}")
-    if preview.exposed and preview.require_token:
-        # Network exposure is opt-in, and the warning says what it means: the
-        # port can read the app's state and press its widgets, so the session
-        # token (already part of the printed URL) is mandatory.
-        _out.warn(
-            f"listening on {args.host}: the preview is reachable from the network. "
-            "It requires the session token in the URL above; treat that URL as a "
-            "secret and use an SSH tunnel (--host 127.0.0.1) when you only need "
-            "it locally."
-        )
-    elif preview.exposed:
-        _out.warn(
-            f"listening on {args.host} WITHOUT a session token (--no-token): anyone "
-            "who can reach this port can read the screen and press its widgets. "
-            "Only do this behind a proxy, tunnel or container network that "
-            "authenticates callers."
-        )
-    if preview.allow_origins:
-        note = (
-            " (every origin — the gateway must authenticate)"
-            if "*" in preview.allow_origins
-            else ""
-        )
-        _out.hint(
-            "cross-origin requests are allowed from: "
-            + ", ".join(preview.allow_origins)
-            + note
-        )
-    _out.info("press Ctrl+C to stop")
-    with contextlib.suppress(KeyboardInterrupt):  # Ctrl+C is how you stop it
-        preview.serve_forever()
-    _out.ok("stopped")
-    return 0
+    return cli_preview._run_web(config, entry, args)
 
 
 def cmd_dev(args: argparse.Namespace) -> int:
-    """Interactive window + live reload — ``run --gui`` and ``watch`` in one.
+    """Compatibility entry point; implementation is in cli_preview."""
+    from . import cli_preview
 
-    The two commands existed but had to be remembered and combined by hand:
-    ``watch`` printed a picture on every save, ``run --gui`` opened a window
-    that never noticed an edit. ``dev`` keeps a Tk window open and re-executes
-    the app inside it whenever a source file changes, which is the loop a
-    desktop preview is for. Falls back to the text preview when Tk is missing.
-    """
-    from .core.bridge import GuiBridge, StubBridge, set_bridge
-    from .core.ui.gui import tkinter_available
-    from .core.watcher import FileWatcher
-
-    config = _load(args)
-    entry = _entrypoint(config)
-    roots = [config.source_path]
-
-    if not tkinter_available():
-        _out.warn("Tkinter is not available; showing the text preview instead")
-        _out.hint("install python3-tk (Linux) or use `pymobile watch`")
-        return cmd_watch(args)
-
-    _out.info(f"dev: {config.name} — edit a file to reload, Ctrl+C to stop")
-    window = None
-    try:
-        while True:
-            _purge_project_modules(config.source_path)
-            # A fresh bridge per reload, so a removed widget does not linger.
-            bridge = GuiBridge(verbose=False)
-            set_bridge(bridge)
-            try:
-                _execute(config, entry)
-                _navigate(args, config)
-            except Exception as error:
-                _out.error(f"{type(error).__name__}: {error}")
-                if isinstance(error, PyMobileError) and error.hint:
-                    _out.hint(error.hint)
-                if getattr(args, "verbose", False):
-                    import traceback
-
-                    traceback.print_exc()
-            window = _open_gui_window(bridge, config)
-            _out.ok("watching for changes")
-            watcher = FileWatcher(roots, interval=getattr(args, "interval", 0.5))
-            changed = watcher.wait()
-            names = ", ".join(path.name for path in changed[:3])
-            if len(changed) > 3:
-                names += f" (+{len(changed) - 3})"
-            _out.info(f"changed: {names} — reloading")
-            _close_gui_window(window)
-            window = None
-    except KeyboardInterrupt:  # pragma: no cover - interactive
-        print()
-        _out.ok("stopped")
-        return 0
-    finally:
-        if window is not None:
-            _close_gui_window(window)
-        set_bridge(StubBridge(verbose=False))
+    return cli_preview.cmd_dev(args)
 
 
 def _open_gui_window(bridge: Any, config: ProjectConfig) -> Any:
-    """Open the Tk preview for ``dev`` without blocking on ``mainloop()``.
+    """Compatibility entry point; implementation is in cli_preview."""
+    from . import cli_preview
 
-    Returns the preview, or ``None`` on a headless machine — ``dev`` then keeps
-    reloading and says so instead of dying on the first save.
-    """
-    from .core.app import App
-    from .core.ui.gui import GuiPreview
-
-    app = App.current()
-    if app is None:
-        return None
-    preview = GuiPreview(app, title=f"{app.name} — dev")
-    bridge.attach(preview)
-    preview.root.update_idletasks()
-    preview.root.update()
-    return preview
+    return cli_preview._open_gui_window(bridge, config)
 
 
 def _close_gui_window(preview: Any) -> None:
-    """Close a window opened by :func:`_open_gui_window` (missing display, too)."""
-    if preview is None:
-        return
-    # The window may already be gone (closed by the user, or never drawn).
-    with contextlib.suppress(Exception):  # pragma: no cover - defensive
-        preview.root.destroy()
+    """Compatibility entry point; implementation is in cli_preview."""
+    from . import cli_preview
+
+    return cli_preview._close_gui_window(preview)
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
-    """Re-render the app whenever a source file changes."""
-    from .core.watcher import FileWatcher
+    """Compatibility entry point; implementation is in cli_preview."""
+    from . import cli_preview
 
-    config = _load(args)
-    entry = _entrypoint(config)
-    roots = [config.source_path]
-
-    _out.info(f"watching {config.source_path} — press Ctrl+C to stop")
-    _reload(config, entry, args)
-
-    watcher = FileWatcher(roots, interval=args.interval)
-    try:
-        while True:
-            changed = watcher.wait()
-            names = ", ".join(path.name for path in changed[:3])
-            if len(changed) > 3:
-                names += f" (+{len(changed) - 3})"
-            print()
-            _out.info(f"changed: {names}")
-            _reload(config, entry, args)
-    except KeyboardInterrupt:  # pragma: no cover - interactive
-        print()
-        _out.ok("stopped watching")
-        return 0
+    return cli_preview.cmd_watch(args)
 
 
 def _reload(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> None:
-    """Run the entry point once and show the result.
+    """Compatibility entry point; implementation is in cli_preview."""
+    from . import cli_preview
 
-    Every reload starts from a clean module table for the project's own
-    modules, so editing an imported helper takes effect too — a plain re-exec
-    of main.py would keep the stale version cached in sys.modules.
-    """
-    from .core.bridge import StubBridge, set_bridge
-    from .core.ui.preview import render_ascii, render_mockup, render_png
-
-    started = time.perf_counter()
-    bridge = StubBridge(verbose=False)
-    set_bridge(bridge)
-    _purge_project_modules(config.source_path)
-
-    try:
-        _execute(config, entry)
-        _navigate(args, config)
-    except Exception as error:
-        _out.error(f"{type(error).__name__}: {error}")
-        if isinstance(error, PyMobileError) and error.hint:
-            _out.hint(error.hint)
-        if args.verbose:
-            import traceback
-
-            traceback.print_exc()
-        return
-
-    tree = bridge.last_tree
-    if tree is None:
-        _out.warn("the app rendered nothing")
-        return
-
-    elapsed = (time.perf_counter() - started) * 1000
-    from .core.app import App
-
-    app = App.current()
-    display_title = app.name if app is not None else config.name
-    if args.png and getattr(args, "text", False):
-        render_png(tree, args.png)
-        _out.ok(f"wrote {args.png} in {elapsed:.0f} ms")
-    elif args.png:
-        render_mockup(
-            tree,
-            args.png,
-            theme=app.theme if app is not None else None,
-            title=display_title,
-            assets=config.source_path,
-        )
-        elapsed = (time.perf_counter() - started) * 1000
-        _out.ok(f"wrote {args.png} in {elapsed:.0f} ms")
-    else:
-        print(render_ascii(tree, show_ids=args.ids, title=display_title))
-        _out.ok(f"rendered in {elapsed:.0f} ms")
+    return cli_preview._reload(config, entry, args)
 
 
 def _purge_project_modules(source: Path) -> None:
@@ -682,9 +430,7 @@ def _navigate(args: argparse.Namespace, config: ProjectConfig | None = None) -> 
             # project's screen modules once and retry before giving up.
             if config is None or "no screen called" not in str(error):
                 raise
-            found = discover_screens(
-                [config.source_path], exclude=[config.entrypoint_path]
-            )
+            found = discover_screens([config.source_path], exclude=[config.entrypoint_path])
             if not found:
                 raise
             _out.info(
@@ -767,133 +513,17 @@ def _parse_size(value: str | None) -> tuple[int, int | None]:
 
 
 def cmd_preview(args: argparse.Namespace) -> int:
-    """Render a screen of the app — the first, or the one --screen/--navigate reach."""
-    from .core.app import App
-    from .core.bridge import StubBridge, set_bridge
-    from .core.ui.preview import render_ascii, render_mockup, render_png
+    """Compatibility entry point; implementation is in cli_preview."""
+    from . import cli_preview
 
-    config = _load(args)
-    entry = _entrypoint(config)
-
-    bridge = StubBridge(verbose=False)
-    set_bridge(bridge)
-    _execute(config, entry)
-
-    # --theme must reach the *app* before the tree is read, not just the
-    # renderer: build() resolves colours through app.theme (the documented
-    # `self.app.theme["SURFACE"]`), so rendering a tree built in the light
-    # palette with the dark one paints dark text over light cards. set_theme()
-    # rebuilds the screens, hence last_tree is read afterwards — and after
-    # --navigate, whose screens must be built in that theme too.
-    requested_theme = getattr(args, "theme", None)
-    app = App.current()
-    if requested_theme and app is not None:
-        app.set_theme(requested_theme)
-    display_title = app.name if app is not None else config.name
-
-    _navigate(args, config)
-
-    tree = bridge.last_tree
-    if tree is None:
-        raise PyMobileError(
-            "The app rendered nothing.",
-            hint="Make sure the entry point calls App(...).run(SomeScreen()).",
-        )
-
-    if args.png and getattr(args, "text", False):
-        path = render_png(tree, args.png)
-        _out.ok(f"wrote the text preview to {path}")
-    elif args.png:
-        width, height = _parse_size(getattr(args, "size", None))
-        # П-05: surface size validation as an expected error instead of the
-        # generic "unexpected error: width must be at least 120 dp".
-        if width < 120:
-            raise PyMobileError(
-                "width must be at least 120 dp",
-                hint="Use --size 360x640 (or larger) for a phone-shaped mockup.",
-            )
-        # The app carries the requested theme by now; the flag is the fallback
-        # for an entry point that never created one.
-        theme = app.theme if app is not None else requested_theme
-        try:
-            path = render_mockup(
-                tree,
-                args.png,
-                width=width,
-                height=height,
-                theme=theme,
-                title=display_title,
-                assets=config.source_path,
-            )
-        except ValueError as exc:
-            raise PyMobileError(str(exc)) from exc
-        _out.ok(f"wrote a mockup of the screen to {path}")
-        _out.hint("an approximation: fonts and system colours differ between phones")
-    else:
-        print(render_ascii(tree, show_ids=args.ids, title=display_title))
-    return 0
+    return cli_preview.cmd_preview(args)
 
 
 def cmd_check_ui(args: argparse.Namespace) -> int:
-    """Run the static accessibility and narrow-screen audit on the app tree."""
-    from .core.app import App
-    from .core.bridge import StubBridge, active_bridge, set_bridge
-    from .core.ui.audit import audit_ui
+    """Compatibility entry point; implementation is in cli_preview."""
+    from . import cli_preview
 
-    config = _load(args)
-    entry = _entrypoint(config)
-    bridge = StubBridge(verbose=False)
-    previous_bridge = active_bridge()
-    set_bridge(bridge)
-    previous_app = App.current()
-    try:
-        _execute(config, entry)
-        _navigate(args, config)
-        tree = bridge.last_tree
-        if tree is None:
-            raise PyMobileError(
-                "The app rendered nothing.",
-                hint="Make sure the entry point calls App(...).run(SomeScreen()).",
-            )
-
-        app = App.current()
-        issues = audit_ui(tree, width=args.width, min_touch_target=args.min_touch_target)
-        if args.json:
-            print(
-                json.dumps(
-                    [
-                        {
-                            "severity": issue.severity,
-                            "code": issue.code,
-                            "widget_id": issue.widget_id,
-                            "message": issue.message,
-                            "hint": issue.hint,
-                        }
-                        for issue in issues
-                    ],
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-        else:
-            title = app.name if app is not None else config.name
-            _out.info(f"checking {title!r} at {args.width} dp wide")
-            if issues:
-                for issue in issues:
-                    _out.warn(f"{issue.widget_id} [{issue.code}] {issue.message}")
-                    _out.hint(issue.hint)
-                _out.info(f"{len(issues)} advisory warning(s)")
-            else:
-                _out.ok("no issues found by the static UI audit")
-            _out.hint(
-                "heuristic only: verify font scaling, screen-reader behavior and layout on a device"
-            )
-        return 1 if args.strict and issues else 0
-    finally:
-        app = App.current()
-        if app is not None and app is not previous_app:
-            app.stop()
-        set_bridge(previous_bridge)
+    return cli_preview.cmd_check_ui(args)
 
 
 def cmd_info(args: argparse.Namespace) -> int:
@@ -1007,8 +637,10 @@ def cmd_setup_sdk(args: argparse.Namespace) -> int:
     target_path = Path(args.path).expanduser() if args.path else default_sdk_home()
     with_ndk = getattr(args, "with_ndk", False)
     with_emulator = getattr(args, "with_emulator", False)
-    size = "~4 GB" if with_ndk and with_emulator else (
-        "~3.5 GB" if with_emulator else "~2.7 GB" if with_ndk else "~900 MB"
+    size = (
+        "~4 GB"
+        if with_ndk and with_emulator
+        else ("~3.5 GB" if with_emulator else "~2.7 GB" if with_ndk else "~900 MB")
     )
 
     # Check whether the SDK directory already exists and has cached content
@@ -1047,224 +679,45 @@ _DEFAULT_EMULATOR_IMAGE = "system-images;android-35;google_apis;x86_64"
 
 
 def _sdk_root_for_device(args: argparse.Namespace) -> Path:
-    """Find the SDK for adb/emulator commands without requiring build tools.
+    """Compatibility entry point; implementation is in cli_device."""
+    from . import cli_device
 
-    Delegates to the one resolver in :mod:`pymobile.compiler.toolchain`, so
-    ``PYMOBILE_SDK_HOME``, ``ANDROID_HOME`` and the managed install are read
-    the same way by every command (P1: they used to disagree).
-    """
-    from .compiler.sdk_installer import default_sdk_home
-    from .compiler.toolchain import _sdk_root
-
-    resolved = _sdk_root(getattr(args, "sdk", None))
-    return resolved if resolved is not None else default_sdk_home() / "sdk"
+    return cli_device._sdk_root_for_device(args)
 
 
 def _sdk_executable(root: Path, relative: str, name: str) -> Path:
-    """Return an SDK tool or fail with a command that installs it."""
-    suffixes = (".bat", ".cmd", ".exe", "") if platform.system() == "Windows" else ("",)
-    for suffix in suffixes:
-        candidate = root / relative / f"{name}{suffix}"
-        if candidate.is_file():
-            return candidate
-    on_path = shutil.which(name)
-    if on_path:
-        return Path(on_path)
-    raise PyMobileError(
-        f"Android SDK tool {name} was not found",
-        hint=(
-            "Run `pymobile setup-sdk` for adb, or `pymobile setup-sdk --with-emulator` "
-            "for the emulator and x86_64 system image."
-        ),
-    )
+    """Compatibility entry point; implementation is in cli_device."""
+    from . import cli_device
+
+    return cli_device._sdk_executable(root, relative, name)
 
 
 def _device_environment(root: Path) -> dict[str, str]:
-    """Set SDK/JDK variables for tools like avdmanager launched by subprocess."""
-    environment = {
-        **os.environ,
-        "ANDROID_HOME": str(root),
-        "ANDROID_SDK_ROOT": str(root),
-    }
-    if not environment.get("JAVA_HOME"):
-        from .compiler.sdk_installer import _first_jdk_home, default_sdk_home
+    """Compatibility entry point; implementation is in cli_device."""
+    from . import cli_device
 
-        for home in (root.parent, default_sdk_home()):
-            jdk = _first_jdk_home(home)
-            if jdk is not None:
-                environment["JAVA_HOME"] = str(jdk)
-                environment["PATH"] = (
-                    f"{jdk / 'bin'}{os.pathsep}{environment.get('PATH', '')}"
-                )
-                break
-    return environment
+    return cli_device._device_environment(root)
 
 
 def _create_avd(root: Path, name: str) -> None:
-    import subprocess
+    """Compatibility entry point; implementation is in cli_device."""
+    from . import cli_device
 
-    avdmanager = _sdk_executable(root, "cmdline-tools/latest/bin", "avdmanager")
-    command = [
-        str(avdmanager),
-        "create",
-        "avd",
-        "--name",
-        name,
-        "--package",
-        _DEFAULT_EMULATOR_IMAGE,
-        "--force",
-    ]
-    completed = subprocess.run(
-        command,
-        input="no\n",
-        capture_output=True,
-        text=True,
-        env=_device_environment(root),
-        check=False,
-    )
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        raise PyMobileError(
-            f"could not create Android virtual device {name!r}",
-            hint=(
-                detail[-800:]
-                or "Install the emulator image with `pymobile setup-sdk --with-emulator`."
-            ),
-        )
-    _out.ok(f"created Android virtual device {name}")
+    return cli_device._create_avd(root, name)
 
 
 def cmd_emulator(args: argparse.Namespace) -> int:
-    """Create, list, or start the optional local Android emulator."""
-    import subprocess
+    """Compatibility entry point; implementation is in cli_device."""
+    from . import cli_device
 
-    root = _sdk_root_for_device(args)
-    action = args.emulator_action
-    name = getattr(args, "name", _DEFAULT_AVD_NAME)
-    if action == "create":
-        _create_avd(root, name)
-        return 0
-
-    emulator = _sdk_executable(root, "emulator", "emulator")
-    if action == "list":
-        completed = subprocess.run(
-            [str(emulator), "-list-avds"],
-            capture_output=True,
-            text=True,
-            env=_device_environment(root),
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise PyMobileError(
-                "could not list Android virtual devices", hint=completed.stderr.strip()
-            )
-        print(completed.stdout, end="")
-        return 0
-
-    listed = subprocess.run(
-        [str(emulator), "-list-avds"],
-        capture_output=True,
-        text=True,
-        env=_device_environment(root),
-        check=False,
-    )
-    if listed.returncode != 0:
-        raise PyMobileError("could not query Android virtual devices", hint=listed.stderr.strip())
-    if name not in listed.stdout.splitlines():
-        _out.info(f"creating the default virtual device {name}")
-        _create_avd(root, name)
-    command = [str(emulator), "-avd", name, "-no-snapshot"]
-    if getattr(args, "no_window", False):
-        command.append("-no-window")
-    if getattr(args, "no_audio", False):
-        command.append("-no-audio")
-    _out.info(f"starting {name} — close the emulator window or press Ctrl+C to stop")
-    emulator_process = subprocess.run(command, env=_device_environment(root), check=False)
-    if emulator_process.returncode != 0:
-        raise PyMobileError(
-            f"emulator exited with code {emulator_process.returncode}",
-            hint=(
-                "Check host virtualization support; on Linux, enable KVM for hardware acceleration."
-            ),
-        )
-    return 0
+    return cli_device.cmd_emulator(args)
 
 
 def cmd_install(args: argparse.Namespace) -> int:
-    """Install a built APK on a connected phone or local emulator with adb."""
-    import subprocess
+    """Compatibility entry point; implementation is in cli_device."""
+    from . import cli_device
 
-    config = _load(args)
-    if getattr(args, "abi", None):
-        config.abis = [args.abi]
-        config.validate()
-    if args.apk:
-        apk = Path(args.apk).expanduser()
-        if not apk.is_absolute():
-            candidates = ((Path.cwd() / apk).resolve(), (config.root / apk).resolve())
-            apk = next(
-                (candidate for candidate in candidates if candidate.is_file()),
-                candidates[0],
-            )
-    else:
-        apk = config.output_path / config.apk_name
-    if not apk.is_file():
-        command = "pymobile build --native"
-        if getattr(args, "abi", None):
-            command += f" --abi {args.abi}"
-        raise PyMobileError(
-            f"APK not found: {apk}",
-            hint=f"Build it first with `{command}` or pass an APK path to `pymobile install`.",
-        )
-
-    root = _sdk_root_for_device(args)
-    adb = _sdk_executable(root, "platform-tools", "adb")
-    environment = _device_environment(root)
-    devices = subprocess.run(
-        [str(adb), "devices"], capture_output=True, text=True, env=environment, check=False
-    )
-    if devices.returncode != 0:
-        raise PyMobileError("adb could not list devices", hint=devices.stderr.strip())
-    connected = [
-        line.split()[0]
-        for line in devices.stdout.splitlines()[1:]
-        if len(line.split()) >= 2 and line.split()[1] == "device"
-    ]
-    device = getattr(args, "device", None)
-    if device is None:
-        if not connected:
-            raise PyMobileError(
-                "no Android phone or emulator is connected to adb",
-                hint=(
-                    "Start one with `pymobile emulator start` (after `pymobile setup-sdk "
-                    "--with-emulator`) or connect a phone with USB debugging enabled."
-                ),
-            )
-        if len(connected) > 1:
-            raise PyMobileError(
-                "more than one Android device is connected",
-                hint="Pass `--device SERIAL`; available devices: " + ", ".join(connected),
-            )
-        device = connected[0]
-    completed = subprocess.run(
-        [str(adb), "-s", device, "install", "-r", str(apk)],
-        capture_output=True,
-        text=True,
-        env=environment,
-        check=False,
-    )
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        raise PyMobileError(
-            f"adb could not install {apk.name} on {device}",
-            hint=(
-                detail[-800:]
-                or "Check that the APK ABI matches the device/emulator and storage is available."
-            ),
-        )
-    result = (completed.stdout or "").strip()
-    _out.ok(f"installed {apk.name} on {device}" + (f" — {result}" if result else ""))
-    return 0
+    return cli_device.cmd_install(args)
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -1351,429 +804,34 @@ def _clean(config: ProjectConfig) -> str:
 # parser
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
-    """Construct the argument parser.
+    """Build the CLI grammar with the current command handlers.
 
-    ``--verbose`` and ``--config`` are attached both globally and to every
-    sub-command, so ``pymobile -v build`` and ``pymobile build -v`` both work —
-    users should not have to remember where a flag belongs.
+    Resolve handlers here rather than freezing imports in cli_parser: embedders
+    and tests may replace commands without changing parser implementation.
     """
-    # SUPPRESS keeps unset flags out of the namespace, so a sub-command does
-    # not silently reset a value given before the sub-command name.
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="show detailed output",
-    )
-    common.add_argument(
-        "-c",
-        "--config",
-        metavar="PATH",
-        default=argparse.SUPPRESS,
-        help=f"path to {CONFIG_FILENAME} or a project directory",
-    )
+    from .cli_parser import build_parser as make_parser
 
-    # Which screen to show: shared by run, watch and preview.
-    where = argparse.ArgumentParser(add_help=False)
-    where.add_argument(
-        "--screen",
-        metavar="NAME",
-        help="show this screen (a Screen subclass of the project) instead of the first one",
+    return make_parser(
+        {
+            "build": cmd_build,
+            "check_ui": cmd_check_ui,
+            "clean": cmd_clean,
+            "dev": cmd_dev,
+            "doctor": cmd_doctor,
+            "emulator": cmd_emulator,
+            "info": cmd_info,
+            "init": cmd_init,
+            "install": cmd_install,
+            "preview": cmd_preview,
+            "run": cmd_run,
+            "setup_sdk": cmd_setup_sdk,
+            "watch": cmd_watch,
+            "widget_add": cmd_widget_add,
+            "widget_java": cmd_widget_java,
+        },
+        positive_int=_positive_int,
+        default_avd=_DEFAULT_AVD_NAME,
     )
-    where.add_argument(
-        "--args",
-        dest="screen_args",
-        metavar="JSON",
-        help=(
-            "with --screen: constructor arguments as JSON — an object is keywords "
-            '(\'{"score": 7}\'), a list is positional (\'[7, 10]\'). cmd.exe and Windows '
-            "PowerShell eat the quotes inside JSON: use --set there"
-        ),
-    )
-    where.add_argument(
-        "--set",
-        dest="screen_set",
-        metavar="NAME=VALUE",
-        action="append",
-        help=(
-            "with --screen: one constructor argument, e.g. --set score=7 --set player=Anna "
-            "(repeatable; the value is JSON if it parses — 7, true, [1, 2] — else plain text; "
-            "needs no quoting in any shell)"
-        ),
-    )
-    where.add_argument(
-        "--navigate",
-        metavar="STEPS",
-        help=(
-            'press your way to a screen: "Menu.start, Quiz.next" takes the step '
-            "[Screen.]widget in order; widget=value types a value, <back> goes back, "
-            "@Stats picks a bottom-navigation tab"
-        ),
-    )
-    where.add_argument(
-        "--tab",
-        metavar="NAME",
-        help=(
-            "pick this bottom-navigation tab after opening the screen, by label or "
-            "value (the short spelling of the route step '@NAME')"
-        ),
-    )
-
-    parser = argparse.ArgumentParser(
-        prog="pymobile",
-        description="Build Android applications with Python.",
-        epilog="Docs: https://github.com/Maksum867/PyMobile",
-        parents=[common],
-    )
-    parser.add_argument("--version", action="version", version=f"pymobile {__version__}")
-
-    sub = parser.add_subparsers(dest="command", metavar="<command>")
-
-    init = sub.add_parser("init", help="create a new project", parents=[common])
-    init.add_argument("directory", nargs="?", default=".", help="target directory")
-    init.add_argument("-n", "--name", help="application name")
-    init.add_argument("-p", "--package", help="package id, e.g. com.example.app")
-    init.add_argument("-f", "--force", action="store_true", help="write into a non-empty directory")
-    init.set_defaults(func=cmd_init)
-
-    build = sub.add_parser("build", help="compile the project into an APK", parents=[common])
-    build.add_argument("-o", "--output", help="output directory")
-    build.add_argument("-i", "--icon", help="path to a custom launcher icon")
-    build.add_argument(
-        "--native",
-        action="store_true",
-        help=(
-            "build a real, signed, installable APK "
-            "(needs the Android SDK; NDK only to rebuild JNI)"
-        ),
-    )
-    build.add_argument("--clean", action="store_true", help="rebuild from scratch")
-    build.add_argument("--no-cache", action="store_true", help="ignore the incremental cache")
-    build.add_argument("--optimize", action="store_true", help="ship bytecode instead of sources")
-    build.add_argument(
-        "--no-optimize",
-        action="store_true",
-        help="ship .py sources even if pymobile.toml has optimize = true",
-    )
-    build.add_argument("--keystore", metavar="PATH", help="release keystore for --native signing")
-    build.add_argument(
-        "--ks-pass",
-        metavar="PASS",
-        help="keystore password; prefer the PYMOBILE_KS_PASS environment variable",
-    )
-    build.add_argument("--key-alias", metavar="ALIAS", help="key alias inside the keystore")
-    build.add_argument(
-        "--key-pass",
-        metavar="PASS",
-        help="key password (defaults to the keystore password; or PYMOBILE_KEY_PASS)",
-    )
-    build.add_argument(
-        "--minimal-stdlib",
-        action="store_true",
-        help="drop desktop-only stdlib packages (pydoc, unittest, venv, ...): ~1.7 MB",
-    )
-    build.add_argument(
-        "--no-ssl",
-        action="store_true",
-        help="omit OpenSSL and the CA bundle: ~4 MB smaller, but no HTTPS",
-    )
-    build.add_argument(
-        "--abi",
-        choices=("arm64-v8a", "x86_64"),
-        help=(
-            "CPU architecture of the APK: arm64-v8a (phones, the default) or "
-            "x86_64 (the Android Studio emulator); overrides `abis` in pymobile.toml"
-        ),
-    )
-    build.set_defaults(func=cmd_build)
-
-    run = sub.add_parser(
-        "run", help="preview the app on this machine", parents=[common, where]
-    )
-    run.add_argument(
-        "--gui",
-        action="store_true",
-        help="open a clickable window instead of printing to the console",
-    )
-    run.add_argument(
-        "--web",
-        action="store_true",
-        help="serve a clickable preview in the browser (works over SSH)",
-    )
-    run.add_argument("--port", type=int, default=8765, help="port for --web (default: 8765)")
-    run.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help=(
-            "interface for --web (default: 127.0.0.1, this machine only). Any "
-            "other value exposes the preview to the network and requires its "
-            "session token"
-        ),
-    )
-    run.add_argument(
-        "--token",
-        metavar="VALUE",
-        help=(
-            "with --web: use this session token instead of a generated one — the "
-            "value a proxy or an embedding page already knows"
-        ),
-    )
-    run.add_argument(
-        "--no-token",
-        action="store_true",
-        help=(
-            "with --web: serve without a session token. Anyone who can reach the "
-            "port can drive the app — only behind a proxy that authenticates callers"
-        ),
-    )
-    run.add_argument(
-        "--allow-origin",
-        metavar="ORIGIN",
-        action="append",
-        default=[],
-        help=(
-            "with --web: accept requests whose Origin is this URL (repeatable; "
-            "'*' accepts every origin). Needed when a portal embeds the preview "
-            "or a proxy rewrites the origin"
-        ),
-    )
-    run.add_argument(
-        "--embed",
-        action="store_true",
-        help=(
-            "with --web: omit X-Frame-Options so the page can live in an iframe "
-            "(combine with --allow-origin for a portal on another host)"
-        ),
-    )
-    run.set_defaults(func=cmd_run)
-
-    dev = sub.add_parser(
-        "dev",
-        help="interactive window with live reload (run --gui + watch in one)",
-        parents=[common],
-    )
-    dev.add_argument(
-        "--interval",
-        type=float,
-        default=0.5,
-        help="seconds between source scans (default: 0.5)",
-    )
-    dev.add_argument("--screen", metavar="NAME", help="show this screen instead of the first")
-    dev.add_argument("--args", metavar="JSON", help="with --screen: constructor arguments as JSON")
-    dev.add_argument("--set", metavar="NAME=VALUE", action="append", default=[])
-    dev.add_argument("--ids", action="store_true", help="annotate widgets with their id")
-    dev.set_defaults(func=cmd_dev)
-
-    watch = sub.add_parser(
-        "watch",
-        help="re-render automatically when a source file changes",
-        parents=[common, where],
-    )
-    watch.add_argument(
-        "--png", metavar="PATH", help="write a mockup of the screen as a PNG on every reload"
-    )
-    watch.add_argument(
-        "--text", action="store_true", help="with --png: write the text picture instead"
-    )
-    watch.add_argument("--ids", action="store_true", help="annotate widgets with their id")
-    watch.add_argument(
-        "--interval",
-        type=float,
-        default=0.2,
-        metavar="SECONDS",
-        help="how often to poll for changes (default: 0.2)",
-    )
-    watch.set_defaults(func=cmd_watch)
-
-    preview = sub.add_parser(
-        "preview",
-        help="draw a screen (the first, or --screen / --navigate) as a desktop picture",
-        parents=[common, where],
-    )
-    preview.add_argument(
-        "--png",
-        metavar="PATH",
-        help="save a mockup of the screen as the phone draws it (needs Pillow)",
-    )
-    preview.add_argument(
-        "--text",
-        action="store_true",
-        help="with --png: save the text picture instead of the mockup (the pre-0.8 output)",
-    )
-    preview.add_argument(
-        "--theme",
-        choices=("light", "dark"),
-        help="with --png: build the tree and draw it in this theme instead of the app's",
-    )
-    preview.add_argument(
-        "--size",
-        metavar="WxH",
-        help=(
-            "with --png: screen size in dp, e.g. 360x640 "
-            "(default: 360 wide, as tall as the content)"
-        ),
-    )
-    preview.add_argument("--ids", action="store_true", help="annotate widgets with their id")
-    preview.set_defaults(func=cmd_preview)
-
-    check_ui = sub.add_parser(
-        "check-ui",
-        help="warn about accessibility gaps and likely narrow-screen overflow",
-        parents=[common, where],
-    )
-    check_ui.add_argument(
-        "--width",
-        type=_positive_int,
-        default=320,
-        metavar="DP",
-        help="narrow screen width to check (default: 320 dp)",
-    )
-    check_ui.add_argument(
-        "--min-touch-target",
-        type=_positive_int,
-        default=48,
-        metavar="DP",
-        help="minimum explicit control width/height to accept (default: 48 dp)",
-    )
-    check_ui.add_argument(
-        "--strict",
-        action="store_true",
-        help="return exit code 1 when advisory warnings are found",
-    )
-    check_ui.add_argument("--json", action="store_true", help="print machine-readable warnings")
-    check_ui.set_defaults(func=cmd_check_ui)
-
-    info = sub.add_parser("info", help="show the resolved configuration", parents=[common])
-    info.add_argument("--json", action="store_true", help="machine-readable output")
-    info.set_defaults(func=cmd_info)
-
-    clean = sub.add_parser("clean", help="remove build artifacts", parents=[common])
-    clean.set_defaults(func=cmd_clean)
-
-    widget_group = sub.add_parser("widget", help="create project-local custom widgets")
-    widget_actions = widget_group.add_subparsers(dest="widget_action", required=True)
-    widget_add = widget_actions.add_parser(
-        "add",
-        help="generate a Python widget and project-local Android renderer",
-        parents=[common],
-    )
-    widget_add.add_argument("type_name", metavar="TYPE", help="custom type name, e.g. BarChart")
-    widget_add.add_argument(
-        "-p",
-        "--prop",
-        action="append",
-        default=[],
-        metavar="NAME[:TYPE]",
-        help="widget prop; TYPE is str (default), int, float, bool or list; repeat as needed",
-    )
-    widget_add.set_defaults(func=cmd_widget_add)
-
-    widget = sub.add_parser(
-        "widget-java",
-        help="print the ViewBuilder.java branch for a custom widget type",
-        parents=[common],
-    )
-    widget.add_argument("type_name", metavar="TYPE", help="the widget's type_name, e.g. BarChart")
-    widget.add_argument(
-        "-p",
-        "--prop",
-        action="append",
-        default=[],
-        metavar="NAME[:TYPE]",
-        help=(
-            "a prop the Python widget sends; TYPE is str (default), int, float, bool or "
-            "list. Repeat for several: -p title -p value:int"
-        ),
-    )
-    widget.add_argument("-o", "--out", metavar="FILE", help="write the guide to FILE, not stdout")
-    widget.set_defaults(func=cmd_widget_java)
-
-    setup = sub.add_parser(
-        "setup-sdk", help="download the Android SDK/NDK for native builds", parents=[common]
-    )
-    setup.add_argument("--path", help="install directory (default: ~/.andro)")
-    setup.add_argument(
-        "--with-ndk",
-        action="store_true",
-        help="also download the NDK (~2 GB), only needed to rebuild the native bridge",
-    )
-    setup.add_argument(
-        "--with-emulator",
-        action="store_true",
-        help="also download the x86_64 emulator and API 35 image (several extra GB; no NDK)",
-    )
-    setup.set_defaults(func=cmd_setup_sdk)
-
-    install = sub.add_parser(
-        "install",
-        help="install a built APK on a connected Android device/emulator",
-        parents=[common],
-    )
-    install.add_argument(
-        "apk",
-        nargs="?",
-        help="APK path (default: this project's configured build output)",
-    )
-    install.add_argument(
-        "--abi",
-        choices=("arm64-v8a", "x86_64"),
-        help="choose the matching configured APK",
-    )
-    install.add_argument(
-        "--device",
-        metavar="SERIAL",
-        help="adb device serial (auto-picks if exactly one is connected)",
-    )
-    install.add_argument(
-        "--sdk",
-        metavar="PATH",
-        help="Android SDK root (otherwise ANDROID_HOME / ~/.andro/sdk)",
-    )
-    install.set_defaults(func=cmd_install)
-
-    emulator = sub.add_parser(
-        "emulator",
-        help="manage a local Android emulator (optional multi-GB download)",
-    )
-    emulator_actions = emulator.add_subparsers(dest="emulator_action", required=True)
-    emulator_create = emulator_actions.add_parser(
-        "create", help="create the default x86_64 virtual device"
-    )
-    emulator_create.add_argument(
-        "--name",
-        default=_DEFAULT_AVD_NAME,
-        help=f"AVD name (default: {_DEFAULT_AVD_NAME})",
-    )
-    emulator_create.add_argument("--sdk", metavar="PATH", help="Android SDK root")
-    emulator_create.set_defaults(func=cmd_emulator)
-    emulator_list = emulator_actions.add_parser(
-        "list", help="list existing Android virtual devices"
-    )
-    emulator_list.add_argument("--sdk", metavar="PATH", help="Android SDK root")
-    emulator_list.set_defaults(func=cmd_emulator)
-    emulator_start = emulator_actions.add_parser(
-        "start", help="start a virtual device; creates it if missing"
-    )
-    emulator_start.add_argument(
-        "--name",
-        default=_DEFAULT_AVD_NAME,
-        help=f"AVD name (default: {_DEFAULT_AVD_NAME})",
-    )
-    emulator_start.add_argument("--sdk", metavar="PATH", help="Android SDK root")
-    emulator_start.add_argument(
-        "--no-window",
-        action="store_true",
-        help="run headless (useful on CI with acceleration)",
-    )
-    emulator_start.add_argument("--no-audio", action="store_true", help="disable audio output")
-    emulator_start.set_defaults(func=cmd_emulator)
-
-    doctor = sub.add_parser("doctor", help="check the environment", parents=[common])
-    doctor.set_defaults(func=cmd_doctor)
-
-    return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:

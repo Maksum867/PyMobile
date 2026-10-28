@@ -48,6 +48,8 @@ from pymobile.core.ui.preview import render_ascii
 from pymobile.core.ui.registry import supported_by, unknown_types
 from pymobile.core.ui.web import render_html
 
+from .java_sources import renderer_source
+
 ROOT = Path(pymobile.__file__).parent
 
 
@@ -109,7 +111,7 @@ class TestRegistryAndRenderers:
             assert name in supported_by("android")
 
     def test_java_cases_and_prebuilt_dex_include_the_new_types(self) -> None:
-        java = (ROOT / "resources/android/java/ViewBuilder.java").read_text(encoding="utf-8")
+        java = renderer_source()
         dex = (ROOT / "resources/android/prebuilt/arm64-v8a/classes.dex").read_bytes()
         for name in ("Icon", "IconButton", "AutoComplete", "RangeSlider", "PageView", "Chart"):
             assert f'case "{name}":' in java

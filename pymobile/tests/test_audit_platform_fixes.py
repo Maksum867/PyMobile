@@ -182,7 +182,8 @@ class TestCacheIdentity:
     def test_a_cached_native_build_is_reported_as_native(self, tmp_path: Path) -> None:
         """The cached result used to take ``native=False`` from the dataclass."""
         config = _project(tmp_path)
-        build = BuildPipeline(config, native=True, use_cache=True)
+        # This synthetic entrypoint tests cache metadata, not application startup.
+        build = BuildPipeline(config, native=True, use_cache=True, check_startup=False)
         sources = build._collect()
         artifact = config.output_path / config.apk_name
         artifact.parent.mkdir(parents=True, exist_ok=True)

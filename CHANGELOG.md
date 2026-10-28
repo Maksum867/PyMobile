@@ -3,6 +3,92 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.10.1] — 2026-10-25
+
+### Added
+
+- **Startup validation for APK builds.** `build --native` runs trusted app
+  startup on a desktop `StubBridge` in a child process, with temporary default
+  framework storage and a 10-second timeout. A missing active screen, startup
+  exception, premature process exit or timeout fails the build before packaging
+  or cache reuse. `build --check-startup` enables the same check for structural
+  builds; `build_apk(config, native=True)` and
+  `BuildPipeline(config, native=True).run()` use the native default too.
+- **Explicit startup-check bypass.** `--skip-startup-check` (Python API:
+  `check_startup=False`) is available for independently tested Android-only
+  startup. It prints an unverified-launch warning; the remaining AST scan is
+  advisory, not proof that a screen will open. The check and skip flags are
+  mutually exclusive. Executing startup is not a security sandbox or an Android
+  device-compatibility test.
+- **Theme selection for UI audits.** `check-ui --theme light|dark` rebuilds the
+  app in the requested theme before auditing it. Without an override the
+  current app theme, including a custom theme, supplies the default background.
+- **`PermissionDeniedError`.** A clearer public name for permission denial;
+  `PermissionError_` remains an alias of the same class, so existing imports and
+  `except PermissionError_` clauses continue to work.
+- **Bundled dex provenance.** `python -m pymobile.compiler.rebuild_dex` rebuilds
+  the launcher using the SDK/JDK, without an NDK. `--check` verifies the recorded
+  source and dex SHA-256 hashes without requiring the SDK. The accompanying
+  `classes.sources.json` is included in distributions.
+
+### Changed
+
+- **Returning to a screen refreshes its structure.** `pop()` invalidates the
+  revealed screen's cached tree before `on_show()`. The tree is rebuilt on root
+  access or rendering, so save-and-back no longer requires
+  `notify_data_changed()` merely to update the underlying list. A hook that
+  calls `refresh()` does not cause an extra eager rebuild. Keep persistent state
+  in the screen/model or explicitly owned widgets, not solely in temporary
+  widgets created by `build()`.
+- **Focused CLI and renderer modules.** CLI grammar, preview/watch/audit and
+  device commands are separated behind compatible entry points. Mockup rendering
+  separates colours, fonts, painting, measurement, widgets and window chrome.
+  `ViewBuilder` delegates to dedicated container, control, input, list, gesture,
+  style, overlay and update collaborators; wrapping layout lives in `FlowViews`.
+  Size guards prevent the split files from growing back into the original
+  monoliths.
+- Newly split desktop-only CLI and mockup modules are excluded from Android
+  Python assets. Native builds print a visible `--minimal-stdlib` size advisory
+  when the full standard library is included; the compatible full-stdlib
+  default is unchanged.
+
+### Fixed
+
+- **Windows dex provenance and startup timeouts.** Java source hashes normalise
+  CRLF to LF for both checking and rebuilding; the dex hash stays byte-exact.
+  Startup timeout cleanup terminates the Windows process tree (including venv
+  redirector children) and reaps the child before removing temporary output.
+- **Headless `dev`.** Fall back to text `watch` when Tk imports but cannot open
+  a display, not only when Tk is missing. The fallback explains the display
+  failure, stops the first GUI app, supplies valid watch defaults and remains
+  usable until Ctrl+C. `dev --args` and `--set` use the shared navigation grammar.
+- **Renderer IDs in the test driver.** Driver operations accept current
+  generation-qualified IDs printed by `tree()` and `preview --ids`, while
+  continuing to accept raw IDs. Stale IDs raise `WidgetNotFoundError` instead of
+  acting on a similarly named widget on another screen.
+- **Contrast on the default surface.** The audit starts with the app theme's
+  background and inherits the nearest explicit widget/container background, so
+  an explicit low-contrast text colour is no longer silently skipped merely
+  because no ancestor declared a background. The audit remains heuristic.
+- **Prebuilt renderer freshness.** Rebuilt the bundled `classes.dex` from the
+  split Java sources, including `Container` support; removed the old missing-
+  `Container` exemption from dex tests. Both source-built and prebuilt native
+  packaging paths are covered by SDK-enabled regressions.
+- Updated the repository name, lifecycle guidance, CLI reference and contributor
+  instructions to match the implementation.
+
+### Compatibility and verification notes
+
+- These changes are not yet a published release; the package version remains
+  `0.10.0` until a release is prepared.
+- Native builds now execute trusted startup code even on a cache hit. Explicit
+  file writes and network calls can still occur despite temporary default
+  storage; review startup side effects before building.
+- A successful desktop startup check, Java compilation and verified APK signature
+  do not prove correct UI behaviour on Android. Device/emulator runtime testing
+  and upstream publication remain separate release gates; neither is claimed
+  by this changelog.
+
 ## [0.10.0] — 2026-10-25
 
 ### Added

@@ -12,6 +12,8 @@ from pymobile.core.dispatcher import UiDispatcher
 from pymobile.core.ui.registry import WIDGET_CAPABILITIES, supported_by, widget_types
 from pymobile.core.ui.widget import Widget
 
+from .java_sources import renderer_source
+
 ROOT = Path(__file__).parents[1]
 
 
@@ -89,7 +91,7 @@ def test_registry_has_unique_widget_types() -> None:
 
 
 def test_registry_matches_explicit_renderer_implementations() -> None:
-    android = (ROOT / "resources/android/java/ViewBuilder.java").read_text(encoding="utf-8")
+    android = renderer_source()
     web = (ROOT / "core/ui/web.py").read_text(encoding="utf-8")
     gui = (ROOT / "core/ui/gui.py").read_text(encoding="utf-8")
     for capability in WIDGET_CAPABILITIES:

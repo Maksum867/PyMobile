@@ -108,6 +108,7 @@ def find_bytecode_interpreter() -> str | None:
             return resolved
     return None
 
+
 #: Asset extensions packaged without any configuration. Kept in sync with
 #: ``collector.collect_sources``; ``asset_suffixes`` in pymobile.toml adds to it.
 DEFAULT_ASSET_SUFFIXES = frozenset(
@@ -245,6 +246,7 @@ class BuildPipeline:
         *,
         use_cache: bool = True,
         native: bool = False,
+        check_startup: bool | None = None,
         on_stage: Callable[[str], None] | None = None,
         keystore: Path | None = None,
         keystore_password: str | None = None,
@@ -254,6 +256,7 @@ class BuildPipeline:
         self.config = config
         self.use_cache = use_cache
         self.native = native
+        self.check_startup = native if check_startup is None else check_startup
         self.on_stage = on_stage
         self.keystore = keystore
         self.keystore_password = keystore_password
@@ -296,6 +299,19 @@ class BuildPipeline:
                 f"(Android 7.0) instead. Set min_sdk = {self.config.effective_min_sdk} in "
                 "pymobile.toml to silence this warning."
             )
+        if self.native:
+            from .validation import entrypoint_warnings
+
+            if not self.check_startup:
+                self.warnings.append(
+                    "Startup validation was explicitly skipped: APK launch is unverified."
+                )
+                self.warnings.extend(entrypoint_warnings(self.config.entrypoint_path))
+            if not self.config.minimal_stdlib:
+                self.warnings.append(
+                    "Full Python stdlib is included. Use --minimal-stdlib to reduce APK size; "
+                    "test the reduced build against your app's imports before distributing."
+                )
         permissions = {str(p) for p in self.config.permissions}
         if "android.permission.INTERNET" not in permissions and self._uses_http():
             self.warnings.append(
@@ -352,7 +368,7 @@ class BuildPipeline:
             return
         self.warnings.append(
             "targetSdk >= 33 without POST_NOTIFICATIONS: notifications stay hidden. "
-            f"{where} posts a notification; add \"android.permission.POST_NOTIFICATIONS\" to "
+            f'{where} posts a notification; add "android.permission.POST_NOTIFICATIONS" to '
             "permissions in pymobile.toml (and ask for it with "
             "app.permissions.require(Permission.POST_NOTIFICATIONS))."
         )
@@ -497,9 +513,8 @@ class BuildPipeline:
             self.config.source_path,
             self.config.entrypoint_path,
             exclude=self.config.exclude,
-            include_suffixes=DEFAULT_ASSET_SUFFIXES | {
-                str(suffix).lower() for suffix in self.config.asset_suffixes
-            },
+            include_suffixes=DEFAULT_ASSET_SUFFIXES
+            | {str(suffix).lower() for suffix in self.config.asset_suffixes},
         )
         self._warn_about_ignored_assets(sources)
         return sources
@@ -543,10 +558,7 @@ class BuildPipeline:
             if suffix and suffix not in allowed_suffixes:
                 ignored[suffix] = ignored.get(suffix, 0) + 1
             # П-03: warn when a secret-like file IS packaged (not excluded).
-            if (
-                path.name in SECRET_LIKE_BASENAMES
-                or suffix in SECRET_LIKE_SUFFIXES
-            ):
+            if path.name in SECRET_LIKE_BASENAMES or suffix in SECRET_LIKE_SUFFIXES:
                 secret_packaged.append(relative.as_posix())
         if ignored:
             listed = ", ".join(f"{suffix} ({count})" for suffix, count in sorted(ignored.items()))
@@ -753,6 +765,10 @@ class BuildPipeline:
         self._check_requested_permissions(sources)
         self._check_widget_types(sources)
         self._check_notifications(sources)
+        if self.check_startup:
+            from .startup import check_startup
+
+            self._stage("startup", lambda: check_startup(self.config))
 
         output_dir = self.config.output_path
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -966,9 +982,7 @@ class BuildPipeline:
             mode += "+jni"
         project_java = self.config.root / "java"
         has_project_java = project_java.is_dir() and any(project_java.rglob("*.java"))
-        if self.native and (
-            has_project_java or os.environ.get("PYMOBILE_BUILD_JAVA") != "0"
-        ):
+        if self.native and (has_project_java or os.environ.get("PYMOBILE_BUILD_JAVA") != "0"):
             mode += "+java"
         elif self.native:
             mode += "+prebuilt-java"
@@ -1063,14 +1077,18 @@ def _warn_about_stale_output_dir(config: ProjectConfig) -> None:
         return
     _log.warning(
         "the default output directory is %r now; an older build is still in %s — "
-        "delete it or set output_dir = \"build\" to keep using it",
+        'delete it or set output_dir = "build" to keep using it',
         current.name,
         legacy,
     )
 
 
 def build_apk(
-    config: ProjectConfig, *, use_cache: bool = True, native: bool = False
+    config: ProjectConfig,
+    *,
+    use_cache: bool = True,
+    native: bool = False,
+    check_startup: bool | None = None,
 ) -> BuildResult:
     """Build an APK from a project configuration.
 
@@ -1078,4 +1096,6 @@ def build_apk(
     signed, installable APK; otherwise a fast structural package is produced.
     """
     _warn_about_stale_output_dir(config)
-    return BuildPipeline(config, use_cache=use_cache, native=native).run()
+    return BuildPipeline(
+        config, use_cache=use_cache, native=native, check_startup=check_startup
+    ).run()

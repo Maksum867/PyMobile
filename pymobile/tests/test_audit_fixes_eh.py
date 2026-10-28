@@ -46,6 +46,8 @@ from pymobile.core.net.http import HttpSecurityPolicy
 from pymobile.core.validation import integer, number, required
 from pymobile.errors import NetworkError
 
+from .java_sources import renderer_source
+
 PACKAGE = Path(__file__).resolve().parents[1]
 ANDROID_DIR = PACKAGE / "resources" / "android"
 JAVA_DIR = ANDROID_DIR / "java"
@@ -340,7 +342,7 @@ class TestWidgets:
 class TestNativeSources:
     """The renderer and JNI bridge fixes, checked in the sources and binaries."""
 
-    view_builder = (JAVA_DIR / "ViewBuilder.java").read_text(encoding="utf-8")
+    view_builder = renderer_source()
     jni = (ANDROID_DIR / "jni" / "pymobile_jni.c").read_text(encoding="utf-8")
 
     def test_list_pages_in_place(self) -> None:

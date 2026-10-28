@@ -656,6 +656,9 @@ class Navigator:
             _log.exception("on_unmount of %s raised; the screen was still released", screen.title)
         current = self.current
         if current is not None:
+            # Data may have changed while a form covered this screen. Invalidate
+            # the cached tree before on_show, then let _notify render it once.
+            current._detach_tree()
             current._is_current = True
             current.on_show()
         _log.debug("pop %s (depth=%d)", screen.title, self.depth)

@@ -30,7 +30,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.10.0`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.10.1`) and read the
 > changelog before upgrading. What may change, and how much notice you get, is
 > written down in the
 > [versioning and deprecation policy](#versioning-and-deprecation-policy). Bug
@@ -69,7 +69,7 @@ App("Demo").run(Home())
 ```bash
 pip install pymobile-framework
 pymobile setup-sdk           # once per machine
-pymobile build --native      # → build/demo-0.1.0.apk
+pymobile build --native      # → apk/demo-0.1.0.apk
 ```
 
 That APK is signed, installable and runs a real CPython interpreter on the
@@ -159,7 +159,7 @@ pip install pymobile-framework
 
 > The distribution is named **`pymobile-framework`** because `pymobile` on PyPI belongs
 > to an unrelated 2014 project. The import name and the CLI command are still
-> `pymobile`. The GitHub repository is `py-mobile`.
+> `pymobile`. The GitHub repository is `Maksum867/PyMobile`.
 
 Then install the Android toolchain, once per machine:
 
@@ -905,21 +905,28 @@ rendered screen with:
 ```bash
 python -m pymobile check-ui --width 320
 python -m pymobile check-ui --screen Settings --width 320 --strict
+python -m pymobile check-ui --theme dark --strict
+python -m pymobile check-ui --theme light --json
 ```
 
 The command warns about unnamed interactive controls and images, explicitly
 undersized control widths/heights (the default target is 48 dp), fixed widths wider
 than their parent, and `Row` contents that appear too wide for the chosen
-screen. It also checks **colour contrast** against WCAG AA instead of leaving it
-to the eye: every text widget is measured against the background it is actually
-drawn on (a `Style(color=...)` on a `Card` inherits the card's background, not
-the screen's), and anything below 4.5:1 — 3:1 for large text, ≥18 dp or bold
-≥14 dp — is reported with the ratio and the two colours:
+screen. It also checks **explicit text colours** against WCAG AA: the nearest
+explicit widget/container background is inherited, falling back to
+`app.theme.color("BACKGROUND")` when no background is declared. This includes
+custom app themes. `--theme light|dark` switches the app theme and rebuilds the
+screen before auditing it. An unspecified foreground colour is not guessed.
+
+Ratios below 4.5:1 — 3:1 for text the heuristic treats as large (≥18 dp, or bold
+≥14 dp) — are reported with the ratio and the two colours:
 
 ```text
 contrast: text #2A2233 on #191322 is 1.19:1, below WCAG AA 4.5:1
-``` `--json` prints machine-readable results; `--strict` returns exit code
-1 when any warning is found. This is a lightweight static audit, not a full
+```
+
+`--json` prints machine-readable results; `--strict` returns exit code 1 when
+any warning is found. This is a lightweight static audit, not a full
 Android layout or TalkBack simulator: unspecified native control sizes, font
 scaling, localization and device-specific behavior still need a real-device
 check.
@@ -1041,10 +1048,19 @@ Android screen swaps fade by default. Choose `transition="fade"`, `"slide"`,
 reverses a slide. `Widget(animate_visibility=True)` opts a widget into a fade/
 scale when its `visible` state changes; `ExpansionPanel` uses this by default.
 
-`build()` is now called **before** `on_mount()`/`on_show()`, so you can safely
-access widgets created in `build()` from lifecycle hooks. `push(None)` and
-`build()` returning `None` now raise clear `TypeError`/`PyMobileError` instead
-of raw `AttributeError`.
+On the first push, `build()` runs **before** `on_mount()`/`on_show()`. When
+`pop()` reveals an existing screen, its cached tree is invalidated before
+`on_show()`; accessing `self.root` or `self.get(...)` in the hook builds the
+fresh tree, otherwise rendering builds it afterwards. Use those lookups, rather
+than references to retired widgets, when a hook needs the rebuilt contents.
+`push(None)` and `build()` returning `None` raise clear
+`TypeError`/`PyMobileError` instead of raw `AttributeError`.
+
+Returning from a form therefore reflects model/storage changes without an
+extra notification. Keep persistent state in screen/model attributes or widgets
+created once in `__init__()` and reused by `build()`. A newly constructed input
+inside each `build()` does not automatically retain its old draft text. See
+[Data changed on another screen](#data-changed-on-another-screen).
 
 The root screen is never popped — `pop()` returns `None` instead of leaving a
 blank window. The hardware back button is wired up automatically.
@@ -1250,7 +1266,7 @@ with app.batch():
 | *(nothing)* | a property changed — handled for you |
 | `self.refresh()` | the tree itself changed (rows added or removed) |
 | `self.rebuild()` | rebuild a tree that no frame owns (a tab, a panel) |
-| `app.notify_data_changed()` | another screen's data changed — rebuild the screens below |
+| `app.notify_data_changed()` | explicitly invalidate covered screens and emit `data:changed`; optional for a simple save-and-pop |
 | `app.render()` | you want a frame pushed out right now |
 
 `self.refresh()` repaints a screen the navigator owns; a screen embedded in
@@ -1260,23 +1276,24 @@ call `self.rebuild()` to re-run its `build()` without asking for a frame.
 
 ### Data changed on another screen
 
-A covered screen keeps the tree it built when it was opened, so a form that
-saves and pops back used to reveal a list that still said "2 items". Say that
-the data changed, and every screen *below* the visible one is rebuilt on the
-way back:
+`pop()` automatically invalidates the screen it reveals. For the usual
+list → form → save → back flow, save the data and pop; the list's next
+`build()` reads the updated model/storage:
 
 ```python
 class NewCard(Screen):
     def save(self) -> None:
         self.store.put(self.card)
-        self.app.notify_data_changed()   # the list below re-runs build()
-        self.app.pop()
+        self.app.pop()                  # the list below rebuilds automatically
 ```
 
-`self.notify_data_changed()` is the same call from inside a screen. The visible
-screen keeps its tree by default — pass `rebuild_current=True` when it is the
-one that changed. The event is public, so `app.on("data:changed", handler)`
-observes the same moment.
+`app.notify_data_changed()` is still useful when other code subscribes to the
+public `data:changed` event or you want to invalidate covered screens without
+immediately navigating back. `self.notify_data_changed()` is the same call
+from inside a screen. The visible screen keeps its tree by default; pass
+`rebuild_current=True` when it is the one that must rebuild. Calling this before
+`pop()` remains supported, but is not required just to refresh the revealed
+screen.
 
 ```python
 def on_data_loaded(self) -> None:
@@ -1930,8 +1947,12 @@ from pymobile import Permission
 app.permissions.has(Permission.CAMERA)              # bool
 app.permissions.request(Permission.CAMERA)          # {'android.permission.CAMERA': True}
 app.permissions.missing([Permission.CAMERA, "VIBRATE"])
-app.require_permissions(Permission.CAMERA)          # raises PermissionError_ if denied
+app.require_permissions(Permission.CAMERA)          # raises PermissionDeniedError if denied
 ```
+
+Catch denials with `from pymobile import PermissionDeniedError`.
+`PermissionError_` remains a compatible alias of the same exception class;
+existing imports and exception handlers do not need to change immediately.
 
 Three spellings are accepted: `"CAMERA"`, `"android.permission.CAMERA"` and
 `Permission.CAMERA`.
@@ -2366,6 +2387,36 @@ print(config.name, config.package, config.effective_min_sdk)
 
 ## Building an APK
 
+### Startup validation
+
+Native builds execute **trusted app startup code** on the desktop stub in a
+child process by default, before packaging or reusing a cached APK. A missing
+screen, startup exception, or 10-second timeout fails the build. Structural
+builds can opt in with `--check-startup`.
+
+The framework's default storage is temporary, but this is **not a security
+sandbox**: explicit file writes and network calls still happen. For Android-only
+startup, prefer a desktop guard. After independent device testing you can
+explicitly bypass the check with `--skip-startup-check`; the build prints an
+unverified-launch warning and performs only the advisory AST scan. Passing and
+bypassing the desktop check are not substitutes for Android-device testing.
+
+| Build mode / flag | Startup behaviour |
+| --- | --- |
+| `build --native` | validate startup by default, including before a cache hit |
+| `build` | structural packaging only; do not execute startup by default |
+| `build --check-startup` | also validate a structural build |
+| `build --native --skip-startup-check` | explicit bypass with an unverified-launch warning |
+
+The check and skip flags cannot be combined. The Python APIs follow the same
+native default: `build_apk(config, native=True)` and
+`BuildPipeline(config, native=True).run()`. `check_startup=True/False` explicitly
+overrides it; `None` uses the build-mode default. A failed check stops with a
+message such as `Startup check failed: The app rendered nothing.` and exit code
+1 rather than a success message for a non-starting APK.
+
+### Build commands
+
 ```bash
 pymobile build --native                    # incremental
 pymobile build --native --clean            # ignore the cache
@@ -2374,6 +2425,7 @@ pymobile build --native --icon logo.png    # override the icon
 pymobile build --native --output dist      # different directory
 pymobile build --native --no-optimize      # ship .py for debugging
 pymobile build --native --minimal-stdlib   # drop desktop-only stdlib
+pymobile build --check-startup             # also validate a structural build
 pymobile build --native --no-ssl           # drop OpenSSL (no HTTPS)
 pymobile build --native --abi x86_64       # for the emulator
 ```
@@ -2381,13 +2433,18 @@ pymobile build --native --abi x86_64       # for the emulator
 > Without `--native` you get a lightweight structural package used for quick
 > checks. **It does not install on a device.**
 
-A rebuild with no changes finishes instantly:
+After startup validation, a build with unchanged inputs can reuse its APK:
 
 ```
 ✓ up to date: my-app-1.0.0.apk (16.6 MB)
 ```
 
-The cache tracks every input: sources, configuration and icon.
+The cache tracks application sources, configuration, icons, project-local Java
+and packaged framework inputs. The native startup check still executes before
+cache reuse; a cached APK cannot turn an invalid startup into a successful build.
+Native builds that include the full stdlib print a size advisory recommending
+`--minimal-stdlib`. The default is unchanged so desktop-only imports are not
+silently removed from existing apps; test any reduced build against your app.
 
 **Inside the APK:**
 
@@ -2571,7 +2628,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.10.0", "platform": "android",
+# {"framework_version": "0.10.1", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 
@@ -2635,6 +2692,14 @@ at the step that matters. A wrong widget id names the closest ones
 (`Did you mean 'start'?`), and pressing a disabled widget or a `Label` is an
 error, as it would be for a finger. If your code builds its own `App` (a
 `main()`), call it and then `Driver.attach()`.
+
+**Renderer IDs.** `driver.tree()` and `pymobile preview --ids` expose qualified
+IDs such as `1:save`. `driver.find("1:save")` and `driver.press("1:save")`
+accept the current generation's ID; raw IDs such as `"save"` remain supported.
+Use the prefix actually returned by the tree/preview rather than hard-coding
+`1`. After navigation, re-read the tree: an ID from a retired screen generation
+raises `WidgetNotFoundError`, even when the new screen also has a widget named
+`save`.
 
 **Snapshots.** `pymobile_snapshot()` renders the screen with `render_ascii` and
 compares it with `snapshots/<test module>__<test name>.txt` next to the test
@@ -2753,7 +2818,7 @@ except PyMobileError:
 | --- | --- |
 | `ConfigError` | configuration missing or invalid |
 | `NetworkError` | request failed, host unreachable, invalid JSON |
-| `PermissionError_` | the user declined a permission |
+| `PermissionDeniedError` | the user declined a permission (`PermissionError_` remains a compatible alias) |
 | `ResourceError` | an icon or template could not be read |
 | `BridgeError` | a call into Android failed |
 | `PlatformError` | feature unavailable on this platform |
@@ -2892,7 +2957,10 @@ status strip.
 pymobile run --gui
 ```
 
-It is built on Tkinter, which ships with CPython, so it costs no dependency.
+It uses the standard-library Tkinter interface; some Linux distributions need
+the optional `python3-tk` OS package. An available Tk import does not imply an
+available display. If `run --gui` cannot open a window it reports an actionable
+error; use `preview`, `watch` or `run --web` on a headless machine.
 Trees are patched into the existing widgets when the structure has not
 changed, so typing in a field does not lose focus.
 
@@ -2939,11 +3007,14 @@ editor and look at the result — no `Ctrl+C`, no re-run.
 ```bash
 pymobile dev                    # GUI window + reload on save
 pymobile dev --screen Settings  # start on another screen
-pymobile dev --set score=7      # constructor arguments, like `preview`
+pymobile dev --screen Result --set score=7  # constructor arguments, like `preview`
 ```
 
-It needs a display (Tk). Without one it says so and falls back to
-`pymobile watch`, which keeps working over SSH.
+It needs Tk and a usable display. If Tk is missing **or Tk imports but opening
+the window fails**, `dev` explains the problem and falls back to text `watch`.
+The fallback keeps the selected screen/constructor arguments and valid watch
+defaults; Ctrl+C stops it normally over SSH. This automatic fallback belongs
+to `dev`, not `run --gui`.
 
 `pymobile watch` re-renders every time you save:
 
@@ -2974,19 +3045,22 @@ end the session.
 | `pymobile init [dir]` | create a project (`-n` name, `-p` package, `-f` force) |
 | `pymobile setup-sdk` | install the Android toolchain (`--with-ndk`, `--with-emulator`, `--path`) |
 | `pymobile emulator start` | launch/create the optional local x86_64 AVD (`create`, `list`, `--sdk`) |
-| `pymobile build --native` | build a signed, installable APK (`--minimal-stdlib`, `--no-ssl`, `--abi x86_64`) |
+| `pymobile build --native` | validate startup and build a signed APK (`--minimal-stdlib`, `--no-ssl`, `--abi x86_64`; explicit `--skip-startup-check` bypass) |
+| `pymobile build --check-startup` | also validate startup when producing a structural, non-installable package |
 | `pymobile install [APK]` | install an APK using `adb` (`--abi`, `--device`, `--sdk`) |
 | `pymobile run` | run the app on your machine (`--gui` window, `--web` browser) |
+| `pymobile dev` | GUI with live reload; text-watch fallback when Tk/display is unavailable (`--screen`, `--args`, `--set`, `--ids`, `--interval`) |
 | `pymobile watch` | re-render on every save (`--png`, `--text`, `--ids`, `--interval`) |
 | `pymobile preview` | draw a screen as a picture (`--png`, `--size`, `--theme`, `--text`, `--ids`) |
+| `pymobile check-ui` | static accessibility/layout/contrast audit (`--width`, `--min-touch-target`, `--theme`, `--strict`, `--json`) |
 | `pymobile widget add TYPE` | scaffold a project-local Python widget and auto-compiled Java renderer (`-p title -p value:int`) |
 | `pymobile widget-java TYPE` | print the shared `ViewBuilder.java` branch guide (`-p title -p value:int`, `--out FILE`; framework contributors) |
 | `pymobile info` | show the resolved configuration (`--json`) |
 | `pymobile doctor` | check environment and project health |
 | `pymobile clean` | remove build artifacts |
 
-`run`, `watch` and `preview` also take `--screen NAME` (with `--set NAME=VALUE` or
-`--args JSON`) and `--navigate "Menu.start, Quiz.next"` to open on a screen other
+`run`, `dev`, `watch`, `preview` and `check-ui` also take `--screen NAME`
+(with `--set NAME=VALUE` or `--args JSON`) and `--navigate "Menu.start, Quiz.next"` to open on a screen other
 than the first —
 see [Desktop preview](#desktop-preview).
 
@@ -3054,8 +3128,8 @@ The function receives the serialised node (`type`, `id`, `props`, `style`,
 
 `Wrap` is an example of a framework-level widget: `class Wrap(Container)` in
 `layout.py`, a `WidgetCapability` row in `registry.py`, support in the four
-renderers (`ViewBuilder.java`, `web.py`, `gui.py`, `preview.py`/`mockup.py`),
-and tests for all of them.
+renderers (the Android `ViewBuilder` facade and its collaborators, `web.py`,
+`gui.py`, `preview.py`/`mockup.py`), and tests for all of them.
 
 **A new Android API** — add a method to `Bridge`, implement it in
 `AndroidBridge` and `StubBridge`, wrap it in a small class under `core/api/`.
@@ -3078,12 +3152,15 @@ and tests for all of them.
   requires it (earlier pymobile releases declared API 21, but the app could
   not start there). A `min_sdk = 21` left in an older `pymobile.toml` still
   builds: the APK declares 24 and the build prints a warning.
-- The renderer covers the components documented here; more are being added.
-  A custom widget with a new `type_name` is not one of them until you add a
-  branch to `ViewBuilder.java` and rebuild the dex — without it the widget is a
-  placeholder on the phone, so `pymobile build --native` stops, and the
-  framework also warns on the first frame and in the device log (see
-  [Extending the framework](#extending-the-framework)).
+- A new custom `type_name` needs an Android renderer. Prefer `pymobile widget
+  add TYPE` for a project-local renderer compiled with your app. A built-in
+  framework widget needs dispatch/capability support and a rebuilt bundled dex.
+  Without renderer support a widget is a placeholder on the phone; native build
+  checks fail rather than silently accepting missing support. See
+  [Extending the framework](#extending-the-framework).
+- Desktop startup validation is not Android execution. Android-only startup can
+  need a guard or an explicit, warned bypass; successful validation and APK
+  signing do not replace installing and exercising the app on Android.
 - Translation catalogues are flat: `"stats.balance"` is one key, and nested
   JSON sections need `flatten=True` (see [Languages](#languages)).
 
@@ -3203,8 +3280,11 @@ are documented and are **not** deprecated.
 It should: assigning to a widget property redraws the screen by itself. If the
 *structure* changed — rows added or removed — call `self.refresh()` to rebuild
 through `build()`; a tab or panel that no frame owns uses `self.rebuild()`. If
-the data changed on *another* screen (a form saved and popped), call
-`app.notify_data_changed()` so the screen underneath rebuilds on the way back.
+a form saves and calls `pop()`, the revealed screen rebuilds automatically.
+`app.notify_data_changed()` remains available for explicit invalidation and the
+`data:changed` event, but is not required for that save-and-back flow. Preserve
+input state in screen/model attributes or explicitly owned widgets, rather than
+only in widgets recreated inside `build()`.
 See [Updating the screen](#updating-the-screen).
 
 **Why does `pymobile run` show no window?**
@@ -3258,7 +3338,7 @@ No. `pymobile setup-sdk` downloads only the command-line tools it needs.
 
 ```bash
 git clone https://github.com/Maksum867/PyMobile.git
-cd py-mobile
+cd PyMobile
 pip install -e ".[dev]"
 
 pytest                  # unit tests
@@ -3266,8 +3346,48 @@ ruff check pymobile     # linting
 mypy pymobile           # strict type checking
 ```
 
-To rebuild the native artifacts from source (requires
-`pymobile setup-sdk --with-ndk`):
+### Internal module map
+
+| Area | Implementation |
+| --- | --- |
+| CLI | `cli.py` facade/shared helpers; `cli_parser.py` grammar; `cli_preview.py` preview/dev/watch/audit; `cli_device.py` adb/emulator/install |
+| Mockup | `mockup.py` facade; `_mockup_colors`, `_mockup_fonts`, `_mockup_paint`, `_mockup_layout`, `_mockup_widgets`, `_mockup_chrome`; typed `_mockup_context` contract |
+| Android renderer | `ViewBuilder.java` facade/state owner; `ViewContainers`, `ViewControls`, `ViewInputs`, `ViewLists`, `ViewGestures`, `ViewStyles`, `ViewOverlays`, `ViewUpdates`; `FlowViews` wrapping layout |
+
+Keep implementations in the appropriate module rather than regrowing the
+facades. Regression tests cap these split files at 1000 lines and check
+source/prebuilt renderer consistency.
+
+### Rebuild Java/dex and verify native packaging
+
+The bundled Java launcher needs the SDK build-tools and JDK, **not an NDK**:
+
+```bash
+python -m pymobile.compiler.rebuild_dex          # rebuild the bundled classes.dex
+python -m pymobile.compiler.rebuild_dex --check  # verify recorded source/dex hashes
+```
+
+The second command needs no SDK. It checks the SHA-256 manifest
+`classes.sources.json`, not Android runtime behaviour or cryptographic
+publisher authenticity. Commit the Java changes, rebuilt dex and updated
+manifest together. Java source hashing normalises CRLF to LF, so Windows Git
+checkout conversion does not invalidate provenance; dex hashing remains
+byte-exact. Quality and publishing workflows run the provenance check.
+
+With the SDK/JDK available, also exercise source-built and prebuilt APKs,
+cache reuse and v2/v3 signatures (POSIX shell):
+
+```bash
+PYMOBILE_NATIVE_TESTS=1 python -m pytest pymobile/tests/test_remaining_p_fixes.py
+```
+
+For an actual release, follow [maintenance/release gates](docs/MAINTENANCE.md),
+including an Android install/runtime test. A successful compile, signature or
+SDK-free test suite must not be reported as a passed device test.
+
+### Rebuild the JNI bridge
+
+This separate step requires `pymobile setup-sdk --with-ndk`:
 
 ```bash
 # macOS / Linux
@@ -3294,8 +3414,9 @@ Issues and pull requests are welcome.
 
 ## Documentation
 
-- **[CHANGELOG.md](https://github.com/Maksum867/PyMobile/blob/main/CHANGELOG.md)** — release history
+- **[CHANGELOG.md](CHANGELOG.md)** — release history
 - **[Versioning and deprecation policy](#versioning-and-deprecation-policy)** — what may change, and how much notice you get
+- **[Maintenance and release gates](docs/MAINTENANCE.md)** — validation and maintainer handover
 
 ## License
 

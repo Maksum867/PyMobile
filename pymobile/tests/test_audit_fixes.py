@@ -31,6 +31,8 @@ from pymobile.compiler.toolchain import Toolchain
 from pymobile.core.config import ProjectConfig
 from pymobile.core.ui.dialogs import AlertDialog, ConfirmDialog
 
+from .java_sources import renderer_source
+
 ANDROID_DIR = Path(__file__).resolve().parents[1] / "resources" / "android"
 JAVA_DIR = ANDROID_DIR / "java"
 PREBUILT_DEX = ANDROID_DIR / "prebuilt" / "arm64-v8a" / "classes.dex"
@@ -359,7 +361,7 @@ class TestThemeAndLocale:
 
 # ------------------------------------------------------ Java renderer (A)
 class TestViewBuilderStructure:
-    source = (JAVA_DIR / "ViewBuilder.java").read_text(encoding="utf-8")
+    source = renderer_source()
 
     def _update_node(self) -> str:
         start = self.source.index("boolean updateNode(View view")
@@ -398,10 +400,10 @@ class TestPrebuiltDex:
     #: was built. This set is deliberately explicit: it is a release task
     #: ("rebuild the prebuilt dex"), not a permanent exemption, so adding a
     #: renderer without rebuilding the dex fails this test with the type named.
-    AWAITING_DEX_REBUILD = frozenset({"Container"})
+    AWAITING_DEX_REBUILD: frozenset[str] = frozenset()
 
     def test_fallback_dex_contains_every_builtin_widget_type(self) -> None:
-        source = (JAVA_DIR / "ViewBuilder.java").read_text(encoding="utf-8")
+        source = renderer_source()
         cases = sorted(set(re.findall(r'case "([A-Za-z]+)":', source)))
         assert cases
         missing = [kind for kind in cases if kind.encode() not in self.dex]
@@ -416,7 +418,7 @@ class TestPrebuiltDex:
 
     def test_the_excused_types_are_still_the_ones_we_know_about(self) -> None:
         """Keep the debt list honest: it may only shrink as the dex is rebuilt."""
-        source = (JAVA_DIR / "ViewBuilder.java").read_text(encoding="utf-8")
+        source = renderer_source()
         cases = sorted(set(re.findall(r'case "([A-Za-z]+)":', source)))
         actually_missing = {kind for kind in cases if kind.encode() not in self.dex}
         assert actually_missing == set(self.AWAITING_DEX_REBUILD), (

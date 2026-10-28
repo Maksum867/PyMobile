@@ -380,7 +380,9 @@ class TestBuildChecks:
         monkeypatch.setattr(pipeline_module, "ensure_runtime", lambda *_a, **_k: object())
         monkeypatch.setattr(pipeline_module, "NativeBackend", FakeBackend)
         with pytest.raises(ConfigError, match="BarChart"):
-            BuildPipeline(ProjectConfig(root=tmp_path), use_cache=False, native=True).run()
+            BuildPipeline(
+                ProjectConfig(root=tmp_path), use_cache=False, native=True, check_startup=False
+            ).run()
         assert calls == ["verify", "jni", "dex"]
         assert entrypoints[0] == ("main.py", "py")
         assert entrypoints[1][1] == "digest" and entrypoints[1][0]

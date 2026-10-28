@@ -15,6 +15,7 @@ __all__ = [
     "ConfigError",
     "BridgeError",
     "PlatformError",
+    "PermissionDeniedError",
     "PermissionError_",
     "NetworkError",
     "ResourceError",
@@ -50,12 +51,16 @@ class PlatformError(PyMobileError):
     """The requested feature is not available on the current platform."""
 
 
-class PermissionError_(PyMobileError):
+class PermissionDeniedError(PyMobileError):
     """A runtime Android permission was denied by the user."""
 
     def __init__(self, permission: str, *, hint: str | None = None) -> None:
         super().__init__(f"Permission denied: {permission}", hint=hint)
         self.permission = permission
+
+
+# Backward-compatible alias; existing except clauses keep catching the same type.
+PermissionError_ = PermissionDeniedError
 
 
 class NetworkError(PyMobileError):

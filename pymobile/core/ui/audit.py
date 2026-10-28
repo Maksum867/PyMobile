@@ -225,6 +225,7 @@ def audit_ui(
     *,
     width: int = 320,
     min_touch_target: int = 48,
+    background: str | None = None,
 ) -> list[UiIssue]:
     """Check a live widget or serialized tree for common UI issues.
 
@@ -270,7 +271,7 @@ def audit_ui(
         ``background`` is inherited down the tree, exactly as the renderers do
         it: the nearest ancestor with a background wins. Only text colours that
         were set explicitly are judged — an unset colour follows the theme,
-        which ``check-ui`` cannot see, and guessing would cry wolf.
+        while the caller supplies the theme background via ``background``.
         """
         foreground = style.get("color")
         if not foreground or not background:
@@ -424,5 +425,5 @@ def audit_ui(
             for child in visible:
                 visit(child, content_width, surface)
 
-    visit(root, float(width))
+    visit(root, float(width), background)
     return issues

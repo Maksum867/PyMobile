@@ -136,7 +136,10 @@ class TestNoneTextProps:
     def test_every_renderer_uses_the_helper(self, renderer: str) -> None:
         """No renderer may go back to str(props.get(…)) — that printed "None"."""
         root = Path(__file__).resolve().parents[1]
-        source = (root / "core/ui" / renderer).read_text(encoding="utf-8")
+        paths = [root / "core/ui" / renderer]
+        if renderer == "mockup.py":
+            paths.extend(sorted((root / "core/ui").glob("_mockup_*.py")))
+        source = "\n".join(path.read_text(encoding="utf-8") for path in paths)
         assert "str(props.get(" not in source
         assert "text_value(props.get(" in source
 
