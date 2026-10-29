@@ -2,7 +2,7 @@
 
 Sub-commands: ``init``, ``build``, ``run``, ``dev``, ``watch``, ``preview``, ``check-ui``, ``info``,
 ``clean``, ``widget add``, ``widget-java``, ``setup-sdk``, ``emulator``,
-``install``, ``doctor``.
+``install``, ``doctor``, ``deps check``, ``logs``, ``size``.
 Every command returns an exit code; :func:`main` is the console-script entry
 point declared in ``pyproject.toml``.
 
@@ -720,6 +720,57 @@ def cmd_install(args: argparse.Namespace) -> int:
     return cli_device.cmd_install(args)
 
 
+def cmd_deps_check(args: argparse.Namespace) -> int:
+    """Check downloadability of pure-Python wheels without installing them."""
+    from .compiler.dependency_checks import check_dependencies
+
+    config = _load(args)
+    if not config.dependencies:
+        _out.info("no app dependencies declared")
+        return 0
+    checks = check_dependencies(config.dependencies)
+    for result in checks:
+        if result.compatible:
+            _out.ok(f"{result.requirement}: {result.detail}")
+        else:
+            _out.error(f"{result.requirement}: {result.detail}")
+    if any(not result.compatible for result in checks):
+        _out.hint(
+            "Use a pinned pure-Python package with a py3-none-any wheel; "
+            "a failed download may also indicate a network/index problem."
+        )
+        return 1
+    _out.info("Wheel compatibility checked; Android device execution is not verified.")
+    return 0
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    """Read device logcat, delegated to the focused device module."""
+    from . import cli_device
+
+    return cli_device.cmd_logs(args)
+
+
+def cmd_size(args: argparse.Namespace) -> int:
+    """Show compressed APK bytes grouped by runtime, app and distribution."""
+    from .compiler.size_report import analyze_apk
+
+    config = _load(args)
+    apk = (
+        Path(args.apk).expanduser().resolve() if args.apk else config.output_path / config.apk_name
+    )
+    report = analyze_apk(apk)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+        return 0
+    _out.info(f"APK: {report.apk} ({report.total / 1024**2:.2f} MiB)")
+    for name, amount in report.categories.items():
+        _out.field(name, f"{amount / 1024**2:.2f} MiB ({amount / report.total:.1%})")
+    for name, amount in report.dependencies.items():
+        _out.field("  " + name, f"{amount / 1024**2:.2f} MiB")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Check the environment and configuration."""
     problems = 0
@@ -737,7 +788,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         config = _load(args)
     except PyMobileError as exc:
         _out.warn(f"no usable project here: {exc}")
-        return 0
+        return 1 if getattr(args, "strict", False) else 0
 
     _out.ok(f"configuration valid: {config.name} ({config.package})")
     if not config.entrypoint_path.exists():
@@ -754,6 +805,28 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         _out.ok(f"custom icon: {icon.name}")
     else:
         _out.ok("using the default icon")
+
+    # pip is only necessary for declared third-party packages. Do not confuse
+    # Pillow (optional build-time icon resizing) with an Android dependency.
+    if config.dependencies:
+        import importlib.util
+
+        if importlib.util.find_spec("pip") is None:
+            _out.error("pip is missing — app dependencies cannot be installed")
+            _out.hint(f"{Path(sys.executable).name} -m ensurepip --upgrade")
+            problems += 1
+        else:
+            _out.ok(f"pip available for {len(config.dependencies)} declared dependencies")
+        _out.info(f"check package compatibility: {_invocation()} deps check")
+
+    try:
+        free = shutil.disk_usage(config.root).free
+        if free < 1024**3:
+            _out.warn(f"only {free / 1024**3:.1f} GiB free; native setup needs ~1 GiB")
+        else:
+            _out.ok(f"disk space: {free / 1024**3:.1f} GiB free")
+    except OSError as exc:
+        _out.warn(f"could not check disk space: {exc}")
 
     from .compiler.toolchain import ToolchainError, find_toolchain
 
@@ -780,7 +853,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     else:
         _out.ok("project configuration looks good")
         _out.warn("Android SDK is not installed — native APK builds are unavailable")
-    return 0
+    return 1 if getattr(args, "strict", False) and not sdk_ok else 0
 
 
 # ---------------------------------------------------------------------------
@@ -818,6 +891,9 @@ def build_parser() -> argparse.ArgumentParser:
             "clean": cmd_clean,
             "dev": cmd_dev,
             "doctor": cmd_doctor,
+            "deps_check": cmd_deps_check,
+            "logs": cmd_logs,
+            "size": cmd_size,
             "emulator": cmd_emulator,
             "info": cmd_info,
             "init": cmd_init,

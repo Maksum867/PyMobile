@@ -79,7 +79,9 @@ def _run_probe(
             raise
 
 
-def check_startup(config: ProjectConfig, *, timeout: float = 10.0) -> None:
+def check_startup(
+    config: ProjectConfig, *, timeout: float = 10.0, dependencies_dir: Path | None = None
+) -> None:
     """Require a rendered startup screen, without polluting the build process.
 
     Default framework storage is redirected to a temporary directory. Relative
@@ -110,6 +112,7 @@ def check_startup(config: ProjectConfig, *, timeout: float = 10.0) -> None:
                         str(config.entrypoint_path.resolve()),
                         str(config.source_path.resolve()),
                         str(result_path),
+                        str(dependencies_dir or ""),
                     ],
                     cwd=config.root,
                     environment=environment,
@@ -148,10 +151,12 @@ def _worker() -> None:
     from ..core.app import App
     from ..core.bridge import StubBridge, set_bridge
 
-    entry, source, destination = sys.argv[1:]
+    entry, source, destination, dependencies_dir = sys.argv[1:]
     result: dict[str, Any] = {"ok": False}
     bridge = StubBridge(verbose=False)
     set_bridge(bridge)
+    if dependencies_dir:
+        sys.path.insert(0, dependencies_dir)
     sys.path.insert(0, source)
     sys.argv = [entry]
     try:

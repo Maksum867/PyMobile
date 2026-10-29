@@ -446,6 +446,33 @@ def build_parser(
     emulator_start.set_defaults(func=commands["emulator"])
 
     doctor = sub.add_parser("doctor", help="check the environment", parents=[common])
+    doctor.add_argument(
+        "--strict", action="store_true", help="fail if native build prerequisites are missing"
+    )
     doctor.set_defaults(func=commands["doctor"])
+
+    deps = sub.add_parser("deps", help="check third-party app packages", parents=[common])
+    deps_actions = deps.add_subparsers(dest="deps_action", required=True)
+    deps_check = deps_actions.add_parser(
+        "check",
+        help="check universal wheels for Android Python without installing",
+        parents=[common],
+    )
+    deps_check.set_defaults(func=commands["deps_check"])
+
+    logs = sub.add_parser(
+        "logs", help="show app Python tracebacks from adb logcat", parents=[common]
+    )
+    logs.add_argument("--device", metavar="SERIAL", help="adb device serial")
+    logs.add_argument("--follow", action="store_true", help="stream logs for a running app")
+    logs.add_argument(
+        "--lines", type=positive_int, default=100, help="maximum matching lines (default: 100)"
+    )
+    logs.set_defaults(func=commands["logs"])
+
+    size = sub.add_parser("size", help="explain APK size by component", parents=[common])
+    size.add_argument("apk", nargs="?", help="APK path (defaults to configured output)")
+    size.add_argument("--json", action="store_true", help="machine-readable report")
+    size.set_defaults(func=commands["size"])
 
     return parser

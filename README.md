@@ -9,10 +9,10 @@ Write a declarative UI, run one command, install the APK on your phone.
 [![PyPI](https://img.shields.io/pypi/v/pymobile-framework.svg)](https://pypi.org/project/pymobile-framework/)
 [![Python](https://img.shields.io/pypi/pyversions/pymobile-framework.svg)](https://pypi.org/project/pymobile-framework/)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](https://github.com/Maksum867/PyMobile/issues)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Maksum867/PyMobile/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Maksum867/PyMobile/main/docs/demo.gif"
+  <img src="https://raw.githubusercontent.com/Maksum867/PyMobile/main/docs/assets/demo.gif"
        alt="PyMobile demo: from pip install to a native Android app" width="800">
 </p>
 
@@ -30,7 +30,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.10.1`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.10.2`) and read the
 > changelog before upgrading. What may change, and how much notice you get, is
 > written down in the
 > [versioning and deprecation policy](#versioning-and-deprecation-policy). Bug
@@ -133,9 +133,62 @@ the JDK for you.
 | **Fast** | About five seconds per build. An unchanged rebuild is instant. |
 | **Small setup** | ~800 MB of tooling, downloaded automatically. The NDK is not required. |
 | **Testable** | Your whole app runs and is unit-testable on a desktop, with no emulator. |
-| **No dependencies** | Nothing but the standard library runs on the device, which keeps APKs small. The desktop package pulls in `certifi` only to bundle CA certificates at build time. |
+| **Optional app dependencies** | Pure-Python PyPI wheels can be declared and bundled into the APK; the framework itself needs only the standard library on device. |
 
 Verified on a physical device running Android 14.
+
+---
+
+## Build diagnostics and APK size
+
+```bash
+pymobile doctor             # project, entry point, pip, free space and Android SDK
+pymobile doctor --strict    # exit nonzero when native tooling is missing
+pymobile deps check         # check pure-Python wheels, without installing them
+pymobile logs               # recent logs/traceback for this app on a connected device
+pymobile logs --follow      # stream logs for the currently running app
+pymobile logs --device SERIAL --lines 200
+pymobile size               # compressed APK size by runtime, framework, app, dependencies
+pymobile size path/to/app.apk --json
+```
+
+`deps check` needs access to the configured Python package index; a failure may
+mean no compatible wheel **or** a network/index error, not necessarily a native
+extension. It does not run app code or guarantee that a package works on a
+physical device. `logs` requires Android SDK platform-tools (`adb`), a connected
+and authorized device, and a recent app process or crash record in logcat. It
+filters by the app's process ID rather than mixing logs from other apps. APK
+sizes use ZIP-compressed entry sizes; the residual includes signing and archive
+overhead. Dependencies are attributed using their wheel `RECORD` metadata.
+
+---
+
+## Third-party Python packages (experimental)
+
+Declare pure-Python distributions in `pymobile.toml`:
+
+```toml
+[app]
+name = "My App"
+package = "com.example.myapp"
+dependencies = ["requests==2.32.5"]
+```
+
+Alternatively use `[project].dependencies` in `pyproject.toml` (also when
+`pymobile.toml` is present). An explicit `dependencies = []` in the app config
+disables that fallback. Build normally with `pymobile build --native`; PyMobile
+installs universal wheels and transitive dependencies into `.pymobile/dependencies/`
+and packages their Python files, metadata, and data assets directly under the
+app root. The startup check imports from the same dependency directory.
+
+Only pure-Python universal wheels are supported: packages requiring native
+extensions (for example NumPy) cannot run with a host binary on Android.
+Dependencies come from PyPI via pip and need network access on the first build;
+pin versions for reproducibility. A cached install is reused until the declared
+requirements change; remove `.pymobile/dependencies/` to refresh unpinned
+packages. For HTTPS with `requests`, keep `android.permission.INTERNET` and do
+not use `--no-ssl`. This has been verified by a structural build and desktop
+startup smoke check, **not** yet by running the APK on an Android device.
 
 ---
 
@@ -2569,7 +2622,7 @@ configured, a bundled default is used, so a build never fails over a missing
 asset:
 
 <p align="center">
-  <img src="docs/icon.png" alt="The bundled PyMobile launcher icon" width="128">
+  <img src="docs/assets/icon.png" alt="The bundled PyMobile launcher icon" width="128">
 </p>
 
 (The PyMobile mark is also the icon of anything built with
@@ -2628,7 +2681,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.10.1", "platform": "android",
+# {"framework_version": "0.10.2", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 
@@ -3381,7 +3434,7 @@ cache reuse and v2/v3 signatures (POSIX shell):
 PYMOBILE_NATIVE_TESTS=1 python -m pytest pymobile/tests/test_remaining_p_fixes.py
 ```
 
-For an actual release, follow [maintenance/release gates](docs/MAINTENANCE.md),
+For an actual release, follow [maintenance/release gates](docs/CONTRIBUTING.md),
 including an Android install/runtime test. A successful compile, signature or
 SDK-free test suite must not be reported as a passed device test.
 
@@ -3416,8 +3469,11 @@ Issues and pull requests are welcome.
 
 - **[CHANGELOG.md](CHANGELOG.md)** — release history
 - **[Versioning and deprecation policy](#versioning-and-deprecation-policy)** — what may change, and how much notice you get
-- **[Maintenance and release gates](docs/MAINTENANCE.md)** — validation and maintainer handover
+- **[Maintenance and release gates](docs/CONTRIBUTING.md)** — validation and maintainer handover
+- **[Code of Conduct](docs/CODE_OF_CONDUCT.md)** — expectations for project participation and reporting concerns
+- **[Security Policy](docs/SECURITY.md)** — supported versions and private vulnerability reporting
+- **[Accessibility](docs/ACCESSIBILITY.md)** — accessibility goals, current tools and how to report barriers
 
 ## License
 
-MIT — see [LICENSE](https://github.com/Maksum867/PyMobile/blob/main/LICENSE).
+MIT — see [LICENSE](LICENSE).

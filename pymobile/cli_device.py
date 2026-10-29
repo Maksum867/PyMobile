@@ -229,3 +229,96 @@ def cmd_install(args: argparse.Namespace) -> int:
     result = (completed.stdout or "").strip()
     cli._out.ok(f"installed {apk.name} on {device}" + (f" — {result}" if result else ""))
     return 0
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    """Show only logcat lines from this app's PID (not another PyMobile app).
+
+    For a crashed process pidof is empty: recover its PID from AndroidRuntime's
+    `Process: <package>, PID: ...` record in the recent log buffer. If neither
+    is available, refuse to show unrelated global `pymobile` tagged messages.
+    """
+    import re
+    import subprocess
+
+    config = cli._load(args)
+    root = cli._sdk_root_for_device(args)
+    adb = cli._sdk_executable(root, "platform-tools", "adb")
+    env = cli._device_environment(root)
+    devices = subprocess.run(
+        [str(adb), "devices"], capture_output=True, text=True, env=env, check=False
+    )
+    if devices.returncode:
+        raise PyMobileError("adb could not list devices", hint=devices.stderr.strip())
+    connected = [
+        parts[0]
+        for line in devices.stdout.splitlines()[1:]
+        if len(parts := line.split()) >= 2 and parts[1] == "device"
+    ]
+    device = args.device
+    if device is None:
+        if not connected:
+            raise PyMobileError(
+                "no Android device connected", hint="Connect a phone or start an emulator."
+            )
+        if len(connected) != 1:
+            raise PyMobileError("more than one device connected", hint="Pass --device SERIAL")
+        device = connected[0]
+    elif device not in connected:
+        raise PyMobileError(f"device {device!r} is not connected/authorized")
+
+    prefix = [str(adb), "-s", device]
+    pid_result = subprocess.run(
+        [*prefix, "shell", "pidof", "-s", config.package],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    pid = pid_result.stdout.strip() if pid_result.stdout.strip().isdigit() else None
+    if args.follow:
+        if not pid:
+            raise PyMobileError(
+                f"{config.package} is not running",
+                hint="Launch the app first; for a previous crash, "
+                "use `pymobile logs` without --follow.",
+            )
+        cli._out.info(f"streaming {config.package} on {device} (PID {pid}); Ctrl+C to stop")
+        result = subprocess.run(
+            [*prefix, "logcat", f"--pid={pid}", "-v", "threadtime"], env=env, check=False
+        )
+        return int(result.returncode != 0)
+
+    output = subprocess.run(
+        [*prefix, "logcat", "-d", "-v", "threadtime", "-t", "3000"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    if output.returncode:
+        raise PyMobileError("adb logcat failed", hint=output.stderr.strip())
+    lines = output.stdout.splitlines()
+    # Crash headers give a reliable PID even after the process exits.
+    if not pid:
+        pattern = re.compile(r"\bProcess:\s*" + re.escape(config.package) + r",\s*PID:\s*(\d+)")
+        for line in reversed(lines):
+            match = pattern.search(line)
+            if match:
+                pid = match.group(1)
+                break
+    if not pid:
+        raise PyMobileError(
+            f"no recent logs found for {config.package}",
+            hint="Run the app and retry immediately; logcat's buffer may have rotated.",
+        )
+    # threadtime's third field is the PID; comparing numeric fields prevents
+    # accidentally including another app whose message happens to mention it.
+    matches = [
+        line for line in lines if len(parts := line.split(maxsplit=3)) >= 4 and parts[2] == pid
+    ]
+    if not matches:
+        raise PyMobileError(f"no recent logcat lines for {config.package} (PID {pid})")
+    for line in matches[-args.lines :]:
+        print(line)
+    return 0

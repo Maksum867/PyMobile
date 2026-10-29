@@ -3,6 +3,54 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.10.2] — 2026-10-29
+
+### Added
+
+- **Experimental pure-Python app dependencies (issue #1).** Declare
+  `dependencies = ["requests==2.32.5"]` in `[app]` of `pymobile.toml` or use
+  `[project].dependencies` in `pyproject.toml`. An explicit app-level list takes
+  precedence. Builds install universal wheels and transitive dependencies for
+  the embedded Android CPython 3.14, then bundle their modules, metadata and
+  package data in the APK. Desktop startup validation uses the same installed
+  packages. A project-local `.pymobile/dependencies/` cache avoids repeated
+  installs; changed dependency files invalidate the APK build cache. Native
+  extensions and platform-specific wheels are not supported.
+- **`pymobile deps check`.** Checks whether the declared packages and their
+  transitive dependencies can be downloaded as pure-Python universal wheels
+  without installing them into the project. A failed resolution can also mean
+  an index or network problem, not necessarily a native extension.
+- **`pymobile logs`.** Reads recent adb logcat output for the configured app,
+  filtering by its process ID; recovers the PID from an Android crash record
+  when the app has exited. `--follow` streams a running app's logs, and
+  `--device` and `--lines` narrow the selection. Requires a connected Android
+  device and an SDK with adb.
+- **`pymobile size`.** Reports compressed APK sizes by runtime, framework,
+  app, resources and individual third-party distributions (from wheel `RECORD`
+  metadata), including ZIP/signing overhead. Accepts an APK path and `--json`.
+- **Community policies.** Added `docs/CODE_OF_CONDUCT.md`, `docs/SECURITY.md`
+  and `docs/ACCESSIBILITY.md`, linked from the README.
+
+### Changed
+
+- **More actionable `pymobile doctor`.** In addition to existing project and
+  toolchain checks, reports pip availability when dependencies are declared
+  and available disk space. `--strict` returns a nonzero status when the SDK
+  or project prerequisites are missing; the non-strict SDK advisory retains
+  its previous behaviour. The project template and README document the new
+  dependency and diagnostic commands.
+
+### Verification and limitations
+
+- Added dependency, configuration, cache, startup and diagnostic regression
+  tests. The full suite passed locally (1,744 passed, 9 skipped), and a
+  structural build with `requests` passed a desktop startup check. Native
+  builds, log streaming and app imports on a physical Android device were
+  **not** verified here because the Android SDK/device is unavailable.
+- These are local, unreleased changes; no version bump or GitHub publication
+  is implied. Device execution and native-extension support remain separate
+  work.
+
 ## [0.10.1] — 2026-10-25
 
 ### Added

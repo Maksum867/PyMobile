@@ -11,6 +11,9 @@ version_code = 1
 entrypoint = "main.py"
 source_dir = "."
 
+# Optional pure-Python PyPI packages (native extensions are not supported).
+# dependencies = ["requests==2.32.5"]
+
 # Android platform settings.
 min_sdk = 24
 target_sdk = 35

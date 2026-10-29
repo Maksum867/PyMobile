@@ -86,3 +86,5 @@ Thumbs.db
 pymobile-demo/
 PYPI_INSTRUCTIONS.md
 sync_readme_version.py
+# Local dependency build cache
+.pymobile/

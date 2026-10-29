@@ -243,7 +243,9 @@ def test_sdk_installer_adds_emulator_without_ndk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sdk = tmp_path / "android-home" / "sdk"
-    manager = sdk / "cmdline-tools" / "latest" / "bin" / "sdkmanager"
+    manager = sdk / "cmdline-tools" / "latest" / "bin" / (
+        "sdkmanager.bat" if os.name == "nt" else "sdkmanager"
+    )
     manager.parent.mkdir(parents=True)
     manager.touch()
     monkeypatch.setattr(sdk_installer, "_ensure_jdk", lambda home: home / "jdk-17")
@@ -267,7 +269,9 @@ def test_sdk_installer_can_combine_emulator_and_ndk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sdk = tmp_path / "android-home" / "sdk"
-    manager = sdk / "cmdline-tools" / "latest" / "bin" / "sdkmanager"
+    manager = sdk / "cmdline-tools" / "latest" / "bin" / (
+        "sdkmanager.bat" if os.name == "nt" else "sdkmanager"
+    )
     manager.parent.mkdir(parents=True)
     manager.touch()
     monkeypatch.setattr(sdk_installer, "_ensure_jdk", lambda home: home / "jdk-17")

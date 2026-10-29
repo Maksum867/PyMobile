@@ -29,6 +29,7 @@ _ALWAYS_EXCLUDED_DIRS = frozenset(
         ".pytest_cache",
         ".ruff_cache",
         ".venv",
+        ".pymobile",
         "venv",
         "node_modules",
     }

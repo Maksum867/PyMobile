@@ -173,6 +173,8 @@ class ProjectConfig:
     #: the collector only promised "common types", and nothing said so. List
     #: them here — ``asset_suffixes = [".csv", ".db"]`` — and they ship.
     asset_suffixes: list[str] = field(default_factory=list)
+    #: Pure-Python PyPI distributions bundled into the APK (including transitive dependencies).
+    dependencies: list[str] = field(default_factory=list)
     #: Replace :data:`DEFAULT_EXCLUDE` instead of adding to it. Only for
     #: projects that know exactly what they are doing — most users want the
     #: defaults (``build/**``, ``.git/**``, tests …) kept.
@@ -214,7 +216,7 @@ class ProjectConfig:
                     setattr(self, bool_field, False)
                 # leave other strings for the type gate in validate()
         # П-01/П-02: normalize list fields defensively.
-        for list_field in ("permissions", "abis", "asset_suffixes"):
+        for list_field in ("permissions", "abis", "asset_suffixes", "dependencies"):
             value = getattr(self, list_field)
             if value is None:
                 setattr(self, list_field, [])
@@ -280,17 +282,17 @@ class ProjectConfig:
                     f"`{bool_field}` must be a boolean (true/false without quotes), "
                     f"got {type(value).__name__}: {value!r}",
                     hint=f"Write `{bool_field} = false` (no quotes) — "
-                    f"a quoted string like \"no\" or \"pyc\" is truthy and would "
+                    f'a quoted string like "no" or "pyc" is truthy and would '
                     f"silently enable the flag.",
                 )
 
-        for list_field in ("permissions", "exclude", "abis", "asset_suffixes"):
+        for list_field in ("permissions", "exclude", "abis", "asset_suffixes", "dependencies"):
             value = getattr(self, list_field)
             if isinstance(value, str):
                 raise ConfigError(
                     f"`{list_field}` must be a list, not a string: got {value!r}",
                     hint=f"A string here would be iterated character-by-character. "
-                    f"Write a TOML list, e.g. `{list_field} = [\"{value}\"]`.",
+                    f'Write a TOML list, e.g. `{list_field} = ["{value}"]`.',
                 )
             if not isinstance(value, (list, tuple)):
                 raise ConfigError(
@@ -303,6 +305,21 @@ class ProjectConfig:
                         f"`{list_field}` entries must be strings; "
                         f"got {type(item).__name__}: {item!r}",
                     )
+
+        for requirement in self.dependencies:
+            if (
+                not requirement.strip()
+                or requirement.startswith("-")
+                or "/" in requirement
+                or "\\" in requirement
+                or "@" in requirement
+                or "\n" in requirement
+                or "\r" in requirement
+            ):
+                raise ConfigError(
+                    f"Unsupported dependency {requirement!r}",
+                    hint="Use PyPI names and version constraints, not pip options, URLs or paths.",
+                )
 
         # ---- value checks -------------------------------------------------
         if not self.name.strip():
@@ -484,7 +501,25 @@ def load_config(path: str | Path | None = None) -> ProjectConfig:
         if not isinstance(section, dict):
             raise ConfigError(f"The [app] table in {candidate} must be a table")
 
-    return ProjectConfig.from_dict(dict(section), root=candidate.parent)
+    values = dict(section)
+    # [project].dependencies is a convenient alternative to [app].dependencies.
+    # Explicit [] opts out even when a pyproject exists.
+    if "dependencies" not in values:
+        project = raw.get("project", {}) if candidate.name == "pyproject.toml" else {}
+        if candidate.name != "pyproject.toml":
+            pyproject = candidate.parent / "pyproject.toml"
+            if pyproject.is_file():
+                try:
+                    project = tomllib.loads(pyproject.read_text(encoding="utf-8")).get(
+                        "project", {}
+                    )
+                except (OSError, tomllib.TOMLDecodeError) as exc:
+                    raise ConfigError(
+                        f"Cannot read project dependencies from {pyproject}: {exc}"
+                    ) from exc
+        if isinstance(project, dict) and "dependencies" in project:
+            values["dependencies"] = project["dependencies"]
+    return ProjectConfig.from_dict(values, root=candidate.parent)
 
 
 def _has_tool_table(pyproject: Path) -> bool:

@@ -32,6 +32,7 @@ from ..log import get_logger
 from .backends.native import DEBUG_KEY_ALIAS, NativeBackend, framework_asset_files
 from .cache import BuildCache, fingerprint_files
 from .collector import _ALWAYS_EXCLUDED_DIRS, SourceSet, collect_sources
+from .dependencies import prepare_dependencies
 from .icon import IconSet, prepare_icons
 from .manifest import build_manifest
 from .packager import ApkPackager, PackageResult
@@ -765,17 +766,53 @@ class BuildPipeline:
         self._check_requested_permissions(sources)
         self._check_widget_types(sources)
         self._check_notifications(sources)
+        dependencies = (
+            self._stage("dependencies", lambda: prepare_dependencies(self.config))
+            if self.config.dependencies
+            else []
+        )
+        project_names = {path.relative_to(sources.root).as_posix() for path in sources.files}
+        dependency_names = {name for name, _ in dependencies}
+        collisions = project_names & dependency_names
+        # A package directory and a module of the same name also shadow each
+        # other even when none of their individual file names coincide.
+        project_imports = {
+            name.split("/", 1)[0].removesuffix(".py")
+            for name in project_names
+            if name.endswith(".py")
+        }
+        dependency_imports = {
+            name.split("/", 1)[0].removesuffix(".py")
+            for name in dependency_names
+            if name.endswith(".py")
+        }
+        collisions.update(project_imports & dependency_imports)
+        if any(name == "pymobile" or name.startswith("pymobile/") for name in dependency_names):
+            collisions.add("pymobile (framework)")
+        if collisions:
+            raise PyMobileError(
+                "Dependency files conflict with app/framework: "
+                + ", ".join(sorted(collisions)[:10])
+            )
         if self.check_startup:
             from .startup import check_startup
 
-            self._stage("startup", lambda: check_startup(self.config))
+            self._stage(
+                "startup",
+                lambda: check_startup(
+                    self.config,
+                    dependencies_dir=(self.config.root / ".pymobile" / "dependencies")
+                    if dependencies
+                    else None,
+                ),
+            )
 
         output_dir = self.config.output_path
         output_dir.mkdir(parents=True, exist_ok=True)
         apk_path = output_dir / self.config.apk_name
 
         cache = BuildCache(output_dir)
-        fingerprint = self._fingerprint(sources)
+        fingerprint = self._fingerprint(sources, dependencies)
         if self.use_cache:
             hit = cache.entry(fingerprint)
             if hit is not None and self._cache_hit_is_usable(hit):
@@ -801,6 +838,7 @@ class BuildPipeline:
         with tempfile.TemporaryDirectory(prefix="pymobile-build-") as temporary:
             workdir = Path(temporary)
             entries = self._stage("compile", lambda: self._compile_sources(sources, workdir))
+            entries.extend(dependencies)
             icons: IconSet = self._stage("icons", lambda: self._icons(workdir))
 
             if self.native:
@@ -988,7 +1026,9 @@ class BuildPipeline:
             mode += "+prebuilt-java"
         return mode
 
-    def _fingerprint(self, sources: SourceSet) -> str:
+    def _fingerprint(
+        self, sources: SourceSet, dependencies: list[tuple[str, Path]] | None = None
+    ) -> str:
         """Hash of every input that can change the artifact.
 
         The configuration part uses blake2b rather than the built-in ``hash``:
@@ -1007,6 +1047,7 @@ class BuildPipeline:
         renderer) kept answering "up to date" with an APK built by the old one.
         """
         paths = list(sources.files) + _framework_inputs()
+        paths.extend(path for _, path in (dependencies or []))
         project_java = self.config.root / "java"
         if project_java.is_dir():
             paths.extend(path for path in project_java.rglob("*.java") if path.is_file())
