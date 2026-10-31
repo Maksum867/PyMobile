@@ -132,40 +132,54 @@ class ProjectConfig:
     """Everything the compiler needs to build an APK."""
 
     # -- identity ----------------------------------------------------------
+    #: Name shown under the icon and in the window title.
     name: str = "PyMobile App"
+    #: Unique reverse-DNS id, for example com.example.myapp. Changing it makes a new app.
     package: str = "org.pymobile.app"
+    #: Human-readable version shown to users, for example 1.2.0.
     version: str = "0.1.0"
+    #: Whole number that must grow with each release, so Android can update the app.
     version_code: int = 1
 
     # -- entry point -------------------------------------------------------
+    #: File that starts the app, relative to source_dir.
     entrypoint: str = "main.py"
+    #: Folder with the app sources, relative to pymobile.toml.
     source_dir: str = "."
 
     # -- android -----------------------------------------------------------
     #: Projects created before 0.8.0 say ``min_sdk = 21``; that still loads,
     #: but the APK declares :attr:`effective_min_sdk` and the build warns.
     min_sdk: int = RUNTIME_MIN_SDK
+    #: Android API level the app is tested against.
     target_sdk: int = 35
+    #: Screen orientation, for example "portrait" or "landscape".
     orientation: str = "portrait"
+    #: Android permissions the app asks for, for example android.permission.CAMERA.
     permissions: list[str] = field(default_factory=lambda: ["android.permission.INTERNET"])
+    #: Path to a square PNG (512x512 recommended). Leave it out for the default icon.
     icon: str | None = None
     #: Let Android back up the app's private data (cloud backup, adb backup).
     #: Off by default: the store often holds tokens and personal data.
     allow_backup: bool = False
 
     # -- build -------------------------------------------------------------
+    #: CPU architectures to build for: arm64-v8a for phones, x86_64 for the emulator.
     abis: list[str] = field(default_factory=lambda: ["arm64-v8a"])
     #: Where the APK lands. ``apk`` rather than ``build`` on purpose: ``build/``
     #: is in nearly every ``.gitignore`` and CI artefact rule, so a finished APK
     #: there looks like it vanished. ``build`` is still honoured when a project
     #: asks for it explicitly.
     output_dir: str = "apk"
+    #: Ship bytecode instead of sources. Needs a Python 3.14 host.
     optimize: bool = False
+    #: Remove docstrings and asserts from the shipped code.
     strip_debug: bool = True
     #: Drop desktop-only stdlib packages (pydoc, unittest, venv, ...) — ~1.7 MB.
     minimal_stdlib: bool = False
     #: Leave OpenSSL, ssl.py and the CA bundle out — ~4 MB, no HTTPS.
     no_ssl: bool = False
+    #: Glob patterns of files that are not packaged into the APK.
     exclude: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDE))
     #: Extra asset extensions to package on top of the defaults (``.py``,
     #: ``.json``, ``.txt``, ``.toml``, images, fonts). A ``data.csv`` or a

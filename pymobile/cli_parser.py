@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Callable, Mapping
 
 from . import __version__
+from .compiler.scaffold import TEMPLATES
 from .core.config import CONFIG_FILENAME
 
 
@@ -100,10 +101,27 @@ def build_parser(
     init.add_argument("-n", "--name", help="application name")
     init.add_argument("-p", "--package", help="package id, e.g. com.example.app")
     init.add_argument("-f", "--force", action="store_true", help="write into a non-empty directory")
+    init.add_argument(
+        "--list-templates",
+        action="store_true",
+        help="list the starter templates and exit",
+    )
+    init.add_argument(
+        "-t",
+        "--template",
+        choices=tuple(TEMPLATES),
+        default=None,  # asked interactively, "basic" otherwise
+        help="starter app: basic (counter), list (add/delete rows) or form (text input + save)",
+    )
     init.set_defaults(func=commands["init"])
 
     build = sub.add_parser("build", help="compile the project into an APK", parents=[common])
     build.add_argument("-o", "--output", help="output directory")
+    build.add_argument(
+        "--no-check",
+        action="store_true",
+        help="skip the pre-build project check (see `pymobile check`)",
+    )
     build.add_argument("-i", "--icon", help="path to a custom launcher icon")
     build.add_argument(
         "--native",
@@ -331,10 +349,16 @@ def build_parser(
     widget_actions = widget_group.add_subparsers(dest="widget_action", required=True)
     widget_add = widget_actions.add_parser(
         "add",
-        help="generate a Python widget and project-local Android renderer",
+        help="generate a Python widget and a project-local Android renderer (--python: no Java)",
         parents=[common],
     )
     widget_add.add_argument("type_name", metavar="TYPE", help="custom type name, e.g. BarChart")
+    widget_add.add_argument(
+        "--python",
+        dest="python_only",
+        action="store_true",
+        help="Python only: draw with Canvas, no Java renderer or java/ overlay needed",
+    )
     widget_add.add_argument(
         "-p",
         "--prop",
@@ -450,6 +474,29 @@ def build_parser(
         "--strict", action="store_true", help="fail if native build prerequisites are missing"
     )
     doctor.set_defaults(func=commands["doctor"])
+    schema = sub.add_parser(
+        "schema",
+        help="print or write the JSON Schema for pymobile.toml",
+        parents=[common],
+    )
+    schema.add_argument("-o", "--output", metavar="PATH", help="write to PATH instead of stdout")
+    schema.set_defaults(func=commands["schema"])
+    completion = sub.add_parser(
+        "completion",
+        help="print the tab-completion script for a shell",
+        parents=[common],
+    )
+    completion.add_argument("shell", choices=("bash", "powershell"))
+    completion.set_defaults(func=commands["completion"])
+    complete = sub.add_parser("_complete", help=argparse.SUPPRESS)
+    complete.add_argument("line", nargs="?", default="")
+    complete.set_defaults(func=commands["_complete"])
+    check = sub.add_parser(
+        "check",
+        help="check the project for mistakes that would stop a build",
+        parents=[common],
+    )
+    check.set_defaults(func=commands["check"])
 
     deps = sub.add_parser("deps", help="check third-party app packages", parents=[common])
     deps_actions = deps.add_subparsers(dest="deps_action", required=True)

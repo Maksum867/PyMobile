@@ -584,3 +584,87 @@ def scaffold_widget_sources(type_name: str, props: Sequence[WidgetProp] = ()) ->
     if branch.type_name != type_name:  # pragma: no cover - defensive
         raise AssertionError("generated Python and Java widget names diverged")
     return python, java
+
+
+#: Prop names a Python-only widget cannot use: they are its own constructor arguments.
+_RESERVED_PYTHON_PROPS = frozenset({"width", "height", "kwargs", "style", "self"})
+
+
+def python_only_widget_source(type_name: str, props: Sequence[WidgetProp] = ()) -> str:
+    """Return a Python widget that draws itself with ``Canvas`` — no Java renderer.
+
+    Every renderer already draws a ``Canvas`` (phone, browser, desktop window,
+    snapshots), so the generated class is a ``Canvas`` subclass: the serialised
+    node is ``type: "Canvas"`` and needs no ``register_widget_type`` and no
+    ``java/`` overlay.
+    """
+    reserved = [prop.name for prop in props if prop.name in _RESERVED_PYTHON_PROPS]
+    if reserved:
+        raise ConfigError(
+            "widget prop name(s) " + ", ".join(reserved) + " clash with the Canvas arguments",
+            hint="Rename them, for example size_text or label.",
+        )
+    annotations = {
+        "str": "str",
+        "int": "int",
+        "float": "float",
+        "bool": "bool",
+        "list": "Sequence[object]",
+    }
+    names = [prop.name for prop in props]
+    parameters = "".join(
+        f"        {prop.name}: {annotations[prop.kind]} = {prop.default},\n" for prop in props
+    )
+    helper_args = "".join(f", {name}" for name in names)
+    helper_params = "".join(
+        f",\n    {prop.name}: {annotations[prop.kind]}" for prop in props
+    )
+    needs_sequence = any(prop.kind == "list" for prop in props)
+    shapes = "".join(
+        f'        Shape("text", x=12, y={24 + 24 * index}, '
+        f'text=f"{prop.name}: {{{f"len({prop.name})" if prop.kind == "list" else prop.name}}}", '
+        "font_size=14),\n"
+        for index, prop in enumerate(props)
+    )
+    attributes = "".join(
+        f"        self.{prop.name} = list({prop.name})\n"
+        if prop.kind == "list"
+        else f"        self.{prop.name} = {prop.name}\n"
+        for prop in props
+    )
+    class_name = type_name
+    sequence_import = "from collections.abc import Sequence\n" if needs_sequence else ""
+    return (
+        '"""Python-only PyMobile widget: a Canvas drawn in Python, no Java renderer.\n\n'
+        "Every renderer draws a Canvas, so this widget works on the phone, in the browser\n"
+        "preview and in the desktop window without native code. Edit _shapes() to change\n"
+        'the drawing; the constructor arguments are its props."""\n\n'
+        f"{sequence_import}"
+        "from typing import Any\n\n"
+        "from pymobile import Canvas, Rect, Shape\n\n\n"
+        f"def _shapes(\n    width: int,\n    height: int{helper_params},\n) -> list[Any]:\n"
+        '    """The drawing for one state. The props are its inputs."""\n'
+        "    return [\n"
+        '        Rect(0, 0, width, height, color="#F5F5F5"),\n'
+        f"{shapes}"
+        "    ]\n\n\n"
+        f"class {class_name}(Canvas):\n"
+        f'    """A custom widget that draws itself with a Canvas (no Java needed).\n\n'
+        "    Props are fixed when the widget is built: build a new one in build() to show\n"
+        '    new data."""\n\n'
+        "    def __init__(\n"
+        "        self,\n"
+        f"{parameters}"
+        "        *,\n"
+        "        width: int = 320,\n"
+        "        height: int = 120,\n"
+        "        **kwargs: Any,\n"
+        "    ) -> None:\n"
+        f"        super().__init__(\n"
+        f"            *_shapes(width, height{helper_args}),\n"
+        "            width=width,\n"
+        "            height=height,\n"
+        "            **kwargs,\n"
+        "        )\n"
+        f"{attributes}"
+    )

@@ -3,6 +3,40 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.11.0] — 2026-10-31
+
+### Added
+
+- **Starter templates for `pymobile init`.** `-t basic|list|form` creates a
+  counter, a list you add and delete rows in, or a text-input form.
+  `init --list-templates` prints the choices. In a terminal, `init` without
+  `-t` asks which template to use; scripts and CI never get a prompt and use
+  `basic`.
+- **`pymobile check`.** Validates `main.py` and `pymobile.toml` in one command
+  and exits 1 on a problem, printing `file:line` and a hint. `build --native`
+  runs the same check before the Android steps; `--no-check` skips it.
+- **`pymobile schema`.** Prints the JSON Schema for `pymobile.toml` (`-o PATH`
+  writes it to a file). `init` writes `pymobile.schema.json` and a `#:schema`
+  line, so editors with TOML schema support check keys and values as you type.
+  The schema covers every key of `pymobile.toml`; `main.py` is checked by the
+  package's type hints.
+- **Tab completion.** `pymobile completion bash|powershell` prints a completion
+  script that calls the installed `pymobile`, so commands, options and choices
+  stay current after an upgrade.
+- **Python-only custom widgets.** `pymobile widget add TYPE --python` writes
+  one Python file: a `Canvas` subclass that every renderer already draws. No
+  Java renderer or `java/` overlay is needed. It cannot receive taps and its
+  props are fixed when it is built; prop names `width`, `height`, `kwargs`,
+  `style` and `self` are refused. Native views still need the Java renderer.
+
+### Changed
+
+- `pymobile widget add` without `--python` is unchanged: it still writes the
+  Python widget and the Java renderer.
+- The `README` documents the commands above in the CLI reference, under
+  *Starter templates*, *Check before you build*, *Editor support* and
+  *Python-only widgets*.
+
 ## [0.10.2] — 2026-10-29
 
 ### Added

@@ -492,7 +492,13 @@ class TestScaffold:
         target = tmp_path / "myapp"
         result = create_project(target, "My App")
         names = {path.name for path in result.files}
-        assert names == {"main.py", "pymobile.toml", "README.md", ".gitignore"}
+        assert names == {
+            "main.py",
+            "pymobile.toml",
+            "README.md",
+            ".gitignore",
+            "pymobile.schema.json",
+        }
 
     def test_placeholders_substituted(self, tmp_path: Path) -> None:
         create_project(tmp_path / "app", "Cool App", package="com.cool.app")

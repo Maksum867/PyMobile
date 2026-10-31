@@ -30,7 +30,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.10.2`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.11.0`) and read the
 > changelog before upgrading. What may change, and how much notice you get, is
 > written down in the
 > [versioning and deprecation policy](#versioning-and-deprecation-policy). Bug
@@ -81,6 +81,8 @@ the JDK for you.
 ## Table of contents
 
 - [Why PyMobile](#why-pymobile)
+- [Build diagnostics and APK size](#build-diagnostics-and-apk-size)
+- [Third-party Python packages (experimental)](#third-party-python-packages-experimental)
 - [Installation](#installation)
 - [Your first app](#your-first-app)
 - [How it works](#how-it-works)
@@ -99,8 +101,10 @@ the JDK for you.
 - [Async HTTP](#async-http)
 - [Input validation](#input-validation)
 - [Plugins](#plugins)
+- [Reacting to events](#reacting-to-events)
 - [Notifications](#notifications)
 - [Vibration](#vibration)
+- [Files, audio, the clipboard and sharing](#files-audio-the-clipboard-and-sharing)
 - [Permissions](#permissions)
 - [HTTP requests](#http-requests)
 - [Languages](#languages)
@@ -121,6 +125,8 @@ the JDK for you.
 - [Versioning and deprecation policy](#versioning-and-deprecation-policy)
 - [FAQ](#faq)
 - [Contributing](#contributing)
+- [Documentation](#documentation)
+- [License](#license)
 
 ---
 
@@ -271,6 +277,7 @@ pymobile build --native     # produce the APK
 myapp/
 ├── main.py           # your application
 ├── pymobile.toml     # configuration
+├── pymobile.schema.json  # editor schema for pymobile.toml
 ├── README.md
 ├── .gitignore
 └── assets/           # images, fonts, data files
@@ -2681,7 +2688,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.10.2", "platform": "android",
+# {"framework_version": "0.11.0", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 
@@ -3095,10 +3102,13 @@ end the session.
 
 | Command | Description |
 | --- | --- |
-| `pymobile init [dir]` | create a project (`-n` name, `-p` package, `-f` force) |
+| `pymobile init [dir]` | create a project (`-n` name, `-p` package, `-t basic\|list\|form`, `-f` force, `--list-templates`) |
+| `pymobile check` | check `main.py` and `pymobile.toml` before a build; prints `file:line` for each problem |
+| `pymobile schema` | print the JSON Schema for `pymobile.toml` (`-o PATH` writes it to a file) |
+| `pymobile completion bash\|powershell` | print a tab-completion script for your shell |
 | `pymobile setup-sdk` | install the Android toolchain (`--with-ndk`, `--with-emulator`, `--path`) |
 | `pymobile emulator start` | launch/create the optional local x86_64 AVD (`create`, `list`, `--sdk`) |
-| `pymobile build --native` | validate startup and build a signed APK (`--minimal-stdlib`, `--no-ssl`, `--abi x86_64`; explicit `--skip-startup-check` bypass) |
+| `pymobile build --native` | run `check`, validate startup and build a signed APK (`--minimal-stdlib`, `--no-ssl`, `--abi x86_64`, `--no-check`; explicit `--skip-startup-check` bypass) |
 | `pymobile build --check-startup` | also validate startup when producing a structural, non-installable package |
 | `pymobile install [APK]` | install an APK using `adb` (`--abi`, `--device`, `--sdk`) |
 | `pymobile run` | run the app on your machine (`--gui` window, `--web` browser) |
@@ -3106,7 +3116,7 @@ end the session.
 | `pymobile watch` | re-render on every save (`--png`, `--text`, `--ids`, `--interval`) |
 | `pymobile preview` | draw a screen as a picture (`--png`, `--size`, `--theme`, `--text`, `--ids`) |
 | `pymobile check-ui` | static accessibility/layout/contrast audit (`--width`, `--min-touch-target`, `--theme`, `--strict`, `--json`) |
-| `pymobile widget add TYPE` | scaffold a project-local Python widget and auto-compiled Java renderer (`-p title -p value:int`) |
+| `pymobile widget add TYPE` | scaffold a project-local Python widget and auto-compiled Java renderer (`-p title -p value:int`); `--python` writes a Python-only widget that draws with `Canvas` |
 | `pymobile widget-java TYPE` | print the shared `ViewBuilder.java` branch guide (`-p title -p value:int`, `--out FILE`; framework contributors) |
 | `pymobile info` | show the resolved configuration (`--json`) |
 | `pymobile doctor` | check environment and project health |
@@ -3119,6 +3129,66 @@ see [Desktop preview](#desktop-preview).
 
 Global flags `-v` (verbose) and `-c PATH` (project directory) work both before
 and after the sub-command.
+
+### Starter templates
+
+`pymobile init` offers three starter apps. Pick one with `-t`, or choose
+interactively when you run `init` in a terminal:
+
+```bash
+pymobile init myapp -t list          # add and delete rows
+pymobile init myapp --list-templates # print the choices and exit
+```
+
+| Template | What it shows |
+| --- | --- |
+| `basic` (default) | a counter with one button |
+| `list` | a `List` you add rows to and delete them from |
+| `form` | a `TextInput` and a save button |
+
+Without a terminal (CI, scripts) `init` never prompts; it uses `basic` unless
+you pass `-t`.
+
+### Check before you build
+
+```bash
+pymobile check
+```
+
+`check` validates `main.py` and `pymobile.toml` in one command and exits with
+1 when it finds a problem. Each problem is printed with its file and line:
+
+```
+pymobile.toml:52: error: unknown configuration key 'bogus'
+  hint: valid keys: abis, allow_backup, ...
+```
+
+`pymobile build --native` runs the same check first and stops before the slow
+Android steps. Pass `--no-check` to skip it.
+
+### Editor support: schema and tab completion
+
+`init` writes `pymobile.schema.json` and adds a `#:schema` line to the top of
+`pymobile.toml`. Editors that understand that comment (VS Code with the Even Better TOML
+extension) then check keys and values as you type. Regenerate the file
+after an upgrade with `pymobile schema -o pymobile.schema.json`. The schema covers
+the whole `pymobile.toml`; `main.py` is checked by the Python type hints of the
+`pymobile` package and `py.typed` instead.
+
+Tab completion covers commands, options and their choices:
+
+```bash
+# bash: add to ~/.bashrc
+eval "$(pymobile completion bash)"
+```
+
+```powershell
+# PowerShell: add to $PROFILE
+pymobile completion powershell | Out-String | Invoke-Expression
+```
+
+The completion script calls the installed `pymobile`, so it stays correct after
+an upgrade.
 
 ---
 
@@ -3135,6 +3205,31 @@ and `java/org/pymobile/app/widgets/BarChartRenderer.java` (a starter Android
 renderer). Use it from Python with `from widgets.bar_chart import BarChart`.
 The Java starter displays its props in a labelled `TextView`; replace its TODO
 with the actual Android view and implement its `update()` method if needed.
+
+### Python-only widgets
+
+If the widget only draws shapes or text, you do not need Java. Add `--python`:
+
+```bash
+pymobile widget add Gauge --python -p title -p value:int
+```
+
+This creates `widgets/gauge.py` only. The class is a `Canvas` subclass, so every
+renderer (phone, browser, desktop window, snapshots) already draws it, and the
+build compiles no extra Java. Edit `_shapes()` to change the drawing; the
+constructor arguments are its props:
+
+```python
+from widgets.gauge import Gauge
+
+Gauge("Steps", 7)   # use it in build() like any other widget
+```
+
+A Python-only widget is fixed when it is built: create a new one in `build()` to
+show new data. It cannot receive taps (`on_press`); use a `Button` next to it for
+that. Prop names `width`, `height`, `kwargs`, `style` and `self` are refused
+because they are the `Canvas` arguments. Use the Java renderer only for a native
+Android view such as a map or a camera preview.
 
 Project Java files are compiled automatically into the APK as a local `java/`
 overlay. A normal `pymobile build --native` compiles the framework and overlay
@@ -3206,7 +3301,8 @@ renderers (the Android `ViewBuilder` facade and its collaborators, `web.py`,
   not start there). A `min_sdk = 21` left in an older `pymobile.toml` still
   builds: the APK declares 24 and the build prints a warning.
 - A new custom `type_name` needs an Android renderer. Prefer `pymobile widget
-  add TYPE` for a project-local renderer compiled with your app. A built-in
+  add TYPE` for a project-local renderer compiled with your app, or `widget add
+  TYPE --python` when the widget only draws with `Canvas`. A built-in
   framework widget needs dispatch/capability support and a rebuilt bundled dex.
   Without renderer support a widget is a placeholder on the phone; native build
   checks fail rather than silently accepting missing support. See
@@ -3384,6 +3480,59 @@ Yes, under `[tool.pymobile]`. If both files exist, `pymobile.toml` wins.
 
 **Do I need Android Studio?**
 No. `pymobile setup-sdk` downloads only the command-line tools it needs.
+
+**What is the difference between `pymobile run` and `pymobile build --native`?**
+`run` previews the app on your computer and is meant for development.
+`build --native` produces an installable APK. A build without `--native` is a
+lightweight structural package for quick checks and **does not install on a
+device**. See [Build commands](#build-commands).
+
+**`pymobile` is not found. What now?**
+Use `python -m pymobile` instead, which always works. On Windows this usually
+means pip's Scripts directory is not on `PATH`. See
+[If the `pymobile` command is not found](#if-the-pymobile-command-is-not-found).
+
+**Which Android devices are supported?**
+Android 7.0 (API 24) or newer, on 64-bit ARM phones (`arm64-v8a`). 32-bit
+devices are not supported. There is no iOS backend. See [Limitations](#limitations).
+
+**How do I test on the emulator?**
+Build for the emulator's architecture with `pymobile build --native --abi x86_64`,
+then follow [Running on the emulator](#running-on-the-emulator-x86_64).
+
+**My build fails. Where do I start?**
+Run `pymobile doctor`. It reports missing SDK components, project problems and
+available disk space. Add `--strict` to get a nonzero exit code when a
+prerequisite is missing, which is useful in scripts.
+
+**How do I see what my app prints or logs on the phone?**
+`print()` goes to logcat. For a shorter view, use `pymobile logs` (filtered to
+your app's process) or `pymobile logs --follow` to stream it while the app runs.
+Requires a connected device and `adb`.
+
+**Why does my app freeze while it downloads or loads data?**
+Work on the UI thread blocks rendering. Move slow work to `app.run_job(...)` or
+to `app.http.get_async(...)`, and update the screen from the `.then(...)`
+callback. See [Threads and the UI](#threads-and-the-ui).
+
+**I update the UI from my own thread and nothing happens. Why?**
+Widgets are not thread-safe. Hand the update to the UI with `app.dispatch(fn, *args)`
+from your thread. See [Threads and the UI](#threads-and-the-ui).
+
+**Can I use `requests`, NumPy or other third-party packages?**
+Pure-Python packages can be declared in `pymobile.toml` under `[app]
+dependencies`, as an experimental feature. Packages with native extensions
+(for example NumPy) cannot run on Android. See
+[Third-party Python packages](#third-party-python-packages-experimental).
+
+**Why is my APK so big?**
+The base APK is about 16.6 MB, mostly the Python interpreter and standard library.
+Use `pymobile size <file.apk>` to see where the size goes. The
+[Size](#size) section lists the options to reduce it.
+
+**Do I need Python 3.14 on my computer?**
+No. The framework runs on Python 3.10 and newer. Python 3.14 is the version
+bundled inside the APK, and it is not the one you use to run the framework.
 
 ---
 

@@ -1,0 +1,79 @@
+"""{{name}} — built with PyMobile (list template)."""
+
+from __future__ import annotations
+
+from pymobile import (
+    Align,
+    App,
+    Button,
+    Color,
+    Column,
+    EdgeInsets,
+    Label,
+    List,
+    ListTile,
+    Screen,
+    Style,
+    Widget,
+)
+
+
+class HomeScreen(Screen):
+    """A screen with a list of items the user can add to and remove from."""
+
+    title = "{{name}}"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.items: list[str] = ["First item", "Second item"]
+
+    def build(self) -> Widget:
+        # Build the tree from the state the screen holds now. build() runs again
+        # on a refresh, a theme or a language change (see "Updating the screen").
+        self.items_list = List(
+            item_count=len(self.items),
+            builder=self.row,
+        )
+        return Column(
+            Label(
+                "{{name}}",
+                style=Style(font_size=26, bold=True, color=Color.PRIMARY),
+            ),
+            Label(
+                f"{len(self.items)} item(s). Long-press a row to delete it.",
+                style=Style(color=Color.TEXT_MUTED),
+            ),
+            Button("Add item", on_press=self.on_add),
+            self.items_list,
+            spacing=12,
+            align=Align.CENTER,
+            style=Style(padding=EdgeInsets.all(24), background=Color.BACKGROUND),
+        )
+
+    def row(self, index: int) -> Widget:
+        """Build the row for one item; the list calls this lazily."""
+        return ListTile(
+            title=self.items[index],
+            subtitle=f"Item {index + 1}",
+            on_long_press=lambda: self.on_delete(index),
+        )
+
+    def on_add(self) -> None:
+        """Append a new item and rebuild the list (the number of rows changed)."""
+        self.items.append(f"Item {len(self.items) + 1}")
+        self.refresh()
+
+    def on_delete(self, index: int) -> None:
+        """Remove one item from the list."""
+        del self.items[index]
+        self.refresh()
+
+
+def main() -> None:
+    """Application entry point."""
+    app = App("{{name}}")
+    app.run(HomeScreen())
+
+
+if __name__ == "__main__":
+    main()

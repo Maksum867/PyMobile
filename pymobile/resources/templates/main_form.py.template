@@ -1,0 +1,76 @@
+"""{{name}} — built with PyMobile (form template)."""
+
+from __future__ import annotations
+
+from pymobile import (
+    Align,
+    App,
+    Button,
+    Color,
+    Column,
+    EdgeInsets,
+    Label,
+    Screen,
+    Style,
+    TextInput,
+    Widget,
+)
+
+
+class HomeScreen(Screen):
+    """A screen with a text field and a button that validates and saves it."""
+
+    title = "{{name}}"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.name_value = ""
+        self.saved = ""
+
+    def build(self) -> Widget:
+        # Keep the typed text on the screen (self.name_value), not only inside
+        # the widget, so it survives a refresh (see "Updating the screen").
+        self.result = Label(
+            f"Saved: {self.saved}" if self.saved else "Nothing saved yet.",
+            style=Style(font_size=18, color=Color.TEXT),
+        )
+        return Column(
+            Label(
+                "{{name}}",
+                style=Style(font_size=26, bold=True, color=Color.PRIMARY),
+            ),
+            TextInput(
+                placeholder="Your name",
+                max_length=50,
+                on_change=self.on_change,
+            ),
+            Button("Save", on_press=self.on_save),
+            self.result,
+            spacing=12,
+            align=Align.CENTER,
+            style=Style(padding=EdgeInsets.all(24), background=Color.BACKGROUND),
+        )
+
+    def on_change(self, value: str) -> None:
+        """Remember what the user typed."""
+        self.name_value = value
+
+    def on_save(self) -> None:
+        """Validate the input, then save it or explain what is missing."""
+        text = self.name_value.strip()
+        if not text:
+            self.app.snackbar("Please enter your name.")
+            return
+        self.saved = text
+        self.result.text = f"Saved: {self.saved}"
+        self.app.snackbar(f"Saved {self.saved}!")
+
+
+def main() -> None:
+    """Application entry point."""
+    app = App("{{name}}")
+    app.run(HomeScreen())
+
+
+if __name__ == "__main__":
+    main()

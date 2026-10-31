@@ -274,7 +274,7 @@ class TestHintsMatchTheEnvironment:
         assert "build --native" in out
 
     def test_icons_hint_uses_a_real_package_name(self) -> None:
-        """`pymobile[icons]` was wrong: the distribution is py-mobile."""
+        """`pymobile[icons]` was wrong: the distribution is PyMobile."""
         source = (Path(__file__).resolve().parents[1] / "cli.py").read_text(encoding="utf-8")
         assert "pymobile[icons]" not in source
         assert "pip install Pillow" in source

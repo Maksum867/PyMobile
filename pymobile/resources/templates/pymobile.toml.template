@@ -1,3 +1,4 @@
+#:schema pymobile.schema.json
 # PyMobile project configuration.
 # Full reference: https://github.com/Maksum867/PyMobile
 

@@ -14,6 +14,7 @@ from pathlib import Path
 from ..errors import ConfigError
 from ..log import get_logger
 from ..resources import read_template
+from .schema import SCHEMA_FILENAME, write_config_schema
 
 __all__ = ["create_project", "ScaffoldResult", "slugify", "default_package"]
 
@@ -23,10 +24,24 @@ _PLACEHOLDER = re.compile(r"\{\{(\w+)\}\}")
 
 #: template file -> generated file
 _FILES = {
-    "main.py.template": "main.py",
     "pymobile.toml.template": "pymobile.toml",
     "README.md.template": "README.md",
     "gitignore.template": ".gitignore",
+}
+
+#: One line per ``pymobile init --template`` choice, shown by ``--list-templates``.
+TEMPLATE_DESCRIPTIONS: dict[str, str] = {
+    "basic": "a counter with a button and a notification",
+    "list": "a list you can add rows to and delete them from",
+    "form": "a text field with validation and a save button",
+}
+
+#: ``pymobile init --template`` choice -> the ``main.py`` template it uses.
+#: Every choice shares the other generated files.
+TEMPLATES: dict[str, str] = {
+    "basic": "main.py.template",
+    "list": "main_list.py.template",
+    "form": "main_form.py.template",
 }
 
 
@@ -131,8 +146,17 @@ def create_project(
     *,
     package: str | None = None,
     force: bool = False,
+    template: str = "basic",
 ) -> ScaffoldResult:
-    """Create a runnable PyMobile project in ``directory``."""
+    """Create a runnable PyMobile project in ``directory``.
+
+    ``template`` picks the ``main.py`` starter (see :data:`TEMPLATES`).
+    """
+    if template not in TEMPLATES:
+        raise ConfigError(
+            f"Unknown template {template!r}",
+            hint=f"Choose one of: {', '.join(TEMPLATES)}.",
+        )
     target = Path(directory).resolve()
     if target.exists() and any(target.iterdir()) and not force:
         raise ConfigError(
@@ -144,11 +168,14 @@ def create_project(
     target.mkdir(parents=True, exist_ok=True)
 
     created: list[Path] = []
-    for template_name, output_name in _FILES.items():
+    files = {TEMPLATES[template]: "main.py", **_FILES}
+    for template_name, output_name in files.items():
         content = render(read_template(template_name), values)
         path = target / output_name
         path.write_text(content, encoding="utf-8")
         created.append(path)
+
+    created.append(write_config_schema(target / SCHEMA_FILENAME))
 
     assets = target / "assets"
     assets.mkdir(exist_ok=True)

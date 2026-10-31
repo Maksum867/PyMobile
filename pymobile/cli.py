@@ -24,8 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .cli_tools import cmd_complete, cmd_completion, cmd_init, cmd_schema
 from .compiler.pipeline import BuildPipeline
-from .compiler.scaffold import create_project
 from .core.config import ProjectConfig, load_config
 from .errors import PyMobileError
 from .log import configure, get_logger, supports_color
@@ -94,19 +94,6 @@ def _export_command(name: str, value: object) -> str:
 # ---------------------------------------------------------------------------
 # commands
 # ---------------------------------------------------------------------------
-def cmd_init(args: argparse.Namespace) -> int:
-    """Create a new project."""
-    directory = Path(args.directory).resolve()
-    name = args.name or directory.name.replace("-", " ").replace("_", " ").title()
-    result = create_project(directory, name, package=args.package, force=args.force)
-    _out.ok(f"created project {name!r} in {result.directory}")
-    for path in result.files:
-        _out.field("", path.relative_to(result.directory))
-    print()
-    _out.info(f"cd {result.directory.name} && {_invocation()} build --native")
-    return 0
-
-
 def _warn_if_output_is_ignored(config: ProjectConfig) -> None:
     """Say so when the chosen output directory will never leave the machine.
 
@@ -168,6 +155,18 @@ def cmd_build(args: argparse.Namespace) -> int:
 
     _warn_if_output_is_ignored(config)
     native = getattr(args, "native", False)
+    if native and not getattr(args, "no_check", False) and _has_files(config.root):
+        from .compiler.precheck import check_project, format_finding
+
+        findings = check_project(config.root, run_app=False)
+        if findings:
+            for finding in findings:
+                print(format_finding(finding, config.root))
+            _out.error(
+                f"{len(findings)} problem(s) found; the build was stopped. "
+                "Fix them, or pass --no-check to build anyway."
+            )
+            return 1
     if native:
         _out.info("native build: this may take a few minutes on the first run")
     else:
@@ -589,13 +588,19 @@ def cmd_widget_add(args: argparse.Namespace) -> int:
     """Scaffold a Python widget with an automatically compiled Java renderer."""
     import re
 
-    from .compiler.widgets import parse_props, scaffold_widget_sources
+    from .compiler.widgets import (
+        parse_props,
+        python_only_widget_source,
+        scaffold_widget_sources,
+    )
 
     config = _load(args)
-    python_source, java_source = scaffold_widget_sources(
-        args.type_name,
-        parse_props(args.prop),
-    )
+    props = parse_props(args.prop)
+    python_only = getattr(args, "python_only", False)
+    if python_only:
+        python_source, java_source = python_only_widget_source(args.type_name, props), None
+    else:
+        python_source, java_source = scaffold_widget_sources(args.type_name, props)
     module_name = re.sub(r"(?<!^)(?=[A-Z])", "_", args.type_name).lower()
     python_dir = config.source_path / "widgets"
     python_file = python_dir / f"{module_name}.py"
@@ -609,7 +614,8 @@ def cmd_widget_add(args: argparse.Namespace) -> int:
         / "widgets"
         / f"{args.type_name}Renderer.java"
     )
-    collisions = [path for path in (python_file, java_file) if path.exists()]
+    created = [python_file] if python_only else [python_file, java_file]
+    collisions = [path for path in created if path.exists()]
     if collisions:
         raise PyMobileError(
             "widget files already exist: " + ", ".join(str(path) for path in collisions),
@@ -620,12 +626,16 @@ def cmd_widget_add(args: argparse.Namespace) -> int:
     if not package_init.exists():
         package_init.write_text('"""Project-local PyMobile widgets."""\n', encoding="utf-8")
     python_file.write_text(python_source, encoding="utf-8")
+    _out.field("python", python_file.relative_to(config.root))
+    _out.info(f"import it with: from widgets.{module_name} import {args.type_name}")
+    if python_only or java_source is None:
+        _out.ok(f"created Python widget {args.type_name} (drawn with Canvas, no Java)")
+        _out.info("it works in `pymobile run`, `preview` and `build --native` as-is")
+        return 0
     java_file.parent.mkdir(parents=True, exist_ok=True)
     java_file.write_text(java_source, encoding="utf-8")
     _out.ok(f"created native widget {args.type_name}")
-    _out.field("python", python_file.relative_to(config.root))
     _out.field("renderer", java_file.relative_to(config.root))
-    _out.info(f"import it with: from widgets.{module_name} import {args.type_name}")
     _out.info("then run: pymobile build --native (the java/ overlay is compiled automatically)")
     return 0
 
@@ -771,6 +781,33 @@ def cmd_size(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_check(args: argparse.Namespace) -> int:
+    """Check the project for mistakes that would stop a build, with locations."""
+    from .compiler.precheck import check_project, format_finding
+
+    raw = getattr(args, "config", None) or Path.cwd()
+    root = Path(raw).resolve()
+    if root.is_file():
+        root = root.parent
+    findings = check_project(root)
+    for finding in findings:
+        print(format_finding(finding, root))
+    if findings:
+        _out.error(
+            f"{len(findings)} problem(s) found; fix them before `{_invocation()} build --native`"
+        )
+        return 1
+    _out.ok("project is ready to build")
+    return 0
+
+
+def _has_files(root: Path) -> bool:
+    """A project whose configuration lives on disk (not one passed in by code)."""
+    from .compiler.precheck import has_project_files
+
+    return has_project_files(root)
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Check the environment and configuration."""
     problems = 0
@@ -891,6 +928,10 @@ def build_parser() -> argparse.ArgumentParser:
             "clean": cmd_clean,
             "dev": cmd_dev,
             "doctor": cmd_doctor,
+            "schema": cmd_schema,
+            "completion": cmd_completion,
+            "_complete": cmd_complete,
+            "check": cmd_check,
             "deps_check": cmd_deps_check,
             "logs": cmd_logs,
             "size": cmd_size,
