@@ -99,10 +99,6 @@ the project uses [semantic versioning](https://semver.org/).
   still carries the Python 3.10 `tomllib` import problem (fixed in the source
   via the `tomli` fallback); publishing `0.11.1` is what closes it for
   wheel-only installs.
-- No physical device or emulator was available here: the audio, picker,
-  clipboard/share and recorder fixes are verified on the desktop boundary
-  (stub bridge and a deterministic prepare-window model) and by binary
-  inspection, not by on-device playback.
 
 ## [0.11.0] — 2026-10-31
 
