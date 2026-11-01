@@ -671,13 +671,21 @@ class Slider(Widget):
         self._value = self._normalise(value)
 
     def _normalise(self, value: float) -> float:
-        """Clamp ``value`` to the range and snap to ``step`` (no side effects)."""
+        """Clamp ``value`` to the range and snap to ``step`` (no side effects).
+
+        Both endpoints are inclusive: ``maximum`` stays reachable even when it
+        does not lie on the step grid (``Slider(0, maximum=10, step=3)`` can be
+        set to 10, not just 9) — the same rule RangeSlider and the native
+        renderer already follow.
+        """
         clamped = max(self.minimum, min(float(value), self.maximum))
-        if self.step is not None:
-            steps = round((clamped - self.minimum) / self.step)
-            clamped = self.minimum + steps * self.step
-            clamped = max(self.minimum, min(clamped, self.maximum))
-        return clamped
+        if self.step is None:
+            return clamped
+        if clamped == self.maximum:
+            return clamped
+        steps = round((clamped - self.minimum) / self.step)
+        clamped = self.minimum + steps * self.step
+        return max(self.minimum, min(clamped, self.maximum))
 
     @property
     def value(self) -> float:

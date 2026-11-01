@@ -24,6 +24,7 @@ actually reaches for — a full media-session API is not the point here.
 from __future__ import annotations
 
 import contextlib
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -45,6 +46,13 @@ _log = get_logger("api.audio")
 #: something finer and a long podcast for something coarser.
 DEFAULT_TICK_MS = 100
 
+#: How long the watcher keeps polling a player that never becomes playable —
+#: still preparing (duration unknown, ``is_playing`` False) this whole time.
+#: Bound, not a policy: a source that never prepares must not leave a timer
+#: running for the rest of the app's life, while a slow network file gets
+#: its chance to report position and the end of the stream.
+_PREPARE_TIMEOUT_S = 15.0
+
 
 class AudioPlayer:
     """Play one audio file (asset, ``file://`` URI or ``https://`` URL)."""
@@ -64,6 +72,9 @@ class AudioPlayer:
         "_volume",
         "_muted_volume",
         "_position",
+        "_end_notified",
+        "_saw_playing",
+        "_not_playing_since",
         "duration",
         "loop",
     )
@@ -108,6 +119,14 @@ class AudioPlayer:
         self._muted_volume = 1.0
         self.volume = volume  # validated by the setter
         self._position = 0
+        # End-of-file bookkeeping: ``on_end`` fires exactly once per playback
+        # no matter whether the platform callback or the position watcher
+        # notices the end first.
+        self._end_notified = False
+        # Whether a tick has ever observed the native player running; a tick
+        # that sees "not playing" before that is preparation, not a pause.
+        self._saw_playing = False
+        self._not_playing_since: float | None = None
         #: Length of the file in milliseconds, filled in once it is prepared.
         self.duration = 0
 
@@ -123,6 +142,11 @@ class AudioPlayer:
         handle = self._require_handle()
         if from_ms is not None:
             handle.seek(max(0, int(from_ms)))
+        # A new playback lifecycle: the previous run's end must not suppress
+        # this run's on_end, and the prepare-window bookkeeping restarts.
+        self._end_notified = False
+        self._saw_playing = False
+        self._not_playing_since = None
         handle.play()
         if self._loop:
             handle.set_looping(True)
@@ -145,6 +169,10 @@ class AudioPlayer:
         if isinstance(position_ms, bool) or not isinstance(position_ms, (int, float)):
             raise TypeError("position_ms must be a number")
         target = max(0, int(position_ms))
+        if not self.duration and self._handle is not None:
+            # The cached zero may just mean "not prepared yet" (PM-12).
+            with contextlib.suppress(Exception):
+                self.duration = max(0, int(self._handle.duration()))
         if self.duration:
             target = min(target, self.duration)
         self._require_handle().seek(target)
@@ -244,8 +272,14 @@ class AudioPlayer:
         return app.set_interval
 
     def _start_polling(self) -> None:
-        """Ask the app for a repeating tick that publishes position and calls back."""
-        if self._polling or self._on_tick is None:
+        """Ask the app for a repeating tick that publishes position and calls back.
+
+        Runs for ``on_tick`` *and* for ``on_end``: on the native bridge the
+        platform never invokes the end callback itself — the position watcher
+        is what detects completion — so a player subscribed only to ``on_end``
+        used to get no timer at all and never heard the file finish.
+        """
+        if self._polling or (self._on_tick is None and self._on_end is None):
             return
         schedule = self._schedule()
         if schedule is None:
@@ -255,6 +289,7 @@ class AudioPlayer:
 
     def _stop_polling(self) -> None:
         self._polling = False
+        self._not_playing_since = None
         handle = self._handle_timer
         if handle is not None:
             handle.cancel()
@@ -267,26 +302,55 @@ class AudioPlayer:
         try:
             position = self.position
             playing = self.playing
+            if not self.duration and self._handle is not None:
+                # The platform prepares asynchronously: duration() answers 0
+                # until the file is ready. Refresh instead of caching that
+                # zero for the whole playback and silently losing the end
+                # detection that depends on it (PM-12).
+                with contextlib.suppress(Exception):
+                    self.duration = max(0, int(self._handle.duration()))
         except Exception:  # pragma: no cover - defensive
             self._stop_polling()
             return
         if position or playing:
+            self._not_playing_since = None
             callback = self._on_tick
             if callback is not None:
                 try:
                     callback(position)
                 except Exception:
                     _log.exception("AudioPlayer.on_tick raised")
-        if not playing:
-            self._stop_polling()
-            # ``playing`` also turns False when the user paused: only a position
-            # at (or past) the end means the file finished on its own.
-            finished = self.duration and position >= max(0, self.duration - 2 * self._tick_ms)
-            if finished:
-                self._on_ended()
+        if playing:
+            self._saw_playing = True
+            return
+        # Not playing: finished, paused outside our control, or still
+        # preparing — ``prepareAsync`` reports is_playing False until ready.
+        if self.duration and position >= max(0, self.duration - 2 * self._tick_ms):
+            self._on_ended()
+            return
+        if not self.duration or not self._saw_playing:
+            # Preparation window: keep watching, but never for ever (a source
+            # that never becomes playable must not leak the timer). A real
+            # pause/stop/release already stopped the watcher explicitly.
+            now = time.monotonic()
+            if self._not_playing_since is None:
+                self._not_playing_since = now
+            elif now - self._not_playing_since >= _PREPARE_TIMEOUT_S:
+                _log.warning(
+                    "audio %s did not start playing within %.0f s; stopping the watcher",
+                    self._source, _PREPARE_TIMEOUT_S,
+                )
+                self._stop_polling()
+            return
+        # Was playing a moment ago and is not any more: someone paused or
+        # stopped it outside this object, so the watch is no longer ours.
+        self._stop_polling()
 
     def _on_ended(self) -> None:
-        """Called by the platform when the file reached its end."""
+        """Called once per playback when the file reached its end."""
+        if self._end_notified:
+            return
+        self._end_notified = True
         self._stop_polling()
         callback = self._on_end
         if callback is not None:

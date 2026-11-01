@@ -9,12 +9,18 @@ Values are *copied* on the way in and on the way out: what you get back is
 exactly what a restart would load from disk, and mutating it in place never
 changes the store behind your back — write it back with :meth:`Storage.set`.
 
-A file that cannot be parsed is never silently overwritten: it is moved aside
-to ``<name>.corrupt-<timestamp>`` and a warning is logged before the store
-starts empty.
+A file that cannot be parsed — invalid JSON *or* invalid UTF-8 — is never
+silently overwritten: it is moved aside to ``<name>.corrupt-<timestamp>`` and
+a warning is logged before the store starts empty. A file that merely cannot
+be *read* (permissions, I/O error) is a hard error instead: starting fresh
+there would make the next write destroy the user's data.
 
-The store is meant to be owned by one process (the app). Writes from another
-process are detected and logged, not merged.
+Process guarantees: every ``Storage`` object that resolves to the same file
+in this process shares one in-memory state under one lock — ``namespace``
+is a *view* over that shared state, so a cache namespace can never roll back
+a write another namespace made a moment earlier. Between *processes* nothing
+is merged: a foreign write is detected by file stamp and logged, then
+overwritten by the next save, exactly as before.
 
 The file lives in the app's data directory — on Android inside the app's
 private storage, on the desktop in a per-app folder under the user's data dir
@@ -28,6 +34,7 @@ import os
 import tempfile
 import threading
 import time
+import weakref
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -43,6 +50,66 @@ _log = get_logger("api.storage")
 #: Sentinel for "the caller did not pass a default" (``None`` itself is a
 #: perfectly good default, so it cannot double as the marker).
 _UNSET: Any = object()
+
+#: Load lifecycle of one store file. ``loading`` exists so the migration
+#: path — which re-enters ``_load()`` through ``transaction()`` — does not
+#: recurse; ``failed`` is sticky: a store whose load, validation or migration
+#: failed once never serves (or silently rewrites) data afterwards.
+_UNLOADED = "unloaded"
+_LOADING = "loading"
+_READY = "ready"
+_FAILED = "failed"
+
+
+class _StoreState:
+    """Everything one store *file* shares between its ``Storage`` owners.
+
+    Two ``Storage`` objects on the same file used to keep independent
+    snapshots: whichever wrote last saved *its* copy of the whole file and
+    silently reverted the other's changes (PM-01). One shared data dict under
+    one re-entrant lock removes that class of loss; namespaces are views on
+    top, not separate owners.
+    """
+
+    __slots__ = ("data", "lock", "status", "error", "disk_stamp", "tx_depth",
+                 "tx_dirty", "__weakref__")
+
+    def __init__(self) -> None:
+        self.data: dict[str, Any] = {}
+        self.lock = threading.RLock()
+        self.status = _UNLOADED
+        self.error: BaseException | None = None
+        #: (mtime_ns, size) of the file as we last read or wrote it — used to
+        #: notice another process writing the same store.
+        self.disk_stamp: tuple[int, int] | None = None
+        # Transactions defer the disk write to the end of the outermost block.
+        self.tx_depth = 0
+        self.tx_dirty = False
+
+
+#: Per-process registry of store files. Weak values: once the last owner of a
+#: file is gone the state goes with it, and the next ``Storage`` reloads from
+#: disk — which is the source of truth anyway.
+_BACKENDS: weakref.WeakValueDictionary[Path, _StoreState] = weakref.WeakValueDictionary()
+_BACKENDS_LOCK = threading.Lock()
+
+
+def _canonical(path: Path) -> Path:
+    """Key identifying ``path`` in the backend registry (symlinks collapsed)."""
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):  # pragma: no cover - unreadable parent, symlink loop
+        return Path(os.path.abspath(str(path)))
+
+
+def _state_for(path: Path) -> _StoreState:
+    key = _canonical(path)
+    with _BACKENDS_LOCK:
+        state = _BACKENDS.get(key)
+        if state is None:
+            state = _StoreState()
+            _BACKENDS[key] = state
+        return state
 
 
 DEFAULT_STORE_FILENAME = "pymobile_store.json"
@@ -107,22 +174,29 @@ class Storage:
     Keys must be non-empty strings. ``__getitem__``/``__setitem__`` map to
     :meth:`get`/:meth:`set`; ``in``/``del`` work as expected.
 
+    Several owners of one file are safe *inside one process*: every
+    ``Storage`` object that resolves to the same path shares one state under
+    one lock, and ``namespace="…"`` is a view over that state::
+
+        auth = Storage("state.json", namespace="auth")
+        cache = Storage("state.json", namespace="cache")
+        # writes through one are visible to the other, and clearing the cache
+        # cannot roll back the auth namespace
+
     Individual operations are atomic. A read-modify-write **sequence** written
     by hand is not — use :meth:`update`, :meth:`increment` or the
     :meth:`transaction` context manager when several steps must be one unit.
     A transaction is all-or-nothing: if the block raises, every change made
-    inside it is rolled back and nothing reaches the disk.
+    inside it is rolled back and nothing reaches the disk. Because the state
+    (including the transaction depth) is shared per file, a transaction on one
+    owner also covers writes made through another owner of the same file while
+    it is open — they commit or roll back together.
     """
 
     __slots__ = (
         "_path",
-        "_data",
+        "_state",
         "namespace",
-        "_loaded",
-        "_lock",
-        "_tx_depth",
-        "_tx_dirty",
-        "_disk_stamp",
         "_schema_version",
         "_migrations",
     )
@@ -136,7 +210,6 @@ class Storage:
         migrations: Mapping[int, Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
     ) -> None:
         self._path = _resolve_store_path(path)
-        self._data: dict[str, Any] = {}
         # C-2 (P1): a namespaced store keeps its keys under one prefix inside a
         # shared file, so two domains (settings, cache, a feature module) can
         # live in the same JSON file without the app prefixing names by hand.
@@ -160,16 +233,9 @@ class Storage:
                 raise ValueError(
                     f"migration {version} reaches past schema_version {schema_version}"
                 )
-        self._loaded = False
-        # A re-entrant lock makes every single operation atomic, and backs the
-        # explicit `transaction()` block for multi-step sequences.
-        self._lock = threading.RLock()
-        # Transactions defer the disk write to the end of the outermost block.
-        self._tx_depth = 0
-        self._tx_dirty = False
-        # (mtime_ns, size) of the file as we last read or wrote it — used to
-        # notice another process writing the same store.
-        self._disk_stamp: tuple[int, int] | None = None
+        # Shared per file: the data, the lock, the load lifecycle and the
+        # transaction depth all live on the backend, not on this object.
+        self._state = _state_for(self._path)
 
     # -- lifecycle ---------------------------------------------------------
     @property
@@ -185,21 +251,60 @@ class Storage:
         return (st.st_mtime_ns, st.st_size)
 
     def _load(self) -> None:
-        with self._lock:
-            if self._loaded:
+        """Bring the shared state up to date; caller holds (or takes) the lock.
+
+        The store is marked *ready* only after the file has been read, parsed
+        and migrated successfully. A failure — corrupt file that could not be
+        quarantined, a schema from a newer release, a raising migration — is
+        sticky: the same store keeps raising instead of quietly serving or
+        rewriting the data it was supposed to reject.
+        """
+        state = self._state
+        with state.lock:
+            if state.status == _READY:
                 return
+            if state.status == _FAILED:
+                error = state.error
+                assert error is not None  # invariant: failed => error recorded
+                raise error
+            if state.status == _LOADING:
+                # Re-entered from _migrate() -> transaction() -> _load(): the
+                # data is already in memory, nothing to read again.
+                return
+            state.status = _LOADING
             try:
-                text = self._path.read_text(encoding="utf-8")
-            except FileNotFoundError:
-                self._loaded = True
-                return
-            except OSError as exc:
-                # Unreadable (permissions, I/O error …) is NOT "empty": starting
-                # fresh here would make the next write destroy the user's data.
-                raise ResourceError(
-                    f"Could not read the store {self._path}: {exc}",
-                    hint="Check the file permissions; the store was left untouched.",
-                ) from exc
+                self._load_locked()
+            except BaseException as exc:
+                state.status = _FAILED
+                state.error = exc
+                raise
+            state.status = _READY
+
+    def _load_locked(self) -> None:
+        """Read the file (or initialise a fresh store); caller holds the lock."""
+        state = self._state
+        text: str | None
+        try:
+            text = self._path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            # A brand-new store: initialise it *now*, schema stamp included,
+            # so the first migration runs before any user write instead of
+            # ambush-ing the next launch (PM-03).
+            self._migrate()
+            return
+        except UnicodeDecodeError as exc:
+            # Not valid UTF-8 is corruption, same as unparsable JSON: keep the
+            # original bytes aside instead of failing every launch (PM-08).
+            self._quarantine(exc)
+            text = None
+        except OSError as exc:
+            # Unreadable (permissions, I/O error …) is NOT "empty": starting
+            # fresh here would make the next write destroy the user's data.
+            raise ResourceError(
+                f"Could not read the store {self._path}: {exc}",
+                hint="Check the file permissions; the store was left untouched.",
+            ) from exc
+        if text is not None:
             try:
                 data = json.loads(text)
                 if not isinstance(data, dict):
@@ -207,10 +312,9 @@ class Storage:
             except ValueError as exc:
                 self._quarantine(exc)
                 data = {}
-            self._data.update(data)
-            self._loaded = True
-            self._disk_stamp = self._stamp()
-            self._migrate()
+            state.data.update(data)
+            state.disk_stamp = self._stamp()
+        self._migrate()
 
     def _quarantine(self, reason: Exception) -> None:
         """Move an unparsable store aside instead of letting a write replace it."""
@@ -238,26 +342,28 @@ class Storage:
         the block later raised, which broke the all-or-nothing promise (a
         reader saw the rolled-back value while memory had the original one).
         """
-        with self._lock:
+        with self._state.lock:
             self._load()
             self._persist()
 
     def _persist(self) -> None:
-        """Write now, or at the end of the enclosing transaction; caller holds ``_lock``."""
-        if self._tx_depth:
-            self._tx_dirty = True
+        """Write now, or at the end of the enclosing transaction; caller holds the lock."""
+        state = self._state
+        if state.tx_depth:
+            state.tx_dirty = True
         else:
             self._write_locked()
 
     def _save_locked(self) -> None:
-        """Backward-compatible name used by subclasses/tests; caller holds ``_lock``."""
+        """Backward-compatible name used by subclasses/tests; caller holds the lock."""
         self._persist()
 
     def _write_locked(self) -> None:
-        """Atomically and durably persist the in-memory store; caller holds ``_lock``."""
+        """Atomically and durably persist the in-memory store; caller holds the lock."""
+        state = self._state
         # Serialise first: a bad value must fail before any file is touched.
         try:
-            payload = json.dumps(self._data, ensure_ascii=False, indent=2)
+            payload = json.dumps(state.data, ensure_ascii=False, indent=2)
         except (TypeError, ValueError) as exc:
             raise ResourceError(
                 f"Storage value is not JSON serializable: {exc}",
@@ -265,7 +371,7 @@ class Storage:
                 "Convert sets, tuples, or custom objects to list/dict first.",
             ) from exc
         stamp = self._stamp()
-        if self._disk_stamp is not None and stamp is not None and stamp != self._disk_stamp:
+        if state.disk_stamp is not None and stamp is not None and stamp != state.disk_stamp:
             _log.warning(
                 "store %s was modified by another process since it was loaded; "
                 "those changes are being overwritten", self._path,
@@ -302,7 +408,7 @@ class Storage:
                 os.unlink(temp_name)
             raise
         _fsync_dir(self._path.parent)
-        self._disk_stamp = self._stamp()
+        state.disk_stamp = self._stamp()
 
     # -- schema migrations -------------------------------------------------
     @property
@@ -327,17 +433,23 @@ class Storage:
         }
 
     def _migrate(self) -> None:
-        """Bring the loaded data up to :attr:`schema_version`; caller holds ``_lock``.
+        """Bring the loaded data up to :attr:`schema_version`; caller holds the lock.
 
         The file stores its version under ``__schema_version__`` (inside the
         namespace when there is one). A file from a newer release is refused
         rather than silently downgraded — writing it back would drop whatever
         the newer version added. Every step runs inside one transaction, so a
-        migration that raises leaves the file exactly as it was.
+        migration that raises leaves the file exactly as it was; the failure
+        stays sticky (see :meth:`_load`).
+
+        A store that does not exist yet enters here as schema 0, so the
+        initial migrations run *before* the first user write and the version
+        stamp lands on disk with the data — not at the next launch.
         """
         if not self._migrations and not self._schema_version:
             return
-        stored = self._data.get(self._meta_key("__schema_version__"), 0)
+        state = self._state
+        stored = state.data.get(self._meta_key("__schema_version__"), 0)
         if not isinstance(stored, int) or stored < 0:
             stored = 0
         if stored == self._schema_version:
@@ -348,7 +460,7 @@ class Storage:
                 f"(schema {stored}, this app understands {self._schema_version})",
                 hint="Update the app, or point it at a different file; it was left untouched.",
             )
-        scoped = self._scoped(self._data)
+        scoped = self._scoped(state.data)
         with self.transaction():
             for version in range(stored + 1, self._schema_version + 1):
                 step = self._migrations.get(version)
@@ -371,13 +483,13 @@ class Storage:
                 scoped = dict(result)
             prefix = self._scope_prefix()
             if prefix:
-                for key in [key for key in self._data if key.startswith(prefix)]:
-                    del self._data[key]
-                self._data.update({f"{prefix}{key}": value for key, value in scoped.items()})
+                for key in [key for key in state.data if key.startswith(prefix)]:
+                    del state.data[key]
+                state.data.update({f"{prefix}{key}": value for key, value in scoped.items()})
             else:
-                self._data.clear()
-                self._data.update(scoped)
-            self._data[self._meta_key("__schema_version__")] = self._schema_version
+                state.data.clear()
+                state.data.update(scoped)
+            state.data[self._meta_key("__schema_version__")] = self._schema_version
             self._persist()
         _log.info(
             "storage %s migrated from schema %s to %s",
@@ -397,18 +509,18 @@ class Storage:
         hidden = self._meta_key("__schema_version__")
         return [
             key[len(prefix):] if prefix else key
-            for key in self._data
+            for key in self._state.data
             if (not prefix or key.startswith(prefix)) and key != hidden
         ]
 
     def get(self, key: str, default: Any = None) -> Any:
         """Return the value for ``key``, or ``default`` when absent."""
-        with self._lock:
+        with self._state.lock:
             self._load()
             full = self._full_key(key)
-            if full not in self._data:
+            if full not in self._state.data:
                 return default
-            return _copy(self._data[full])
+            return _copy(self._state.data[full])
 
     def set(self, key: str, value: Any) -> Any:
         """Set ``key`` atomically within this process and persist it.
@@ -421,7 +533,7 @@ class Storage:
         if not isinstance(key, str) or not key:
             raise ValueError("storage key must be a non-empty string")
         stored = _checked_copy(key, value)
-        with self._lock:
+        with self._state.lock:
             self._load()
             self._apply_locked(self._full_key(key), stored)
             return value
@@ -429,21 +541,22 @@ class Storage:
     def _apply_locked(self, key: str, value: Any) -> None:
         """Set ``key`` and persist, restoring the previous state on failure.
 
-        Caller holds ``_lock``. The rollback matters because :meth:`set` used
-        to keep the new value in ``_data`` after the disk write had already
+        Caller holds the lock. The rollback matters because :meth:`set` used
+        to keep the new value in the data after the disk write had already
         raised: the store then *looked* updated, the file was not, and the next
         unrelated write committed the failed change along with it.
         """
-        had = key in self._data
-        previous = self._data.get(key)
-        self._data[key] = value
+        state = self._state
+        had = key in state.data
+        previous = state.data.get(key)
+        state.data[key] = value
         try:
             self._persist()
         except BaseException:
             if had:
-                self._data[key] = previous
+                state.data[key] = previous
             else:
-                self._data.pop(key, None)
+                state.data.pop(key, None)
             raise
 
     def delete(self, key: str) -> bool:
@@ -452,35 +565,35 @@ class Storage:
         Like :meth:`set`, the disk is written before the change is kept: a
         failed write restores the key instead of leaving memory ahead of disk.
         """
-        with self._lock:
+        with self._state.lock:
             self._load()
             full = self._full_key(key)
-            if full not in self._data:
+            if full not in self._state.data:
                 return False
-            previous = self._data.pop(full)
+            previous = self._state.data.pop(full)
             try:
                 self._persist()
             except BaseException:
-                self._data[full] = previous
+                self._state.data[full] = previous
                 raise
             return True
 
     def contains(self, key: str) -> bool:
         """Whether ``key`` is present."""
-        with self._lock:
+        with self._state.lock:
             self._load()
-            return self._full_key(key) in self._data
+            return self._full_key(key) in self._state.data
 
     def exists(self, key: str) -> bool:
         """Whether ``key`` is present (alias of :meth:`contains`).
 
-        Added for discoverability — ``storage.exists(\"key\")`` reads more
-        naturally than ``\"key\" in storage`` for newcomers, though both work::
+        Added for discoverability — ``storage.exists(\\\"key\\\")`` reads more
+        naturally than ``\\\"key\\\" in storage`` for newcomers, though both work::
 
-            if storage.exists(\"token\"):
+            if storage.exists("token"):
                 ...
 
-            if \"token\" in storage:
+            if "token" in storage:
                 ...
         """
         return self.contains(key)
@@ -492,23 +605,24 @@ class Storage:
         domains in the shared file alone; the schema-version stamp survives so
         a cleared store is still recognised as migrated.
         """
-        with self._lock:
+        state = self._state
+        with state.lock:
             self._load()
-            previous = self._data
+            previous = state.data
             if self.namespace:
                 prefix = self._scope_prefix()
                 stamp = self._meta_key("__schema_version__")
                 kept = {key: value for key, value in previous.items() if key == stamp}
-                self._data = kept
-                self._data.update(
+                kept.update(
                     {key: value for key, value in previous.items() if not key.startswith(prefix)}
                 )
+                state.data = kept
             else:
-                self._data = {}
+                state.data = {}
             try:
                 self._persist()
             except BaseException:
-                self._data = previous
+                state.data = previous
                 raise
 
     # -- atomic sequences --------------------------------------------------
@@ -529,25 +643,26 @@ class Storage:
         outermost block finishes; if it raises, every change made inside it is
         rolled back in memory and the file is not touched.
         """
-        with self._lock:
+        state = self._state
+        with state.lock:
             self._load()
-            snapshot = _copy(self._data)
-            outer_dirty = self._tx_dirty
-            self._tx_depth += 1
+            snapshot = _copy(state.data)
+            outer_dirty = state.tx_dirty
+            state.tx_depth += 1
             try:
                 yield self
             except BaseException:
-                self._data = snapshot
-                self._tx_dirty = outer_dirty
+                state.data = snapshot
+                state.tx_dirty = outer_dirty
                 raise
             finally:
-                self._tx_depth -= 1
-            if self._tx_depth == 0 and self._tx_dirty:
-                self._tx_dirty = False
+                state.tx_depth -= 1
+            if state.tx_depth == 0 and state.tx_dirty:
+                state.tx_dirty = False
                 try:
                     self._write_locked()
                 except BaseException:
-                    self._data = snapshot
+                    state.data = snapshot
                     raise
 
     def update(self, key: str, function: Callable[[Any], Any], default: Any = _UNSET) -> Any:
@@ -575,11 +690,11 @@ class Storage:
                 "(store.mutate is the same call under a name that cannot be "
                 "confused with dict.update)"
             )
-        with self._lock:
+        with self._state.lock:
             self._load()
             full = self._full_key(key)
-            if full in self._data:
-                current = _copy(self._data[full])
+            if full in self._state.data:
+                current = _copy(self._state.data[full])
             elif default is _UNSET:
                 raise PyMobileError(
                     f"Storage key {key!r} does not exist",
@@ -638,39 +753,39 @@ class Storage:
     def setdefault(self, key: str, default: Any) -> Any:
         """Return ``key``, storing and returning ``default`` when it is absent."""
         stored = _checked_copy(key, default)
-        with self._lock:
+        with self._state.lock:
             self._load()
             full = self._full_key(key)
-            if full in self._data:
-                return _copy(self._data[full])
+            if full in self._state.data:
+                return _copy(self._state.data[full])
             self._apply_locked(full, stored)
             return _copy(stored)
 
     def keys(self) -> list[str]:
         """All stored keys (this namespace's, without the internal stamp)."""
-        with self._lock:
+        with self._state.lock:
             self._load()
             return self._visible_keys()
 
     def items(self) -> list[tuple[str, Any]]:
         """All ``(key, value)`` pairs of this store."""
-        with self._lock:
+        with self._state.lock:
             self._load()
             return [
                 (
-                    self._full_key(key)[len(self._scope_prefix()) :],
-                    _copy(self._data[self._full_key(key)]),
+                    self._full_key(key)[len(self._scope_prefix()):],
+                    _copy(self._state.data[self._full_key(key)]),
                 )
                 for key in self._visible_keys()
             ]
 
     def __getitem__(self, key: str) -> Any:
-        with self._lock:
+        with self._state.lock:
             self._load()
             full = self._full_key(key)
-            if full not in self._data:
+            if full not in self._state.data:
                 raise KeyError(key)
-            return _copy(self._data[full])
+            return _copy(self._state.data[full])
 
     def __setitem__(self, key: str, value: Any) -> None:
         self.set(key, value)
@@ -689,7 +804,7 @@ class Storage:
         return isinstance(key, str) and self.contains(key)
 
     def __len__(self) -> int:
-        with self._lock:
+        with self._state.lock:
             self._load()
             return len(self._visible_keys())
 

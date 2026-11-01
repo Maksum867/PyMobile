@@ -17,6 +17,7 @@ import subprocess
 import tarfile
 import urllib.request
 import zipfile
+from contextlib import suppress
 from pathlib import Path
 
 from ..errors import PyMobileError
@@ -54,6 +55,27 @@ def _safe_extract_zip(zf: zipfile.ZipFile, destination: Path) -> None:
                 hint="The downloaded SDK archive was rejected; clear ~/.andro and retry.",
             ) from exc
     zf.extractall(destination)
+
+
+def chmod_launchers(tools_bin: Path) -> None:
+    """Make the extensionless command-line scripts executable (Unix).
+
+    ``zipfile`` never restores the members' permission bits, so a fresh
+    extraction leaves ``sdkmanager``/``avdmanager`` with mode 644. Only
+    ``sdkmanager`` used to be repaired, and only on the first download —
+    an ``avdmanager`` without the executable bit made
+    ``pymobile emulator create`` die with "Permission denied" (PM-09), and a
+    cache unpacked by an older release stayed broken for ever. This runs on
+    every install: fresh extraction or existing cache, same repair.
+    """
+    if platform.system() == "Windows":
+        return  # Windows launches .bat files; they need no exec bit
+    if not tools_bin.is_dir():
+        return
+    for entry in tools_bin.iterdir():
+        if entry.is_file() and not entry.suffix:
+            with suppress(OSError):
+                entry.chmod(entry.stat().st_mode | 0o755)
 
 #: Everything needed to build an APK using the prebuilt JNI bridge (~450 MB).
 MINIMAL_PACKAGES = (
@@ -308,8 +330,9 @@ def install_sdk(
         shutil.move(str(staging / "cmdline-tools"), str(destination))
         shutil.rmtree(staging, ignore_errors=True)
         archive.unlink(missing_ok=True)
-        if platform.system() != "Windows":
-            sdkmanager.chmod(0o755)
+    # Fresh extraction *or* an existing cache: every launcher (sdkmanager,
+    # avdmanager, …) must be executable, not just sdkmanager.
+    chmod_launchers(tools_bin)
 
     environment = {
         **os.environ,

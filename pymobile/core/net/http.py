@@ -8,6 +8,7 @@ with backoff, a base URL and default headers.
 
 from __future__ import annotations
 
+import codecs
 import functools
 import hashlib
 import http.client
@@ -213,6 +214,21 @@ class Response:
     encoding: str = "utf-8"
     from_cache: bool = False
 
+    def __post_init__(self) -> None:
+        # A server may send any junk in ``charset=…``. Decoding with a codec
+        # Python does not have used to leak ``LookupError`` out of ``text``/
+        # ``json()``; the contract is replacement decoding, so an unusable
+        # charset falls back to UTF-8 here, once, where every Response —
+        # live or served from the HTTP cache — passes through.
+        try:
+            codecs.lookup(self.encoding)
+        except (LookupError, TypeError):
+            _log.warning(
+                "unknown charset %r for %s; decoding the body as utf-8",
+                self.encoding, self.url,
+            )
+            object.__setattr__(self, "encoding", "utf-8")
+
     @property
     def ok(self) -> bool:
         """``True`` for 2xx status codes."""
@@ -221,7 +237,10 @@ class Response:
     @property
     def text(self) -> str:
         """Body decoded as text (invalid bytes are replaced, never raised)."""
-        return self.content.decode(self.encoding, errors="replace")
+        try:
+            return self.content.decode(self.encoding, errors="replace")
+        except LookupError:  # pragma: no cover - construction already validates
+            return self.content.decode("utf-8", errors="replace")
 
     def json(self) -> Any:
         """Parse the body as JSON."""
@@ -700,7 +719,13 @@ class HttpClient:
                 return self._to_response(raw.geturl(), raw.status, dict(raw.headers), raw.read())
         except urllib.error.HTTPError as exc:  # 4xx/5xx are valid responses here
             payload = exc.read() if hasattr(exc, "read") else b""
-            return self._to_response(url, int(exc.code), dict(exc.headers or {}), payload)
+            # The error describes the *final* request in a redirect chain:
+            # reporting the URL we started from made every
+            # 302 → 404 look like it came from the original path.
+            final_url = exc.geturl() if hasattr(exc, "geturl") else ""
+            return self._to_response(
+                final_url or url, int(exc.code), dict(exc.headers or {}), payload
+            )
         except urllib.error.URLError as exc:
             raise NetworkError(
                 f"Could not reach {url}: {exc.reason}",
@@ -852,13 +877,23 @@ def _decode_cached_body(raw: Any) -> bytes:
 
 
 def _charset_from_headers(headers: Mapping[str, str]) -> str:
-    """The charset named by a ``Content-Type`` header, or ``""``."""
+    """The charset named by a ``Content-Type`` header, or ``""``.
+
+    MIME parameter names are case-insensitive — ``CHARSET=iso-8859-1`` is as
+    valid as ``charset=…`` — values may be quoted, and spaces are allowed
+    around the ``=``. The old implementation *checked* the lower-cased header
+    but then split the original spelling, so any upper-case parameter raised
+    ``IndexError`` out of an otherwise perfectly valid response.
+    """
     for key, value in headers.items():
         if key.lower() != "content-type":
             continue
-        lowered = value.lower()
-        if "charset=" in lowered:
-            return value.split("charset=", 1)[1].split(";")[0].strip()
+        for parameter in str(value).split(";"):
+            name, separator, raw = parameter.partition("=")
+            if separator and name.strip().casefold() == "charset":
+                charset = raw.strip().strip("\"'")
+                if charset:
+                    return charset
     return ""
 
 

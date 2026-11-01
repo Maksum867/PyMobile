@@ -4,8 +4,11 @@ Values are plain ISO strings — ``"2026-09-19"`` and ``"14:30"`` — so they
 serialise to JSON untouched and round-trip through storage as-is. The
 browser preview renders real ``<input type="date">`` / ``<input type="time">``
 controls (the OS picker comes for free); the device opens the native
-``DatePickerDialog`` / ``TimePickerDialog``; invalid or out-of-range values
-raise ``ValueError`` immediately, in the framework's fail-fast style.
+``DatePickerDialog`` / ``TimePickerDialog``. Malformed values raise
+``ValueError`` immediately, in the framework's fail-fast style; a well-formed
+date that merely falls outside the declared ``minimum``/``maximum`` is
+*clamped* to the nearest bound (out-of-range is not an error, it is the
+bounds doing their job).
 """
 
 from __future__ import annotations

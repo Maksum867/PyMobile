@@ -792,7 +792,10 @@ static PyObject *py_next_event(PyObject *self, PyObject *args) {
 static PyObject *py_wake(PyObject *self, PyObject *args) {
     (void)self;
     (void)args;
-    queue_push("", 0, "__wake__", 7, "", 0);
+    /* "__wake__" is 8 bytes: the Python event loop matches the kind exactly,
+     * so a hardcoded 7 queued a truncated "__wake_" that never matched and
+     * left every dispatch()/timer callback stuck behind it. */
+    queue_push("", 0, "__wake__", sizeof("__wake__") - 1, "", 0);
     Py_RETURN_NONE;
 }
 
