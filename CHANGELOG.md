@@ -3,6 +3,107 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.11.1] — 2026-11-01
+
+### Fixed
+
+- **Storage owners no longer overwrite each other.** Every `Storage` object
+  that resolves to the same file now shares one in-process state under one
+  lock, and `namespace=` is a view over it. Previously each object kept its
+  own snapshot of the whole file, so whichever wrote last silently reverted
+  the other namespaces' changes (a cache write could roll back the auth
+  token). Within one process the state is shared; writes from another process
+  are still detected by file stamp and logged, not merged.
+- **A failed Storage load no longer fails open.** A file stamped with a newer
+  schema version, a raising migration, or an unparsable body now blocks every
+  following `get`/`set`/`update`/`delete`/`save` on that store with the same
+  error, instead of quietly serving or rewriting the data it was meant to
+  reject after the first exception was caught.
+- **A new schema store initialises immediately.** `Storage(…,
+  schema_version=…, migrations=…)` on a missing file applies the initial
+  migrations *before* the first user write and stamps the version on disk at
+  once; previously the stamp landed only at the next launch, and the
+  then-due migration could overwrite what the first session had saved.
+- **Invalid UTF-8 is quarantined like invalid JSON.** A store file that is not
+  valid UTF-8 is moved to `<name>.corrupt-<timestamp>` with its bytes intact
+  and the store starts empty, matching the existing parse-corruption
+  recovery. A file that merely cannot be *read* (permissions, I/O error)
+  remains a hard `ResourceError` and is never replaced by an empty store.
+- **`Content-Type` charset parsing.** The `charset` parameter is matched
+  case-insensitively (`CHARSET=iso-8859-1` is as valid as `charset=…`),
+  tolerates quotes and spaces around `=`, and no longer raises `IndexError`
+  out of `Response.text`.
+- **Unknown charsets no longer leak `LookupError`.** A response naming a codec
+  Python does not have is decoded as UTF-8 with replacement (logged once at
+  construction) — live responses and HTTP-cache entries behave the same, and
+  `text`/`json()` keep their "never raise on decoding" contract.
+- **`Response.url` after a redirect to an error.** A 4xx/5xx at the end of a
+  redirect chain reports the URL that actually answered (via
+  `HTTPError.geturl()`), not the URL the request started from.
+- **Slider maximum is reachable off the step grid.** `Slider(0, maximum=10,
+  step=3)` accepts `10`, matching the "both inclusive" docstring,
+  `RangeSlider` and the native renderer; interior values still snap to the
+  nearest step.
+- **DatePicker documentation matches the implementation.** The module
+  docstring promised `ValueError` for out-of-range dates, but the behaviour —
+  clamping them to `minimum`/`maximum` while malformed dates raise — is the
+  intended, tested contract. The docs now say that.
+- **SDK installer repairs every launcher.** `setup-sdk` makes all extensionless
+  command-line-tools scripts executable — including `avdmanager`, which used
+  to keep mode 644 and broke `pymobile emulator create` with "Permission
+  denied" — both on a fresh extraction and against an existing cache.
+- **Native `wake` event length.** The JNI `wake()` queued `"__wake__"` with a
+  hardcoded length of 7 bytes, so the Python event loop's exact
+  `kind == "__wake__"` match never fired and `dispatch()`/timer callbacks
+  queued from background threads stayed stranded. The length now derives from
+  `sizeof`, and both prebuilt bridges were rebuilt (the shipped ARM64 code
+  carried the bug, `mov w3, #7`).
+- **Prebuilt JNI bridges rebuilt for audio, clipboard, pickers, sharing and
+  recording.** The shipped `libpymobile.so` files for arm64-v8a and x86_64
+  exposed 15 of the 36 methods `pymobile_jni.c` declares, so `AudioPlayer`,
+  `app.pick_file()`/`pick_image()`, `app.copy()`/`app.share()` and
+  `AudioRecorder` failed at their constructors on wheel-only builds. Both
+  binaries were rebuilt from the current source with NDK r27c and now expose
+  all 36 methods, with the 16 KB page alignment kept.
+
+### Changed
+
+- **Audio completion watching.** `on_end` now works without `on_tick` (on the
+  native bridge the position watcher *is* the end detector); the player's
+  cached `duration` is refreshed while the platform prepares the file instead
+  of keeping the first read's zero, which used to swallow the end-of-file
+  callback; the watcher survives the `prepareAsync` window instead of stopping
+  on the first "not playing" tick; and `on_end` fires exactly once per
+  `play()` lifecycle. A source that never becomes playable stops being
+  watched after a bounded prepare timeout, so no timer is leaked.
+
+### Added
+
+- **Audit regression tests.** `pymobile/tests/test_handoff_findings.py` pins
+  each of the fixes above with a reproducer, and
+  `pymobile/tests/test_prebuilt_api_audit.py` compares the shipped bridge
+  binaries against the `module_methods` table of `pymobile_jni.c`, failing CI
+  when a prebuilt trails the source — the drift that hid the 21 missing
+  native methods.
+
+### Verification and limitations
+
+- The full suite passed locally after these changes: **1,830 passed, 8
+  skipped**; `ruff check` and `mypy` (strict) are clean. The rebuilt bridges
+  were verified by ELF inspection: correct machine type per ABI, PT_LOAD
+  segments aligned to 0x4000, all 36 method names present, and the wake
+  length shown as `mov w3, #8` (arm64) where the previous binary had
+  `mov w3, #7`. A locally built wheel was unpacked and audited the same way.
+- These changes are not yet a published release; the package version remains
+  `0.11.0` until a release is prepared. The `0.11.0` wheel already on PyPI
+  still carries the Python 3.10 `tomllib` import problem (fixed in the source
+  via the `tomli` fallback); publishing `0.11.1` is what closes it for
+  wheel-only installs.
+- No physical device or emulator was available here: the audio, picker,
+  clipboard/share and recorder fixes are verified on the desktop boundary
+  (stub bridge and a deterministic prepare-window model) and by binary
+  inspection, not by on-device playback.
+
 ## [0.11.0] — 2026-10-31
 
 ### Added

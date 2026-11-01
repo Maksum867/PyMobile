@@ -469,6 +469,11 @@ slider = Slider(value=50, minimum=0, maximum=100,
 (on `Slider`, `Stepper`, `ProgressBar`, `ProgressText` and `RatingBar`); they
 warn and are removed in 1.0.
 
+With `step=`, interior values snap to the nearest step, while both endpoints
+stay reachable even when `maximum` is not on the grid:
+`Slider(0, minimum=0, maximum=10, step=3)` can hold `10`, not just `9` —
+the same rule `RangeSlider` and the native renderer follow.
+
 ### ProgressBar
 
 ```python
@@ -1480,6 +1485,18 @@ cache["page"] = 2
 cache.clear()                        # the auth keys are untouched
 ```
 
+Owners of one file **share a single state inside the process**: writes through
+one object are visible to the other immediately, and clearing the cache can
+never roll back a key another namespace just saved. Between *processes*
+nothing is merged — a foreign write is detected by file stamp and logged.
+
+**Corruption is moved aside, not overwritten.** A store file that cannot be
+parsed — or is not valid UTF-8 — is renamed to `<file>.corrupt-<timestamp>`
+with its bytes intact and a warning is logged before the store starts empty.
+A file that merely cannot be *read* (permissions, I/O error) raises
+`ResourceError` instead: starting fresh there would destroy the user's data
+on the next write.
+
 `Storage.mutate(key, fn)` updates a value in place, so read-modify-write does
 not race with another thread doing the same:
 
@@ -1505,7 +1522,11 @@ Storage(
 Opening a file stamped with an older version runs the migrations it needs and
 stamps the new number; a file *newer* than the code is left untouched and raises
 a `PyMobileError` naming the version, because guessing at a future format is how
-data gets destroyed.
+data gets destroyed. A store that does not exist yet applies the initial
+migrations and stamps the version *before* your first write, so a restart never
+replays them over data you have since saved. A load or migration that fails
+blocks every later operation on that store with the same error instead of
+serving or rewriting the data it rejected.
 
 Data persists across app restarts. On Android it uses the app's private files
 directory; on desktop `~/.pymobile/<package>.json` with the dots replaced by
@@ -1972,6 +1993,11 @@ works on every Android version and a metronome can follow it. `loop=True`,
 `mute()`/`unmute()` and `app.audio(...)` (which wires the player to the app's
 timers) are there too. A `https://` source streams.
 
+`on_end` does not need `on_tick`: the player watches the position for you
+while the platform is still preparing the file (refreshing `duration` as soon
+as it is known) and reports the end exactly once per `play()` — a pause, a
+stop or a release never fake it, and a replay reports the next real end.
+
 ### Recording
 
 ```python
@@ -2083,6 +2109,11 @@ response.content     # raw bytes
 response.headers     # lowercase keys
 response.elapsed     # seconds
 ```
+
+`response.text` decodes with the `charset` from `Content-Type` (the parameter
+is matched case-insensitively); an unknown or invalid charset falls back to
+UTF-8 with replacement instead of raising. After a redirect chain,
+`response.url` is the URL that actually answered — including for 4xx/5xx.
 
 **Error statuses are returned, not raised** — they are valid HTTP responses:
 
@@ -3602,6 +3633,13 @@ $env:JAVA_HOME = "C:\Users\You\.andro\jdk-17.0.13+11"
 $env:PYMOBILE_BUILD_JNI = "1"
 pymobile build --native --clean
 ```
+
+When `pymobile_jni.c` changes, the prebuilt bridges must be rebuilt and
+committed together with it:
+`pytest pymobile/tests/test_prebuilt_api_audit.py` compares the method tables
+of the shipped binaries against the C source and fails when a prebuilt trails
+it (the drift that once left audio, clipboard, pickers, sharing and recording
+out of the wheel).
 
 A change that removes or renames public API goes through the
 [deprecation cycle](#the-deprecation-cycle): keep the old spelling, call
