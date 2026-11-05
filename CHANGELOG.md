@@ -5,6 +5,19 @@ the project uses [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`Banner`** — an inline message with an `info`, `success`, `warning` or
+  `error` look, an optional action button and an optional close button.
+- **`Pagination`** — previous/next buttons and page numbers with `…` for skipped
+  pages; `on_change(page)` reports the page.
+- **`TreeView` and `TreeNode`** — a nested list that opens and closes its
+  branches; `on_select(node)` reports taps on nodes without children.
+- **`ColorPicker`** — a grid of colour swatches with a tick on the chosen one;
+  `on_change(color)` reports the choice.
+
+All four are built from existing widgets, so they need no Android-side change.
+
 ### Fixed
 
 - **Storage read errors are retryable.** A store that could not be read

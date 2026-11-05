@@ -49,18 +49,23 @@ from .list import List, ListTile
 from .navigation import BottomNavigation
 from .patterns import (
     Accordion,
+    Banner,
     Calendar,
     Card,
     Carousel,
+    ColorPicker,
     DateRangePicker,
     EmptyState,
     ExpansionPanel,
     Form,
     FormField,
     MultiSelect,
+    Pagination,
     Skeleton,
     Tabs,
     TabView,
+    TreeNode,
+    TreeView,
 )
 from .pickers import DatePicker, TimePicker
 from .registry import (
@@ -101,6 +106,11 @@ __all__ = [
     "Calendar",
     "DateRangePicker",
     "Carousel",
+    "Banner",
+    "ColorPicker",
+    "Pagination",
+    "TreeNode",
+    "TreeView",
     "Canvas",
     "Circle",
     "Line",

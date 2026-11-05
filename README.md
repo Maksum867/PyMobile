@@ -844,6 +844,68 @@ Things worth knowing:
 - Remote suggestions for `AutoComplete`: run the request in a job and call
   `set_options(...)`; debouncing belongs to the application.
 
+### Banner
+
+A message that stays on the screen until the user acts on it or closes it.
+`kind` picks the colours and icon: `info`, `success`, `warning` or `error`.
+
+```python
+Banner("Your email is not verified yet.", kind="warning",
+       action_label="Resend", on_action=self.resend_email, dismissible=True)
+Banner("Saved to your drafts.", kind="success")
+```
+
+`dismissible=True` adds a close button, and `on_dismiss` runs once when it is
+used. `banner.dismiss()` hides the banner from code; `banner.dismissed` says
+whether it was closed. Use `Snackbar` for a message that disappears by itself.
+
+### Pagination
+
+Previous and next buttons with page numbers. Pages start at 1, and `…` marks
+skipped pages.
+
+```python
+Pagination(total_pages=12, current=1, on_change=self.load_page)
+```
+
+`siblings` sets how many pages show on each side of the current one (default 1).
+`on_change(page)` runs when the page changes, from a tap or from `select(page)`.
+`select` raises `ValueError` for a page outside `1..total_pages`. The arrows
+are disabled at the first and last page. `total_pages` is fixed when the widget
+is created: build a new `Pagination` when the number of pages changes.
+
+### TreeView
+
+A nested list. Build it from `TreeNode` objects:
+
+```python
+from pymobile import TreeNode, TreeView
+
+TreeView(
+    TreeNode("Documents", TreeNode("Reports"), TreeNode("Photos"), expanded=True),
+    TreeNode("Downloads"),
+    on_select=lambda node: print(node.label),
+)
+```
+
+Tapping a node with children opens or closes it. `on_select(node)` runs only for
+nodes without children. `node.expanded` tells whether a node is open, and
+`expanded=True` opens it at the start.
+
+### ColorPicker
+
+A grid of colour swatches. The chosen one shows a tick.
+
+```python
+ColorPicker(["#E53935", "#1E88E5", "#43A047"], value="#1E88E5",
+            on_change=self.set_color)
+```
+
+Each colour must be `#RRGGBB`, and the colours must be different. `on_change`
+and `value` return the colour in upper case; `value` is `None` until something
+is chosen. Each swatch is at least 48 dp, the touch-target size, and the tick
+is drawn in black or white, whichever has more contrast with the swatch.
+
 ### Spacer
 
 ```python
