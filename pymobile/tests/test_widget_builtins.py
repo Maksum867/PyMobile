@@ -125,6 +125,16 @@ class TestBanner:
         banner.dismiss()
         assert seen == ["d"]
 
+    def test_a_dismissed_banner_can_be_shown_and_dismissed_again(self) -> None:
+        seen: list[str] = []
+        banner = Banner("Tip", dismissible=True, on_dismiss=lambda: seen.append("d"))
+        iconbutton_labelled(banner, "Dismiss").on_press()
+        assert banner.dismissed is True
+        banner.show()
+        assert banner.dismissed is False
+        iconbutton_labelled(banner, "Dismiss").on_press()
+        assert seen == ["d", "d"]
+
     def test_no_close_button_unless_dismissible(self) -> None:
         banner = Banner("Tip")
         assert not any(isinstance(n, IconButton) for n in banner.walk())

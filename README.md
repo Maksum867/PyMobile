@@ -855,9 +855,9 @@ Banner("Your email is not verified yet.", kind="warning",
 Banner("Saved to your drafts.", kind="success")
 ```
 
-`dismissible=True` adds a close button, and `on_dismiss` runs once when it is
-used. `banner.dismiss()` hides the banner from code; `banner.dismissed` says
-whether it was closed. Use `Snackbar` for a message that disappears by itself.
+`dismissible=True` adds a close button, and `on_dismiss` runs each time it is
+used. `banner.dismiss()` hides the banner from code, `banner.show()` brings it
+back, and `banner.dismissed` says whether it is hidden. Use `Snackbar` for a message that disappears by itself.
 
 ### Pagination
 
