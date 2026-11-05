@@ -10,13 +10,14 @@ from __future__ import annotations
 import calendar as _calendar
 import datetime as _dt
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
 from typing import Any
 
 from ..formatting import format_date
 from ..validation import Validator
-from .components import Button, Chip, Label, TextInput
+from .components import Button, ButtonVariant, Chip, Label, TextInput
 from .contract import WidgetNode
 from .controls import Icon, IconButton, PageView
 from .drawing import positive_int, theme_color
@@ -38,6 +39,11 @@ __all__ = [
     "Calendar",
     "DateRangePicker",
     "Carousel",
+    "Banner",
+    "Pagination",
+    "TreeNode",
+    "TreeView",
+    "ColorPicker",
 ]
 
 
@@ -1262,3 +1268,379 @@ class Carousel(_Pattern):
     def to_dict(self) -> WidgetNode:
         self._sync()
         return super().to_dict()
+
+
+# --------------------------------------------------------------------------
+# Banner, Pagination, TreeView, ColorPicker — built from existing widgets.
+# --------------------------------------------------------------------------
+
+_HEX_COLOR = re.compile(r"#[0-9A-Fa-f]{6}")
+
+#: kind -> (background, text colour, icon name)
+_BANNER_STYLES: dict[str, tuple[str, str, str]] = {
+    "info": ("#E3F2FD", "#0D47A1", "info"),
+    "success": ("#E8F5E9", "#1B5E20", "check"),
+    "warning": ("#FFF3E0", "#8D4E00", "info"),
+    "error": ("#FDECEA", "#B71C1C", "info"),
+}
+
+
+def _hex_color(value: object, name: str) -> str:
+    """Return ``value`` as an upper-case ``#RRGGBB`` string or raise ValueError."""
+    if not isinstance(value, str) or not _HEX_COLOR.fullmatch(value):
+        raise ValueError(f"{name} must be a '#RRGGBB' hex string, got {value!r}")
+    return value.upper()
+
+
+def _readable_text(background: str) -> str:
+    """Black or white, whichever has the higher WCAG contrast on ``background``.
+
+    The better of the two is always at least 4.5:1 (WCAG AA for normal text).
+    """
+
+    def linear(channel: int) -> float:
+        value = channel / 255
+        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+
+    red, green, blue = (int(background[i : i + 2], 16) for i in (1, 3, 5))
+    luminance = 0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+    on_black = (luminance + 0.05) / 0.05
+    on_white = 1.05 / (luminance + 0.05)
+    return "#000000" if on_black >= on_white else "#FFFFFF"
+
+
+class Banner(_Pattern):
+    """A message that stays on the screen until the user acts on it or closes it.
+
+    ``kind`` picks the colours and icon: ``info``, ``success``, ``warning`` or
+    ``error``. ``action_label`` adds a text button; ``dismissible=True`` adds a
+    close button that hides the banner.
+    """
+
+    __slots__ = ("message", "kind", "on_action", "on_dismiss", "_dismissed")
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str = "info",
+        action_label: str = "",
+        on_action: Callable[[], object] | None = None,
+        dismissible: bool = False,
+        on_dismiss: Callable[[], object] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if not isinstance(message, str) or not message.strip():
+            raise ValueError("Banner message must be a non-empty string")
+        if kind not in _BANNER_STYLES:
+            raise ValueError(f"kind must be one of {', '.join(_BANNER_STYLES)}; got {kind!r}")
+        background, foreground, icon = _BANNER_STYLES[kind]
+        kwargs.setdefault("spacing", 0)
+        super().__init__(**kwargs)
+        self.message, self.kind = message, kind
+        self.on_action, self.on_dismiss = on_action, on_dismiss
+        self._dismissed = False
+        parts: list[Widget] = [
+            Icon(icon, size=20, color=foreground, label=kind, id=f"{self.id}:icon"),
+            Expanded(Label(message, style=Style(color=foreground), id=f"{self.id}:text")),
+        ]
+        if action_label:
+            parts.append(
+                Button(
+                    action_label,
+                    variant=ButtonVariant.TEXT,
+                    on_press=self._act,
+                    enabled=on_action is not None,
+                    style=Style(color=foreground),
+                    id=f"{self.id}:action",
+                )
+            )
+        if dismissible:
+            parts.append(
+                IconButton(
+                    "close",
+                    label="Dismiss",
+                    color=foreground,
+                    on_press=self.dismiss,
+                    id=f"{self.id}:dismiss",
+                )
+            )
+        row = Row(
+            *parts,
+            spacing=8,
+            align="center",
+            style=Style(background=background, corner_radius=8, padding=12),
+            id=f"{self.id}:row",
+        )
+        self._replace((row,), notify=False)
+
+    @property
+    def dismissed(self) -> bool:
+        return self._dismissed
+
+    def _act(self) -> None:
+        if self.enabled and self.on_action is not None and not in_build_scope():
+            self.on_action()
+
+    def dismiss(self) -> None:
+        """Hide the banner. Calling it again does nothing."""
+        if self._dismissed:
+            return
+        self._dismissed = True
+        self.visible = False
+        if self.on_dismiss is not None and not in_build_scope():
+            self.on_dismiss()
+
+
+class Pagination(_Pattern):
+    """Previous/next buttons and page numbers, with ``…`` for skipped pages.
+
+    Pages are numbered from 1. ``on_change(page)`` runs whenever the current
+    page changes, from a tap or from :meth:`select`.
+    """
+
+    __slots__ = ("total_pages", "current", "siblings", "on_change")
+
+    def __init__(
+        self,
+        *,
+        total_pages: int,
+        current: int = 1,
+        siblings: int = 1,
+        on_change: Callable[[int], None] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if isinstance(total_pages, bool) or not isinstance(total_pages, int) or total_pages < 1:
+            raise ValueError("total_pages must be an integer of at least 1")
+        if isinstance(siblings, bool) or not isinstance(siblings, int) or siblings < 0:
+            raise ValueError("siblings must be a non-negative integer")
+        if (
+            isinstance(current, bool)
+            or not isinstance(current, int)
+            or not (1 <= current <= total_pages)
+        ):
+            raise ValueError(f"current must be between 1 and {total_pages}, got {current!r}")
+        super().__init__(**kwargs)
+        self.total_pages, self.current, self.siblings = total_pages, current, siblings
+        self.on_change = on_change
+        self._rebuild(notify=False)
+
+    def _numbers(self) -> list[int | None]:
+        """Page numbers to show; ``None`` marks a gap of two or more pages."""
+        wanted = {1, self.total_pages}
+        wanted.update(range(self.current - self.siblings, self.current + self.siblings + 1))
+        pages = sorted(page for page in wanted if 1 <= page <= self.total_pages)
+        items: list[int | None] = []
+        last: int | None = None
+        for page in pages:
+            if last is not None:
+                if page - last == 2:
+                    items.append(last + 1)  # one hidden page: show it rather than "…"
+                elif page - last > 2:
+                    items.append(None)
+            items.append(page)
+            last = page
+        return items
+
+    def _rebuild(self, *, notify: bool = True) -> None:
+        controls: list[Widget] = [
+            IconButton(
+                "back",
+                label="Previous page",
+                enabled=self.current > 1,
+                on_press=self.previous,
+                id=f"{self.id}:previous",
+            )
+        ]
+        for item in self._numbers():
+            if item is None:
+                controls.append(Label("…"))
+                continue
+            current = item == self.current
+            controls.append(
+                Button(
+                    str(item),
+                    variant=ButtonVariant.PRIMARY if current else ButtonVariant.TEXT,
+                    accessibility_label=f"Page {item}" + (", current" if current else ""),
+                    on_press=_bind(f"page {item}", self.select, item),
+                    id=f"{self.id}:page-{item}",
+                )
+            )
+        controls.append(
+            IconButton(
+                "forward",
+                label="Next page",
+                enabled=self.current < self.total_pages,
+                on_press=self.next,
+                id=f"{self.id}:next",
+            )
+        )
+        self._replace(
+            (Wrap(*controls, spacing=4, run_spacing=4, align="center", id=f"{self.id}:pages"),),
+            notify=notify,
+        )
+
+    def select(self, page: int) -> None:
+        """Show ``page``. Raises ValueError when it is out of range."""
+        if (
+            isinstance(page, bool)
+            or not isinstance(page, int)
+            or not (1 <= page <= self.total_pages)
+        ):
+            raise ValueError(f"page must be between 1 and {self.total_pages}, got {page!r}")
+        if page == self.current:
+            return
+        self.current = page
+        self._rebuild()
+        if self.on_change is not None and not in_build_scope():
+            self.on_change(page)
+
+    def next(self) -> None:
+        if self.enabled and self.current < self.total_pages:
+            self.select(self.current + 1)
+
+    def previous(self) -> None:
+        if self.enabled and self.current > 1:
+            self.select(self.current - 1)
+
+
+class TreeNode:
+    """One entry of a :class:`TreeView`: a label, optional children, open state."""
+
+    __slots__ = ("label", "children", "expanded")
+
+    def __init__(self, label: str, *children: TreeNode, expanded: bool = False) -> None:
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError("TreeNode label must be a non-empty string")
+        if any(not isinstance(child, TreeNode) for child in children):
+            raise TypeError("TreeNode children must be TreeNode objects")
+        self.label = label
+        self.children = children
+        self.expanded = bool(expanded)
+
+    def __repr__(self) -> str:
+        return f"TreeNode({self.label!r}, children={len(self.children)}, expanded={self.expanded})"
+
+
+class TreeView(_Pattern):
+    """A nested list where nodes with children open and close.
+
+    ``on_select(node)`` runs when the user taps a node without children. Tapping
+    a node with children only opens or closes it. ``node.expanded`` tracks the
+    current state.
+    """
+
+    __slots__ = ("nodes", "on_select")
+
+    def __init__(
+        self,
+        *nodes: TreeNode,
+        on_select: Callable[[TreeNode], None] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if any(not isinstance(node, TreeNode) for node in nodes):
+            raise TypeError("TreeView accepts TreeNode objects")
+        kwargs.setdefault("spacing", 4)
+        super().__init__(**kwargs)
+        self.nodes, self.on_select = tuple(nodes), on_select
+        self._replace([self._row(node) for node in nodes], notify=False)
+
+    def _row(self, node: TreeNode) -> Widget:
+        if not node.children:
+            return Button(
+                f"• {node.label}",
+                variant=ButtonVariant.TEXT,
+                on_press=_bind(f"open {node.label}", self._open, node),
+            )
+        children = Column(
+            *(self._row(child) for child in node.children),
+            spacing=4,
+            style=Style(margin=(16, 0, 0, 0)),
+        )
+
+        def remember(open_: bool, node: TreeNode = node) -> None:
+            node.expanded = open_
+
+        return ExpansionPanel(node.label, children, expanded=node.expanded, on_toggle=remember)
+
+    def _open(self, node: TreeNode) -> None:
+        if self.enabled and self.on_select is not None and not in_build_scope():
+            self.on_select(node)
+
+
+class ColorPicker(_Pattern):
+    """A grid of colour swatches; the chosen one shows a tick.
+
+    ``colors`` are ``#RRGGBB`` strings. ``value`` is the initially chosen colour
+    (or none). ``on_change(color)`` runs when the user picks a colour, or when
+    :meth:`select` changes it. Colours are returned in upper case.
+    """
+
+    __slots__ = ("colors", "on_change", "_value", "_swatch_size")
+
+    def __init__(
+        self,
+        colors: Sequence[str],
+        *,
+        value: str | None = None,
+        swatch_size: int = 48,
+        on_change: Callable[[str], None] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if isinstance(colors, str) or not colors:
+            raise ValueError("ColorPicker needs a sequence of at least one colour")
+        names = tuple(_hex_color(color, "color") for color in colors)
+        if len(set(names)) != len(names):
+            raise ValueError("ColorPicker colours must be unique")
+        if isinstance(swatch_size, bool) or not isinstance(swatch_size, int) or swatch_size < 48:
+            raise ValueError("swatch_size must be an integer of at least 48 dp (touch target)")
+        chosen = None if value is None else _hex_color(value, "value")
+        if chosen is not None and chosen not in names:
+            raise ValueError(f"value {value!r} is not one of the picker's colours")
+        super().__init__(**kwargs)
+        self.colors, self.on_change, self._swatch_size = names, on_change, swatch_size
+        self._value = chosen
+        self._rebuild(notify=False)
+
+    @property
+    def value(self) -> str | None:
+        """The chosen colour in upper case, or ``None``."""
+        return self._value
+
+    def _rebuild(self, *, notify: bool = True) -> None:
+        swatches: list[Widget] = []
+        for color in self.colors:
+            selected = color == self._value
+            label = f"Color {color}" + (", selected" if selected else "")
+            swatches.append(
+                Button(
+                    "✓" if selected else "",
+                    variant=ButtonVariant.TEXT,
+                    accessibility_label=label,
+                    on_press=_bind(f"pick {color}", self.select, color),
+                    style=Style(
+                        background=color,
+                        color=_readable_text(color),
+                        width=self._swatch_size,
+                        height=self._swatch_size,
+                        corner_radius=self._swatch_size // 2,
+                    ),
+                    id=f"{self.id}:{color[1:]}",
+                )
+            )
+        self._replace(
+            (Wrap(*swatches, spacing=8, run_spacing=8, id=f"{self.id}:swatches"),),
+            notify=notify,
+        )
+
+    def select(self, color: str) -> None:
+        """Choose ``color``. It must be one of the picker's colours."""
+        name = _hex_color(color, "color")
+        if name not in self.colors:
+            raise ValueError(f"{color!r} is not one of this picker's colours")
+        if name == self._value:
+            return
+        self._value = name
+        self._rebuild()
+        if self.on_change is not None and not in_build_scope():
+            self.on_change(name)
