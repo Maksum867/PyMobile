@@ -41,6 +41,7 @@ class HomeScreen(Screen):
             ),
             TextInput(
                 placeholder="Your name",
+                accessibility_label="Your name",
                 max_length=50,
                 on_change=self.on_change,
             ),

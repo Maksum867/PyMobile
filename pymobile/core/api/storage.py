@@ -236,6 +236,11 @@ class Storage:
         # Shared per file: the data, the lock, the load lifecycle and the
         # transaction depth all live on the backend, not on this object.
         self._state = _state_for(self._path)
+        # Load now: a store that cannot be opened (newer schema, unreadable
+        # file, failing migration) must fail where it is created, not at some
+        # later first access deep inside the app.
+        with self._state.lock:
+            self._load()
 
     # -- lifecycle ---------------------------------------------------------
     @property
@@ -257,7 +262,9 @@ class Storage:
         and migrated successfully. A failure — corrupt file that could not be
         quarantined, a schema from a newer release, a raising migration — is
         sticky: the same store keeps raising instead of quietly serving or
-        rewriting the data it was supposed to reject.
+        rewriting the data it was supposed to reject. A read error (or a corrupt
+        file that could not be moved aside) is *retryable*: nothing was loaded or
+        overwritten, so the next access tries again.
         """
         state = self._state
         with state.lock:
@@ -275,8 +282,14 @@ class Storage:
             try:
                 self._load_locked()
             except BaseException as exc:
-                state.status = _FAILED
-                state.error = exc
+                if getattr(exc, "retryable", False):
+                    # Nothing was read into memory or overwritten on disk, so a
+                    # later access may succeed (e.g. permissions were fixed).
+                    state.status = _UNLOADED
+                    state.error = None
+                else:
+                    state.status = _FAILED
+                    state.error = exc
                 raise
             state.status = _READY
 
@@ -300,10 +313,12 @@ class Storage:
         except OSError as exc:
             # Unreadable (permissions, I/O error …) is NOT "empty": starting
             # fresh here would make the next write destroy the user's data.
-            raise ResourceError(
+            error = ResourceError(
                 f"Could not read the store {self._path}: {exc}",
                 hint="Check the file permissions; the store was left untouched.",
-            ) from exc
+            )
+            error.retryable = True  # type: ignore[attr-defined]
+            raise error from exc
         if text is not None:
             try:
                 data = json.loads(text)
@@ -324,10 +339,12 @@ class Storage:
         try:
             os.replace(self._path, backup)
         except OSError as exc:
-            raise ResourceError(
+            error = ResourceError(
                 f"The store {self._path} is corrupt ({reason}) and could not be moved aside: {exc}",
                 hint="Fix or remove the file by hand; nothing was overwritten.",
-            ) from exc
+            )
+            error.retryable = True  # type: ignore[attr-defined]
+            raise error from exc
         _log.warning(
             "store %s could not be parsed (%s); it was moved to %s and the store starts empty",
             self._path, reason, backup,

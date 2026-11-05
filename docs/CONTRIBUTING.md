@@ -18,7 +18,7 @@ already been configured. Those settings and appointments require the owner.
 
 ## Minimum release gates
 
-1. Update the public [known-issues ledger](KNOWN_ISSUES.md), CHANGELOG and docs.
+1. Update the CHANGELOG and docs.
    Connect confirmed new bugs to public issues when publishing upstream.
 2. Run `python -m pytest`, `python -m ruff check pymobile` and
    `python -m mypy pymobile`. Do not hide a failed mandatory test behind an

@@ -444,6 +444,30 @@ class HttpFuture:
                 _log.exception("unhandled exception in an HttpFuture callback for %s", self._url)
 
 
+#: Per-request options accepted by the verbs (they are forwarded to ``request``).
+_REQUEST_OPTIONS = frozenset({"json", "data", "headers", "timeout", "retry_safe"})
+#: Options that exist, but on ``HttpClient(...)`` instead of on each request.
+_CLIENT_OPTIONS = frozenset(
+    {"retries", "backoff", "cache", "security", "user_agent", "base_url"}
+)
+
+
+def _check_request_options(verb: str, kwargs: Mapping[str, Any]) -> None:
+    """Fail with a message that names the real problem, not ``request()``."""
+    for key in kwargs:
+        if key in _REQUEST_OPTIONS:
+            continue
+        if key in _CLIENT_OPTIONS:
+            raise TypeError(
+                f"{verb}() got an unexpected keyword argument {key!r}: "
+                f"{key} is set on HttpClient({key}=...), not per request"
+            )
+        raise TypeError(
+            f"{verb}() got an unexpected keyword argument {key!r}; "
+            f"accepted options are: {', '.join(sorted(_REQUEST_OPTIONS))}"
+        )
+
+
 @dataclass(slots=True)
 class HttpClient:
     """A small HTTP client with both synchronous and async (background) verbs.
@@ -523,23 +547,28 @@ class HttpClient:
     # -- synchronous verbs -------------------------------------------------
     def get(self, url: str, *, params: Params | None = None, **kwargs: Any) -> Response:
         """Perform a GET request."""
+        _check_request_options("get", kwargs)
         return self.request("GET", url, params=params, **kwargs)
 
     def post(self, url: str, **kwargs: Any) -> Response:
         """Perform a POST request."""
+        _check_request_options("post", kwargs)
         return self.request("POST", url, **kwargs)
 
     def put(self, url: str, **kwargs: Any) -> Response:
         """Perform a PUT request."""
+        _check_request_options("put", kwargs)
         return self.request("PUT", url, **kwargs)
 
     def delete(self, url: str, **kwargs: Any) -> Response:
         """Perform a DELETE request."""
+        _check_request_options("delete", kwargs)
         return self.request("DELETE", url, **kwargs)
 
     # -- asynchronous verbs ------------------------------------------------
     def get_async(self, url: str, *, params: Params | None = None, **kwargs: Any) -> HttpFuture:
         """Start a GET request on a background thread; returns an :class:`HttpFuture`."""
+        _check_request_options("get_async", kwargs)
         kwargs.setdefault("params", params)
         return self._async("GET", url, kwargs)
 
@@ -591,6 +620,7 @@ class HttpClient:
         """
         if self.cache is None:
             raise ValueError("get_cached() needs a cache; pass HttpClient(cache=HttpCache())")
+        _check_request_options("get_cached", kwargs)
         final_url = self._build_url(url, params)
         # Responses fetched with different credentials are different entries:
         # otherwise one account's data would be served to the next.

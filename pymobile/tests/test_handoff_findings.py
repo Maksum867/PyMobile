@@ -95,22 +95,17 @@ class TestSharedNamespaceState:
 # PM-02 — a failed load/migration is sticky, never bypassed
 # --------------------------------------------------------------------------
 class TestStickyLoadFailure:
+    # A store that fails to open raises in its constructor; the failure stays
+    # sticky for later openers too.
     def test_newer_schema_blocks_every_following_operation(self, tmp_path: Path) -> None:
         path = tmp_path / "state.json"
         Storage(path)["__schema_version__"] = 3
-        store = Storage(path, schema_version=1, migrations={1: lambda data: data})
         with pytest.raises(PyMobileError):
-            store.get("x")
+            Storage(path, schema_version=1, migrations={1: lambda data: data})
         before = path.read_bytes()
-        for attempt in (
-            lambda: store.set("unexpected_write", True),
-            lambda: store.__setitem__("k", 1),
-            lambda: store.save(),
-            lambda: store.update("k", lambda value: 1, default=0),
-            lambda: store.delete("k"),
-        ):
-            with pytest.raises(PyMobileError):
-                attempt()
+        # the same store stays blocked: opening it again fails the same way
+        with pytest.raises(PyMobileError):
+            Storage(path, schema_version=1, migrations={1: lambda data: data})
         assert path.read_bytes() == before
 
     def test_a_failed_migration_never_serves_stale_data(self, tmp_path: Path) -> None:
@@ -120,13 +115,10 @@ class TestStickyLoadFailure:
         def explode(data: dict) -> dict:
             raise RuntimeError("migration exploded")
 
-        store = Storage(path, schema_version=1, migrations={1: explode})
         with pytest.raises(RuntimeError, match="exploded"):
-            store.get("v")
+            Storage(path, schema_version=1, migrations={1: explode})
         with pytest.raises(RuntimeError, match="exploded"):
-            store["v"] = 2
-        with pytest.raises(RuntimeError, match="exploded"):
-            store.get("v")
+            Storage(path, schema_version=1, migrations={1: explode})
 
 
 # --------------------------------------------------------------------------
