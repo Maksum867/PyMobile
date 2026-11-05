@@ -1317,7 +1317,7 @@ class Banner(_Pattern):
     close button that hides the banner.
     """
 
-    __slots__ = ("message", "kind", "on_action", "on_dismiss", "_dismissed")
+    __slots__ = ("message", "kind", "on_action", "on_dismiss")
 
     def __init__(
         self,
@@ -1339,7 +1339,6 @@ class Banner(_Pattern):
         super().__init__(**kwargs)
         self.message, self.kind = message, kind
         self.on_action, self.on_dismiss = on_action, on_dismiss
-        self._dismissed = False
         parts: list[Widget] = [
             Icon(icon, size=20, color=foreground, label=kind, id=f"{self.id}:icon"),
             Expanded(Label(message, style=Style(color=foreground), id=f"{self.id}:text")),
@@ -1376,17 +1375,21 @@ class Banner(_Pattern):
 
     @property
     def dismissed(self) -> bool:
-        return self._dismissed
+        """True while the banner is hidden, whether closed by the user or by code."""
+        return not self.visible
 
     def _act(self) -> None:
         if self.enabled and self.on_action is not None and not in_build_scope():
             self.on_action()
 
+    def show(self) -> None:
+        """Show a dismissed banner again; it can be dismissed again afterwards."""
+        self.visible = True
+
     def dismiss(self) -> None:
-        """Hide the banner. Calling it again does nothing."""
-        if self._dismissed:
+        """Hide the banner. Does nothing while it is already hidden."""
+        if not self.visible:
             return
-        self._dismissed = True
         self.visible = False
         if self.on_dismiss is not None and not in_build_scope():
             self.on_dismiss()
