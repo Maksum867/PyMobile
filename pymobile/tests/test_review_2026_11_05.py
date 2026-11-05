@@ -13,9 +13,12 @@ from pymobile.compiler.precheck import check_project
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# Simulating an unreadable file needs POSIX permission bits. Root ignores them,
+# and Windows does not enforce chmod(0) on read, so these tests run only on POSIX
+# as a normal user. The same retry path is covered by the POSIX CI jobs.
 requires_non_root = pytest.mark.skipif(
-    hasattr(os, "geteuid") and os.geteuid() == 0,
-    reason="root ignores file permissions, so an unreadable file cannot be simulated",
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="needs POSIX permission bits and a non-root user to make a file unreadable",
 )
 
 
@@ -73,11 +76,14 @@ def test_failing_migration_stays_sticky(tmp_path):
 
 
 # options that belong to HttpClient(...) are named as such.
-@pytest.mark.parametrize("call", [
-    lambda c: c.get("/x", retries=2),
-    lambda c: c.post("/x", retries=2),
-    lambda c: c.get_async("/x", backoff=1.0),
-])
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.get("/x", retries=2),
+        lambda c: c.post("/x", retries=2),
+        lambda c: c.get_async("/x", backoff=1.0),
+    ],
+)
 def test_client_option_on_a_request_names_the_constructor(call):
     client = HttpClient(base_url="http://127.0.0.1:9")
     with pytest.raises(TypeError, match=r"HttpClient\(\w+=\.\.\.\)"):
