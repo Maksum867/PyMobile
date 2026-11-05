@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from . import __version__
+from . import __version__ as __version__
 from .cli_tools import cmd_complete, cmd_completion, cmd_init, cmd_schema
 from .compiler.pipeline import BuildPipeline
 from .core.config import ProjectConfig, load_config
@@ -809,10 +809,10 @@ def _has_files(root: Path) -> bool:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    """Check the environment and configuration."""
-    problems = 0
-    _out.info(f"pymobile {__version__} on Python {sys.version.split()[0]}")
+    """Check environment and project prerequisites."""
+    from .cli_tools import cmd_doctor as doctor
 
+    _out.info(f"pymobile {__version__} on Python {sys.version.split()[0]}")
     try:
         import PIL  # noqa: F401
 
@@ -820,77 +820,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except ImportError:
         _out.warn("Pillow missing — icons are copied without resizing")
         _out.hint("pip install Pillow")
-
-    try:
-        config = _load(args)
-    except PyMobileError as exc:
-        _out.warn(f"no usable project here: {exc}")
-        return 1 if getattr(args, "strict", False) else 0
-
-    _out.ok(f"configuration valid: {config.name} ({config.package})")
-    if not config.entrypoint_path.exists():
-        _out.error(f"entry point missing: {config.entrypoint_path}")
-        problems += 1
-    else:
-        _out.ok(f"entry point found: {config.entrypoint}")
-
-    icon = config.icon_path
-    if icon is not None and not icon.exists():
-        _out.error(f"icon missing: {icon}")
-        problems += 1
-    elif icon is not None:
-        _out.ok(f"custom icon: {icon.name}")
-    else:
-        _out.ok("using the default icon")
-
-    # pip is only necessary for declared third-party packages. Do not confuse
-    # Pillow (optional build-time icon resizing) with an Android dependency.
-    if config.dependencies:
-        import importlib.util
-
-        if importlib.util.find_spec("pip") is None:
-            _out.error("pip is missing — app dependencies cannot be installed")
-            _out.hint(f"{Path(sys.executable).name} -m ensurepip --upgrade")
-            problems += 1
-        else:
-            _out.ok(f"pip available for {len(config.dependencies)} declared dependencies")
-        _out.info(f"check package compatibility: {_invocation()} deps check")
-
-    try:
-        free = shutil.disk_usage(config.root).free
-        if free < 1024**3:
-            _out.warn(f"only {free / 1024**3:.1f} GiB free; native setup needs ~1 GiB")
-        else:
-            _out.ok(f"disk space: {free / 1024**3:.1f} GiB free")
-    except OSError as exc:
-        _out.warn(f"could not check disk space: {exc}")
-
-    from .compiler.toolchain import ToolchainError, find_toolchain
-
-    sdk_ok = False
-    try:
-        toolchain = find_toolchain()
-        toolchain.verify()
-        _out.ok(f"Android toolchain ready (build-tools {toolchain.build_tools.name})")
-        if toolchain.has_ndk:
-            _out.ok("NDK present — the native bridge can be rebuilt from source")
-        else:
-            _out.ok("using the prebuilt native bridge (no NDK needed)")
-        _out.info(f"native APK builds available: {_invocation()} build --native")
-        sdk_ok = True
-    except (ToolchainError, PyMobileError) as exc:
-        _out.warn(f"Android SDK not usable — only structural builds are available: {exc}")
-        _out.hint("run `pymobile setup-sdk` to install it automatically")
-
-    if problems:
-        _out.error(f"{problems} problem(s) found")
-        return 1
-    if sdk_ok:
-        _out.ok("everything looks good")
-    else:
-        _out.ok("project configuration looks good")
-        _out.warn("Android SDK is not installed — native APK builds are unavailable")
-    return 1 if getattr(args, "strict", False) and not sdk_ok else 0
+    return doctor(args)
 
 
 # ---------------------------------------------------------------------------

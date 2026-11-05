@@ -1,0 +1,43 @@
+name: Build or installation problem
+description: Report a problem building or installing a PyMobile app
+title: "[Build]: "
+body:
+  - type: markdown
+    attributes:
+      value: "Do not share passwords, tokens, keystores, private APKs or personal data. For a security vulnerability, follow the [Security Policy](https://github.com/Maksum867/PyMobile/blob/main/docs/SECURITY.md) instead of opening a public issue."
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and steps to reproduce
+      description: "Describe what you tried, the command you ran, and the expected and actual result. Remove secrets from commands and output."
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: PyMobile version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and build details
+      description: "If relevant, include host OS, Python version, build mode, SDK/JDK/NDK versions, ABI, and Android device or emulator details. Do not share signing material."
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitised error and diagnostics
+      description: "Paste the relevant error and, if available, output from pymobile doctor or logcat. Remove credentials, private paths and personal data."
+      render: text
+  - type: textarea
+    id: attempts
+    attributes:
+      label: What have you tried?
+      description: "Describe any troubleshooting or workaround."
+  - type: checkboxes
+    id: conduct
+    attributes:
+      label: Code of Conduct
+      options:
+        - label: I have read and agree to the [Code of Conduct](https://github.com/Maksum867/PyMobile/blob/main/docs/CODE_OF_CONDUCT.md) and accept its rules.
+          required: true

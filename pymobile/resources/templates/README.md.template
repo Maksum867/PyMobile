@@ -1,25 +1,66 @@
 # {{name}}
 
 An Android application built with [PyMobile](https://github.com/Maksum867/PyMobile).
+Run the commands below from this project directory, in the Python environment
+where PyMobile is installed. If `pymobile` is not on your PATH,
+`python -m pymobile` uses the active Python interpreter instead.
 
-## Develop
+## Project files
+
+- `main.py` — the starter app; edit this to change the screen and behaviour.
+- `pymobile.toml` — app name, package, permissions, build options and output folder.
+- `pymobile.schema.json` — configuration schema for editor assistance.
+- `assets/` — a place for app images and other packaged assets.
+- `.gitignore` — files that should stay out of version control.
+
+## Preview and edit
 
 ```bash
-pymobile run          # preview the UI tree on your machine
+python -m pymobile run          # text preview
+python -m pymobile run --web    # interactive preview in a local browser
+python -m pymobile dev          # desktop window with reload on save
+python -m pymobile check-ui     # accessibility and narrow-layout advisories
 ```
 
-## Build
+The text and browser previews do not need the Android SDK. The GUI needs Tk and
+an available display; `dev` falls back to text watching if it cannot open one.
+The browser preview listens on loopback by default. Only run trusted app code:
+previewing executes the entry point and is not a sandbox.
+
+## Check the project
 
 ```bash
-pymobile build --native   # real, signed, installable APK (first: pymobile setup-sdk)
-pymobile build            # fast incremental check, not installable on a device
-pymobile build --clean    # full rebuild
-pymobile build --icon assets/icon.png
+python -m pymobile doctor       # basic environment and project checks
+python -m pymobile check        # check project and desktop startup
+python -m pymobile info         # resolved configuration and output path
 ```
 
-The APK is written to `build/`.
+`doctor` does not execute the app or guarantee that a build will work.
+`check` runs trusted app startup on a desktop stub; neither check replaces
+Android-device testing.
 
-## Configure
+## Build an APK
 
-Edit `pymobile.toml`: application name, package id, permissions and icon all
-live there. Run `pymobile info` to see the resolved configuration.
+A real installable APK requires the Android toolchain. When you are ready,
+`setup-sdk` downloads it; check the destination and available disk space first.
+
+```bash
+python -m pymobile setup-sdk
+python -m pymobile doctor --strict
+python -m pymobile build --native
+```
+
+The default output directory is `apk/`, not `build/`. If `output_dir` was
+changed in `pymobile.toml`, use that location instead; `pymobile info` shows the
+resolved output path. `python -m pymobile build` without `--native` produces a
+structural package that is **not installable** on Android.
+
+To install a native APK on an authorized connected device, run
+`python -m pymobile install`; see the [installation and troubleshooting guide](https://github.com/Maksum867/PyMobile#installing-on-a-phone)
+for USB setup, multiple devices and logs. Debug signing is for development;
+keep release keystores and passwords private.
+
+## Learn more
+
+See the [PyMobile documentation](https://github.com/Maksum867/PyMobile) for
+widgets, navigation, configuration, accessibility and deployment.

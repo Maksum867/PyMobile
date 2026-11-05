@@ -3,6 +3,37 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.13.0] — 2026-11-05
+
+### Added
+
+- `App.run(widget)` wraps a retained widget tree in a screen; existing Screen
+  subclasses remain supported.
+- Built-in widgets accept `color` and `font_size` style shortcuts when those
+  names are not already component-specific parameters.
+- Container constructors accept sequences of children alongside individual
+  widgets. `App.push()` can construct a Screen class with supplied arguments.
+- `doctor` separates basic desktop-preview and native toolchain checks and
+  suggests next steps without running the app or installing tools.
+- New projects include an expanded README with preview, configuration and build
+  instructions.
+
+### Fixed
+
+- `Theme.dark_from()` checks accent contrast against the generated surface and
+  can lighten colours all the way to white. The default light muted text and
+  dark primary colours have been adjusted for contrast on their surfaces.
+- Apps retain their custom light theme when switching between light and dark;
+  the dark counterpart is derived or can be supplied as `dark_theme`.
+- Automatically flattening nested translation sections now logs at debug level
+  rather than producing a warning. Strict `flatten=False` still warns about
+  unreachable nested namespaces.
+
+### Documentation
+
+- Clarified that `ProgressText.label` is a prefix and the default format adds
+  a percentage automatically.
+
 ## [0.12.0] — 2026-11-05
 
 ### Added

@@ -20,7 +20,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 
 > ### ⚠️ Alpha software — known bugs, actively being fixed
 >
-> PyMobile is at **0.12.0** and is still in alpha. It builds and signs real,
+> PyMobile is at **0.13.x** and is still in alpha. It builds and signs real,
 > installable APKs today, but the API can change between minor releases and
 > there are known bugs. I am actively working on them: fixes ship in
 > every release — see the
@@ -30,7 +30,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.12.0`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.13.0`) and read the
 > changelog before upgrading. What may change, and how much notice you get, is
 > written down in the
 > [versioning and deprecation policy](#versioning-and-deprecation-policy). Bug
@@ -277,6 +277,12 @@ Verify everything with:
 pymobile doctor
 ```
 
+`doctor` separates basic desktop-preview checks from native APK toolchain
+checks and suggests next steps. It does not run the app, check every dependency
+or build an APK; use `pymobile check` and test the actual app as well.
+`doctor --strict` returns a nonzero status when native tooling is missing or
+the basic checks report a problem. No tools are downloaded by `doctor`.
+
 ---
 
 ## Your first app
@@ -300,7 +306,20 @@ myapp/
 └── assets/           # images, fonts, data files
 ```
 
-The smallest possible app:
+For a simple retained widget tree, you can start without a screen subclass:
+
+```python
+from pymobile import App, Column, Label
+
+App("My App").run(Column([Label("Hello, Android!", font_size=24)]))
+```
+
+`run(widget)` wraps the widget in a regular screen. Its widget instances are
+reused across refreshes: changing a widget's properties still redraws it, but
+expressions used to construct the tree are not rerun. Use a `Screen` subclass
+when you need lifecycle hooks or to rebuild the tree from changing data.
+
+The equivalent screen-based form remains available:
 
 ```python
 from pymobile import App, Column, Label, Screen, Widget
@@ -372,6 +391,20 @@ Static or updatable text.
 label = Label("Heading", style=Style(font_size=24, bold=True))
 label.set_text("New text")
 ```
+
+On built-in widgets that do not already define those component-specific
+parameters, `font_size` and `color` can also be passed directly:
+
+```python
+Label("Heading", font_size=24, color="#333333")
+Label("Heading", style=Style(bold=True), font_size=24)
+```
+
+These are shortcuts for the corresponding `Style` fields and use the same
+validation. If the same field is set directly and in `style`, a `ValueError`
+prevents an accidental override. Component-specific arguments such as
+`Icon(color=...)` retain their original meaning. Custom widget subclasses
+retain their extension-property behaviour; use `style=Style(...)` for them.
 
 ### Button
 
@@ -503,12 +536,18 @@ ProgressBar(indeterminate=True)    # spinner
 
 ### ProgressText
 
-ProgressBar with a text label overlay.
+ProgressBar with a text label overlay. `label` is a prefix, not the complete
+text: the default format automatically adds the current percentage.
 
 ```python
-ProgressText(42, maximum=100, label="Downloading")
-# Shows: "Downloading 42%"
+ProgressText(42, maximum=100, label="Downloading")  # "Downloading 42%"
+ProgressText(42, maximum=100, label="")             # "42%"
+ProgressText(42, maximum=100, label="42%")          # "42% 42%" (duplicated)
+ProgressText(42, maximum=100, label="Done", format="{value}/{maximum}")
 ```
+
+Use `format` to change the generated part. Available fields are `value`,
+`maximum`, `percent` and `fraction`; a nonempty `label` remains a prefix.
 
 ### RatingBar
 
@@ -935,6 +974,18 @@ Stack(background, foreground)              # layered, last on top
 SafeArea(content)                          # clears the notch and status bar
 ```
 
+Containers also accept sequences of widgets, including alongside individual
+children; a list is expanded one level in order:
+
+```python
+Column([Label(name) for name in names], spacing=12)
+Row(Label("Names"), [Label(name) for name in names])
+```
+
+The existing `Column(*widgets)` form remains supported. Every child still needs
+to be a widget and a widget cannot be attached to multiple parents. Components
+with specialized constructors, such as `Form`, may have their own input rules.
+
 ### Grid
 
 The container for cards, galleries and menus. Every cell in a column gets the
@@ -1186,6 +1237,11 @@ app.navigator.reset(Home())     # clear the stack, start fresh
 app.navigator.depth             # how many screens are stacked
 app.screen                      # the visible screen
 ```
+
+As an alternative to constructing the instance yourself, `app.push(Settings)`
+constructs and pushes `Settings()`. Constructor arguments can be passed too:
+`app.push(DetailsScreen, item_id=7)`. Both forms return the pushed screen;
+constructor arguments cannot be supplied with an already-created instance.
 
 Android screen swaps fade by default. Choose `transition="fade"`, `"slide"`,
 `"scale"` or `"none"` and tune `transition_duration_ms` on `App`; a back/pop
@@ -1508,19 +1564,38 @@ app.theme["PRIMARY"]                 # resolved colour
 ```
 
 Built-in themes: `Theme.light()` and `Theme.dark()`. Custom themes use
-`Theme(name, colors)` with your own palette.
-
-Keeping two palettes by hand drifts: one gets a new colour, the other does not.
-`Theme.dark_from(light)` derives the dark one from the light one — it reads each
-colour's perceived luminance, flips the background and surface, keeps the hue of
-the accents and lightens each accent until it clears 4.5:1 against the dark
-surface:
+`Theme(name, colors)` with your own palette. When the app starts with a custom
+light theme, it retains that theme and derives a dark counterpart automatically:
 
 ```python
-mocha = Theme("mocha", {"PRIMARY": "#6D5340", "BACKGROUND": "#F2ECE7", ...})
-dark = Theme.dark_from(mocha)        # a warm dark theme, not a blue-grey slab
-App("My App", theme=dark)
+mocha = Theme("mocha", {"PRIMARY": "#6D5340", "BACKGROUND": "#F2ECE7"})
+app = App("My App", theme=mocha)
+app.set_theme("dark")   # derived from mocha
+app.set_theme("light")  # restores mocha
 ```
+
+`preview --theme light|dark` and `check-ui --theme light|dark` select the same
+app palettes. An app using only built-in themes keeps the built-in light/dark
+pair. To provide a hand-tuned dark counterpart instead, pass
+`dark_theme=Theme("dark", {...})` to `App` alongside the light theme. A dark
+counterpart must be named `dark` so renderers recognize it. Passing a `Theme`
+to `set_theme` registers it as light or, if named `dark`, as the explicit dark
+counterpart. An explicitly supplied dark counterpart is retained when the light
+theme changes.
+
+`Theme.dark_from(light)` can also be called directly. It makes near-black tints
+from the light background and lightens the standard accent colours until each
+reaches at least 4.5:1 against the generated surface, using opaque RGB values:
+
+```python
+dark = Theme.dark_from(mocha)
+```
+
+Application-defined nonstandard colour names are retained unchanged; review
+them for dark-mode contrast. This is a starting palette, not an accessibility
+guarantee for arbitrary foreground/background combinations, custom colours,
+transparency or widgets. Audit and manually test the actual screens in both
+themes.
 
 There are two small sets of design tokens as well, plain numbers so they read as
 intent instead of as magic values:
@@ -2300,11 +2375,11 @@ at load time, which makes both spellings work:
 { "stats.balance": "Balance" }           → the same key, written flat
 ```
 
-Both `t("stats.balance")` calls find `Balance`. The expansion is reported once
-per language, naming the section that was flattened and an example key — a
-catalogue written as sections used to render bare keys with nothing but a
-"missing translation" line per string to explain it. Pass `flatten=False` (or
-`load_file(..., flatten=False)`) to read the file strictly flat:
+Both `t("stats.balance")` calls find `Balance`. The automatic expansion is
+reported at debug level, not as a warning. Pass `flatten=False` (or
+`load_file(..., flatten=False)`) to keep the strict flat reading instead;
+nested namespaces then remain unreachable and produce a warning. Explicit
+`flatten=True` is equivalent to the default:
 
 ```python
 translations.load_dir("locales", flatten=True)      # {"stats": {"balance": …}} → "stats.balance"
@@ -2653,7 +2728,7 @@ does not start there. Build an x86_64 one — the prebuilt bridge ships for
 both architectures, so still no NDK:
 
 ```bash
-pymobile build --native --abi x86_64       # → build/my-app-1.0.0-x86_64.apk
+pymobile build --native --abi x86_64       # → apk/my-app-1.0.0-x86_64.apk by default
 pymobile install --abi x86_64              # uses adb; auto-selects the only connected device
 ```
 
@@ -2772,16 +2847,51 @@ takes.)
 
 ## Installing on a phone
 
-**Without a cable:** copy the `.apk` to your device through cloud storage or a
-messenger, open it there and allow installation from unknown sources.
-
-**Over USB**, with USB debugging enabled:
+Work from your PyMobile project directory. A real phone needs a **native** APK;
+`pymobile build` without `--native` produces a structural package that cannot
+be installed. Install the Android toolchain first if needed, then build:
 
 ```bash
-adb install -r build/my-app-1.0.0.apk
+pymobile doctor --strict
+pymobile build --native
+pymobile info                   # shows the resolved output directory
 ```
 
-`adb` lives in `~/.andro/sdk/platform-tools/`.
+If the toolchain is missing, `pymobile setup-sdk` downloads it. The default
+output directory is `apk/`; `output_dir` in `pymobile.toml` can change it.
+The build output prints the APK path. Builds execute trusted app startup code;
+the startup check is not a security sandbox or a device test.
+
+### Connect over USB
+
+1. On the Android device, enable Developer options and USB debugging. The
+   settings path varies by manufacturer; consult the device's instructions.
+2. Connect a data-capable USB cable. Unlock the device and accept the debugging
+   authorization prompt after checking that the computer is trusted.
+3. Run `pymobile install`. It finds `adb` in the configured SDK or on PATH and
+   selects the device automatically when exactly one authorized device is
+   connected. The tool installs the configured APK, not a structural package.
+4. If several devices are connected, use `pymobile install --device SERIAL`.
+   Obtain the serial from the tool's message or from `adb devices` when `adb`
+   is on PATH. Keep device identifiers out of public reports if they are private.
+5. Open the app on the phone and exercise its important screens. A successful
+   install alone does not prove that the app works correctly on the device.
+
+Alternatively, copy the native APK to a device and open it there. Android may
+ask you to allow installation from that source; do this only for an APK you
+trust and review your device's security settings afterwards.
+
+### Common installation problems
+
+| Problem | What to try |
+| --- | --- |
+| No device detected | Unlock the phone, check the data cable and USB debugging, accept the authorization prompt, and reconnect. Some Windows devices need the manufacturer's USB driver. |
+| Device is `unauthorized` | Unlock it and accept the USB debugging prompt; reconnect if the prompt does not appear. `adb devices` shows authorization status when `adb` is on PATH. |
+| More than one device | Use `pymobile install --device SERIAL` to select the intended authorized device. |
+| APK not found | Run `pymobile build --native`, check `pymobile info` for the output directory, or pass the APK path to `pymobile install`. |
+| Wrong CPU architecture | Choose the ABI matching the target. For an x86_64 emulator, use `pymobile build --native --abi x86_64` followed by `pymobile install --abi x86_64`. |
+| Signatures do not match | An update must use the installed app's signing key. Use the matching keystore; uninstalling the existing app removes its local data. See [Signing](#signing). |
+| App opens and immediately closes | Run `pymobile logs` for the configured app, review its sanitized traceback and test startup again. |
 
 ---
 
@@ -2796,11 +2906,25 @@ import pymobile
 print(pymobile.__version__)
 ```
 
-Everything your app prints, including tracebacks, goes to logcat:
+For a connected phone or emulator, PyMobile can show logs scoped to the
+configured app. Use a device serial when more than one device is connected:
+
+```bash
+pymobile logs                   # recent app logs, including tracebacks
+pymobile logs --follow          # stream while the app is running
+pymobile logs --device SERIAL   # choose a device
+```
+
+If the app cannot be found or there are no matching logs, the command reports
+that rather than showing unrelated apps' output. You can also inspect logcat
+directly when `adb` is on PATH:
 
 ```bash
 adb logcat -s pymobile pymobile.stdout pymobile.stderr
 ```
+
+Logs may contain paths, account information or tokens. Remove sensitive data
+before attaching them to an issue; never share signing keys or credentials.
 
 | Tag | Contents |
 | --- | --- |
@@ -2820,7 +2944,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.12.0", "platform": "android",
+# {"framework_version": "0.13.0", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 

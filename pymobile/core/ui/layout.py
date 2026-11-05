@@ -18,6 +18,7 @@ Anything more exotic can still be built by composing them, or by subclassing
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from .flow import ALIGNMENTS
@@ -51,7 +52,7 @@ class _Linear(Container):
 
     def __init__(
         self,
-        *children: Widget,
+        *children: Widget | Sequence[Widget],
         spacing: int = 0,
         align: str = Align.START,
         cross_align: str | None = None,
@@ -100,7 +101,7 @@ class ScrollView(Container):
 
     def __init__(
         self,
-        *children: Widget,
+        *children: Widget | Sequence[Widget],
         horizontal: bool = False,
         spacing: int = 0,
         **kwargs: Any,
@@ -145,7 +146,7 @@ class Grid(Container):
 
     def __init__(
         self,
-        *children: Widget,
+        *children: Widget | Sequence[Widget],
         columns: int = 2,
         spacing: int = 0,
         row_spacing: int | None = None,
@@ -203,7 +204,7 @@ class Wrap(Container):
 
     def __init__(
         self,
-        *children: Widget,
+        *children: Widget | Sequence[Widget],
         spacing: int = 0,
         run_spacing: int | None = None,
         align: str = Align.START,
@@ -356,7 +357,7 @@ class SafeArea(Container):
 
     def __init__(
         self,
-        *children: Widget,
+        *children: Widget | Sequence[Widget],
         top: bool = True,
         bottom: bool = True,
         left: bool = True,

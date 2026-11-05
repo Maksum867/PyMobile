@@ -1,4 +1,4 @@
-"""Project-level commands: ``init`` (with its questions), ``schema`` and shell completion.
+"""Project commands: ``init``, ``doctor``, ``schema`` and shell completion.
 
 Kept apart from ``cli.py`` so that module stays small. ``cli`` is imported as a
 module, not by name, so it is fully loaded before any of these functions run.
@@ -8,13 +8,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
 from . import cli
 from .compiler.scaffold import TEMPLATE_DESCRIPTIONS, create_project
+from .errors import PyMobileError
 
-__all__ = ["cmd_completion", "cmd_complete", "cmd_init", "cmd_schema"]
+__all__ = ["cmd_completion", "cmd_complete", "cmd_init", "cmd_schema", "cmd_doctor"]
 
 
 def _interactive() -> bool:
@@ -99,3 +101,108 @@ def cmd_complete(args: argparse.Namespace) -> int:
     for candidate in complete_line(cli.build_parser(), args.line):
         print(candidate)
     return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Check the environment and configuration."""
+    _out, _load, _invocation = cli._out, cli._load, cli._invocation
+    problems = 0
+    _out.info("Desktop preview — basic project checks")
+    try:
+        config = _load(args)
+    except PyMobileError as exc:
+        _out.warn(f"no usable project here: {exc}")
+        if exc.hint:
+            _out.hint(exc.hint)
+        _out.hint("Open the project directory or pass -c PATH, then run doctor again.")
+        _out.warn("Desktop preview: not checked — a usable project is required")
+        _out.warn("Native APK: not checked — a usable project is required")
+        return 1 if getattr(args, "strict", False) else 0
+
+    _out.ok(f"configuration valid: {config.name} ({config.package})")
+    entry_ok = config.entrypoint_path.is_file()
+    if not entry_ok:
+        _out.error(f"entry point missing: {config.entrypoint_path}")
+        _out.hint("Restore the entry point or correct entrypoint and source_dir in the config.")
+        problems += 1
+    else:
+        _out.ok(f"entry point found: {config.entrypoint}")
+
+    icon = config.icon_path
+    if icon is not None and not icon.exists():
+        _out.error(f"icon missing: {icon}")
+        _out.hint("Fix or remove the icon path in the project config before building.")
+        problems += 1
+    elif icon is not None:
+        _out.ok(f"custom icon: {icon.name}")
+    else:
+        _out.ok("using the default icon")
+
+    # pip is only necessary for declared third-party packages. Do not confuse
+    # Pillow (optional build-time icon resizing) with an Android dependency.
+    if config.dependencies:
+        import importlib.util
+
+        if importlib.util.find_spec("pip") is None:
+            _out.error("pip is missing — app dependencies cannot be installed")
+            _out.hint(f"{Path(sys.executable).name} -m ensurepip --upgrade")
+            problems += 1
+        else:
+            _out.ok(f"pip available for {len(config.dependencies)} declared dependencies")
+        _out.info(f"check package compatibility: {_invocation()} deps check")
+
+    if entry_ok:
+        _out.ok("Desktop preview: configuration and entry point found; app not run")
+        _out.info(f"from the project directory, try `{_invocation()} run`")
+        _out.info(f"for a browser preview, use `{_invocation()} run --web`")
+        _out.info("app imports and dependencies were not checked; GUI preview needs a display")
+    else:
+        _out.warn("Desktop preview: not ready — the entry point is missing")
+
+    _out.info("Native APK — project and toolchain checks")
+    try:
+        free = shutil.disk_usage(config.root).free
+        if free < 1024**3:
+            _out.warn(f"only {free / 1024**3:.1f} GiB free; native setup needs ~1 GiB")
+            _out.hint("Free disk space or choose another setup location with setup-sdk --path.")
+        else:
+            _out.ok(f"disk space: {free / 1024**3:.1f} GiB free")
+    except OSError as exc:
+        _out.warn(f"could not check disk space: {exc}")
+
+    from .compiler.toolchain import ToolchainError, find_toolchain
+
+    sdk_ok = False
+    try:
+        toolchain = find_toolchain()
+        toolchain.verify()
+        _out.ok(f"Android toolchain ready (build-tools {toolchain.build_tools.name})")
+        if toolchain.has_ndk:
+            _out.ok("NDK present — the native bridge can be rebuilt from source")
+        else:
+            _out.ok("using the prebuilt native bridge (no NDK needed)")
+        _out.info(f"to attempt a native build: {_invocation()} build --native")
+        sdk_ok = True
+    except (ToolchainError, PyMobileError) as exc:
+        _out.warn(f"Android SDK or toolchain not usable: {exc}")
+        if exc.hint:
+            _out.hint(exc.hint)
+        _out.hint(f"run `{_invocation()} setup-sdk` to install the toolchain")
+
+    if sdk_ok and not problems:
+        _out.ok("Native APK: basic project and toolchain checks passed; build not run")
+    elif not sdk_ok:
+        _out.warn("Native APK: not ready — Android toolchain is missing or incomplete")
+    else:
+        _out.warn("Native APK: not ready — fix the project problems above")
+    _out.info("doctor does not run the app, install tools, or build an APK")
+
+    if problems:
+        _out.error(f"{problems} problem(s) found")
+        return 1
+    if sdk_ok:
+        _out.ok("everything looks good (basic checks only)")
+    else:
+        _out.ok("project configuration looks good")
+        _out.warn("native APK builds need a usable Android toolchain")
+    return 1 if getattr(args, "strict", False) and not sdk_ok else 0

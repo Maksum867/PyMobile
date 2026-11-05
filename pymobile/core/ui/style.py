@@ -28,7 +28,7 @@ class Color:
     BACKGROUND = "#FFFFFF"
     SURFACE = "#F5F5F5"
     TEXT = "#212121"
-    TEXT_MUTED = "#757575"
+    TEXT_MUTED = "#6F6F6F"
     SUCCESS = "#2E7D32"
     WARNING = "#F9A825"
     ERROR = "#C62828"

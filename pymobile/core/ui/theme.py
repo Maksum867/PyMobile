@@ -122,7 +122,7 @@ class Theme:
         return cls(
             "dark",
             {
-                "PRIMARY": "#5C6BC0",
+                "PRIMARY": "#7986CB",
                 "ACCENT": "#FF80AB",
                 "BACKGROUND": "#121212",
                 "SURFACE": "#1E1E1E",
@@ -187,27 +187,43 @@ class Theme:
         background = channels(light.color("BACKGROUND"))
         black = (0, 0, 0)
         white = (255, 255, 255)
+        # Keep nonstandard application-defined colours available under the
+        # same names. Their intended use is unknown, so do not claim or alter
+        # their contrast automatically.
         colours: dict[str, str] = {
-            # Keep the light theme's hue in the dark surfaces: a warm paper
-            # theme yields a warm dark one, not a blue-grey slab.
-            "BACKGROUND": mix(black, background, 0.09),
-            "SURFACE": mix(black, background, 0.16),
-            "TEXT": mix(black, white, 0.93),
-            "TEXT_MUTED": mix(black, white, 0.62),
+            key: value for key, value in light._colors.items() if key not in _SEMANTIC
         }
+        colours.update(
+            {
+                # Keep the light theme's hue in the dark surfaces: a warm paper
+                # theme yields a warm dark one, not a blue-grey slab.
+                "BACKGROUND": mix(black, background, 0.09),
+                "SURFACE": mix(black, background, 0.16),
+                "TEXT": mix(black, white, 0.93),
+                "TEXT_MUTED": mix(black, white, 0.62),
+            }
+        )
+        # Both generated backgrounds are opaque and the surface is the
+        # lighter one. Test the actual rounded colours that will be rendered,
+        # not a hard-coded approximation of the background.
+        surface_luminance = luminance(channels(colours["SURFACE"]))
         for key in ("PRIMARY", "ACCENT", "SUCCESS", "WARNING", "ERROR"):
             colour = channels(light.color(key))
-            # Lighten accents until they clear 4.5:1 against the dark surface;
-            # a colour already bright enough is kept as it is.
-            for amount in (0.0, 0.1, 0.2, 0.3, 0.4):
+            # Search all the way to white, in small steps, retaining the first
+            # rounded colour that meets the normal-text threshold. White always
+            # passes against these near-black surfaces.
+            for step in range(256):
+                amount = step / 255
                 candidate = (
                     round(colour[0] + (255 - colour[0]) * amount),
                     round(colour[1] + (255 - colour[1]) * amount),
                     round(colour[2] + (255 - colour[2]) * amount),
                 )
-                ratio = (luminance(candidate) + 0.05) / (luminance((18, 18, 18)) + 0.05)
+                candidate_luminance = luminance(candidate)
+                lighter = max(candidate_luminance, surface_luminance)
+                darker = min(candidate_luminance, surface_luminance)
                 colours[key] = hexed(candidate)
-                if ratio >= 4.5:
+                if (lighter + 0.05) / (darker + 0.05) >= 4.5:
                     break
         return cls(name, colours)
 

@@ -1419,8 +1419,13 @@ class SegmentedButtons(Widget):
 class ProgressText(Widget):
     """A determinate progress bar with a textual label (e.g. "Downloading 42%").
 
-    Combines the value of a :class:`ProgressBar` with a formatted label that
-    updates as the value changes.
+    Combines the value of a :class:`ProgressBar` with text that updates as the
+    value changes. ``label`` is a prefix, not the entire displayed text. The
+    default ``format`` appends the percentage: ``label="Downloading"`` gives
+    ``"Downloading 42%"``, while an empty label gives ``"42%"``. Supplying a
+    percentage as the label (for example ``"42%"``) duplicates it. Use
+    ``format`` to customize the generated part; it accepts ``value``,
+    ``maximum``, ``percent`` and ``fraction``.
     """
 
     type_name = "ProgressText"

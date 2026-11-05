@@ -354,8 +354,9 @@ class Translations:
         self._missing: set[str] = set()
         self._missing_policy = "marker"
         self.missing = missing
-        #: Languages already told about a nested catalogue, so a reload does
-        #: not repeat the same warning on every hot reload.
+        #: Keep normal flattening notes separate from strict-mode warnings:
+        #: a previous successful load must not hide a later actionable warning.
+        self._noted_nested: set[str] = set()
         self._warned_nested: set[str] = set()
         self._listeners: list[Callable[[str], None]] = []
 
@@ -438,10 +439,10 @@ class Translations:
 
         ``messages`` may be flat — ``"stats.balance"`` is one key whose name
         contains a dot — or written with sections. Sections are expanded with
-        :func:`flatten_catalogue` automatically (once per language a note says
-        so), because a nested object is otherwise unreachable: the lookup is
-        flat, so ``t("stats.balance")`` would miss and every string in the
-        section would render as a marker.
+        :func:`flatten_catalogue` automatically (a debug note describes the
+        conversion), because a nested object is otherwise unreachable: the
+        lookup is flat, so ``t("stats.balance")`` would miss and every string
+        in the section would render as a marker.
 
         ``flatten=False`` restores the strict pre-0.9.6 reading, where a nested
         object is kept as-is and warned about at load time. ``flatten=True`` is
@@ -479,16 +480,16 @@ class Translations:
         note shows one example key so the mapping is obvious, and says how to
         get the strict reading back.
         """
-        if tag in self._warned_nested:
+        if tag in self._noted_nested:
             return
-        self._warned_nested.add(tag)
+        self._noted_nested.add(tag)
         shown = ", ".join(repr(name) for name in nested[:3])
         more = f" (+{len(nested) - 3} more)" if len(nested) > 3 else ""
         example = next(
             (key for key in flattened if "." in key), ""
         )
         example_note = f" (for example {example!r})" if example else ""
-        _log.warning(
+        _log.debug(
             "catalogue %r stores nested objects under %s%s; keys are flat, so the "
             "sections were loaded as dotted keys%s. Pass flatten=False to read the "
             "file strictly flat instead.",
@@ -608,6 +609,7 @@ class Translations:
         """Forget every catalogue (used by tests)."""
         self._catalogues.clear()
         self._missing.clear()
+        self._noted_nested.clear()
         self._warned_nested.clear()
         self._language = self.default_language
 

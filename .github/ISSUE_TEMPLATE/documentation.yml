@@ -1,0 +1,35 @@
+name: Documentation issue
+description: Report missing, unclear or incorrect documentation
+title: "[Docs]: "
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Page or section
+      description: "Provide a link or the name of the relevant file and section."
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What needs improvement?
+      description: "Explain what is missing, unclear, incorrect or difficult to follow."
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested improvement
+      description: "Share a correction, example or alternative wording if you have one."
+  - type: input
+    id: version
+    attributes:
+      label: PyMobile version or commit
+      description: "If the issue depends on a particular version, include it here."
+  - type: checkboxes
+    id: conduct
+    attributes:
+      label: Code of Conduct
+      options:
+        - label: I have read and agree to the [Code of Conduct](https://github.com/Maksum867/PyMobile/blob/main/docs/CODE_OF_CONDUCT.md) and accept its rules.
+          required: true

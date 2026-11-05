@@ -374,18 +374,14 @@ class TestFlatKeys:
     def test_nested_catalogue_is_flattened_at_load_time(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """Sections in a JSON file are readable as dotted keys, and the load
-        says what it did — silence used to mean every dotted key missed."""
+        """Sections become dotted keys without a warning in normal use."""
         from pymobile.logging import configure
 
         configure("warning")
         capsys.readouterr()
         catalogue = self._catalogue()
         catalogue.load({"stats": {"balance": "Баланс", "income": "Дохід"}}, language="uk")
-        err = capsys.readouterr().err
-        assert "nested objects" in err
-        assert "'stats'" in err
-        assert "dotted keys" in err
+        assert "nested objects" not in capsys.readouterr().err
         catalogue.use("uk")
         assert catalogue.get("stats.balance") == "Баланс"
         assert catalogue.get("stats.income") == "Дохід"
@@ -395,12 +391,18 @@ class TestFlatKeys:
     ) -> None:
         from pymobile.logging import configure
 
-        configure("warning")
-        capsys.readouterr()
-        catalogue = self._catalogue()
-        catalogue.load({"stats": {"balance": "Баланс"}}, language="uk")
-        catalogue.load({"stats": {"balance": "Баланс"}}, language="uk")
-        assert capsys.readouterr().err.count("nested objects") == 1
+        configure("debug")
+        try:
+            capsys.readouterr()
+            catalogue = self._catalogue()
+            catalogue.load({"stats": {"balance": "Баланс"}}, language="uk")
+            catalogue.load({"stats": {"balance": "Баланс"}}, language="uk")
+            err = capsys.readouterr().err
+            assert err.count("nested objects") == 1
+            assert "'stats'" in err
+            assert "dotted keys" in err
+        finally:
+            configure("warning")
 
     def test_plural_forms_are_not_mistaken_for_a_namespace(
         self, capsys: pytest.CaptureFixture[str]

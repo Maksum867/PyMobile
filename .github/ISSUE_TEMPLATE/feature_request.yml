@@ -7,19 +7,38 @@ body:
     id: problem
     attributes:
       label: Problem to solve
+      description: "Describe the use case and who would benefit."
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
-      label: Proposed API and example usage
-      description: "Include a small Python API sketch."
+      label: Proposed solution
+      description: "Describe the desired behaviour and, if useful, include a small Python API sketch."
     validations:
       required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds
+      description: "What other approaches have you considered?"
   - type: checkboxes
     id: parity
     attributes:
       label: Renderer scope
+      description: "If relevant, consider which renderers the feature should support."
       options:
         - label: I considered Android native renderer support.
         - label: I considered Web/GUI/ASCII preview parity or documented why it is not applicable.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: "Include compatibility concerns, examples or references if helpful. Do not include private data or credentials."
+  - type: checkboxes
+    id: conduct
+    attributes:
+      label: Code of Conduct
+      options:
+        - label: I have read and agree to the [Code of Conduct](https://github.com/Maksum867/PyMobile/blob/main/docs/CODE_OF_CONDUCT.md) and accept its rules.
+          required: true

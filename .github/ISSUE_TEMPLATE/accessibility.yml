@@ -1,0 +1,36 @@
+name: Accessibility issue
+description: Report an accessibility barrier or suggest an improvement
+title: "[Accessibility]: "
+body:
+  - type: markdown
+    attributes:
+      value: "Please do not include sensitive or personal information in a public report. If the form is inaccessible or you prefer a private report, see the contact information in the [accessibility guide](https://github.com/Maksum867/PyMobile/blob/main/docs/ACCESSIBILITY.md#reporting-a-barrier)."
+  - type: textarea
+    id: barrier
+    attributes:
+      label: Accessibility barrier
+      description: "Describe the affected screen or control, what happened, and what you expected."
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: "Include a minimal example if possible."
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and assistive technology
+      description: "If relevant and comfortable to share, include the PyMobile version, device and Android version or browser, assistive technology, and settings."
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: "Screenshots, logs or a proposed improvement can help; remove sensitive information first."
+  - type: checkboxes
+    id: conduct
+    attributes:
+      label: Code of Conduct
+      options:
+        - label: I have read and agree to the [Code of Conduct](https://github.com/Maksum867/PyMobile/blob/main/docs/CODE_OF_CONDUCT.md) and accept its rules.
+          required: true

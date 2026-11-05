@@ -17,7 +17,7 @@ import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, overload
 
 from ..errors import PyMobileError
 from ..log import configure, get_logger
@@ -40,6 +40,7 @@ from .ui.registry import unknown_types
 from .ui.screen import Navigator, Screen, ScreenT
 from .ui.snackbar import DEFAULT_ACTION_DURATION, DEFAULT_DURATION, SNACKBAR_ID, Snackbar
 from .ui.theme import Theme
+from .ui.widget import Widget
 
 #: Event kind the device bridge uses to wake the event loop for UI calls.
 WAKE_EVENT = "__wake__"
@@ -255,6 +256,22 @@ def _weak_language_listener(app: App) -> Callable[[str], None]:
     return listener
 
 
+class _WidgetScreen(Screen):
+    """A retained widget tree hosted by a normal screen and navigator."""
+
+    def __init__(self, widget: Widget, title: str) -> None:
+        if widget.parent is not None or widget.screen is not None:
+            raise ValueError("the root widget is already attached to a container or screen")
+        super().__init__(title)
+        self._widget = widget
+
+    def build(self) -> Widget:
+        return self._widget
+
+    def on_unmount(self) -> None:
+        self._detach_tree()
+
+
 class App:
     """Root object of a PyMobile application.
 
@@ -262,6 +279,11 @@ class App:
 
         app = App("Demo")
         app.run(HomeScreen())
+
+    A custom light ``theme`` gets a derived dark counterpart for
+    ``set_theme("dark")``. Pass ``dark_theme=Theme("dark", ...)`` to use a
+    hand-tuned counterpart instead. The theme name determines whether a Theme
+    is light or dark, as described by :attr:`Theme.is_dark`.
     """
 
     def __init__(
@@ -274,12 +296,19 @@ class App:
         auto_render: bool = True,
         storage_path: str | None = None,
         theme: str | Theme | None = None,
+        dark_theme: Theme | None = None,
         version: str = "",
         package: str = "",
         log_file: str | None = None,
         transition: str | None = "fade",
         transition_duration_ms: int = 220,
     ) -> None:
+        if dark_theme is not None and not isinstance(dark_theme, Theme):
+            raise TypeError("dark_theme must be a Theme")
+        if dark_theme is not None and not dark_theme.is_dark:
+            raise ValueError("dark_theme must be named 'dark' so renderers recognize it")
+        if isinstance(theme, Theme) and theme.is_dark and dark_theme is not None:
+            raise ValueError("pass a dark theme as either theme or dark_theme, not both")
         if transition not in (None, "none", "fade", "slide", "scale"):
             raise ValueError("transition must be one of: none, fade, slide, scale")
         if (
@@ -316,6 +345,11 @@ class App:
             if storage_path is not None
             else Storage(_app_store_path(self.package))
         )
+        self._light_theme = Theme.light()
+        self._dark_theme = dark_theme or Theme.dark()
+        self._derive_dark_theme = dark_theme is None
+        if isinstance(theme, Theme):
+            self._register_theme(theme)
         self._theme = self._resolve_theme(theme)
         self._scheduler = Scheduler()
         self.jobs = JobManager(deliver=self._deliver)
@@ -428,31 +462,57 @@ class App:
         }
 
     def set_theme(self, theme: str | Theme) -> None:
-        """Switch the theme and redraw the visible screen (like a language change)."""
+        """Switch to a registered light/dark palette or install a Theme and redraw.
+
+        A light Theme is retained when switching to dark; unless a dark Theme
+        was supplied explicitly, its dark counterpart is derived automatically.
+        A Theme named ``dark`` registers an explicit dark counterpart.
+        """
+        if isinstance(theme, Theme):
+            self._register_theme(theme)
         resolved = self._resolve_theme(theme)
-        if resolved.name == self._theme.name and resolved.as_dict() == self._theme.as_dict():
+        if resolved.name == self._theme.name and resolved._colors == self._theme._colors:
             return
         self._theme = resolved
         self.events.emit("app:theme", source=resolved.name)
         self._refresh_screens()
 
-    @staticmethod
-    def _resolve_theme(theme: str | Theme | None) -> Theme:
-        """Turn a name/Theme/None into a :class:`Theme` (defaults to light)."""
+    def _register_theme(self, theme: Theme) -> None:
+        if theme.is_dark:
+            self._dark_theme = theme
+            self._derive_dark_theme = False
+        else:
+            self._light_theme = theme
+            if self._derive_dark_theme:
+                # Preserve the built-in pair only for the built-in light
+                # palette, including the absence of extra application colours.
+                builtin = Theme.light()
+                self._dark_theme = (
+                    Theme.dark()
+                    if theme.name == builtin.name and theme._colors == builtin._colors
+                    else Theme.dark_from(theme)
+                )
+
+    def _resolve_theme(self, theme: str | Theme | None) -> Theme:
+        """Turn a name/Theme/None into the app's selected palette."""
         if theme is None:
-            return Theme.light()
+            return self._light_theme
         if isinstance(theme, Theme):
             return theme
         lowered = theme.strip().lower()
         if lowered in ("dark", "dark_mode"):
-            return Theme.dark()
+            return self._dark_theme
         if lowered in ("light", "light_mode", ""):
-            return Theme.light()
+            return self._light_theme
         raise ValueError(f"unknown theme {theme!r}; use 'light', 'dark' or a Theme object")
 
     # -- lifecycle ---------------------------------------------------------
-    def run(self, screen: Screen) -> None:
-        """Start the app with ``screen`` as the initial view.
+    def run(self, screen: Screen | Widget) -> None:
+        """Start with a Screen or a retained widget tree as the initial view.
+
+        A widget is wrapped in an ordinary Screen. Its existing instances are
+        reused on refresh; use a Screen subclass for custom lifecycle hooks or
+        a tree that must be rebuilt from application data.
 
         On a device this blocks in the UI event loop until the activity is
         destroyed; on a desktop it returns once the first screen is rendered,
@@ -476,6 +536,8 @@ class App:
                     "subscription; create a new App if the application should run again."
                 ),
             )
+        if isinstance(screen, Widget):
+            screen = _WidgetScreen(screen, self.name)
         configure(self._log_level, log_file=self._log_file)
         _log.info("starting %s on %s (bridge=%s)", self.name, self.platform, self.bridge.name)
         self._running = True
@@ -995,8 +1057,22 @@ class App:
             if flush:
                 self.render()
 
-    def push(self, screen: ScreenT) -> ScreenT:
-        """Navigate to a new screen."""
+    @overload
+    def push(self, screen: ScreenT) -> ScreenT: ...
+
+    @overload
+    def push(self, screen: type[ScreenT], *args: Any, **kwargs: Any) -> ScreenT: ...
+
+    def push(self, screen: ScreenT | type[ScreenT], *args: Any, **kwargs: Any) -> ScreenT:
+        """Navigate to an instance or construct a Screen class with arguments.
+
+        Both ``app.push(Details(item_id=7))`` and
+        ``app.push(Details, item_id=7)`` return the pushed Details instance.
+        """
+        if isinstance(screen, type) and issubclass(screen, Screen):
+            screen = screen(*args, **kwargs)
+        elif args or kwargs:
+            raise TypeError("constructor arguments require a Screen class, not an instance")
         return self.navigator.push(screen)
 
     def pop(self) -> Screen | None:

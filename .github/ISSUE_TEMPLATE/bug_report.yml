@@ -5,7 +5,7 @@ labels: [bug, triage]
 body:
   - type: markdown
     attributes:
-      value: "Do not include API tokens, private APKs, credentials or personal data. For security issues, use SECURITY.md instead."
+      value: "Do not include API tokens, private APKs, credentials or personal data. For security issues, follow the [Security Policy](https://github.com/Maksum867/PyMobile/blob/main/docs/SECURITY.md) instead of opening a public issue."
   - type: input
     id: version
     attributes:
@@ -16,13 +16,14 @@ body:
     id: platform
     attributes:
       label: Platform
-      options: [Android device, Android emulator, Windows desktop, macOS desktop, Linux desktop, Web preview]
+      options: [Android device, Android emulator, Windows desktop, macOS desktop, Linux desktop, Web preview, Other]
     validations:
       required: true
   - type: textarea
     id: reproduction
     attributes:
       label: Minimal reproduction steps
+      description: "Include a small example or relevant configuration when possible."
       placeholder: "1. ...\n2. ...\n3. ..."
     validations:
       required: true
@@ -33,7 +34,14 @@ body:
     validations:
       required: true
   - type: textarea
-    id: diagnostics
+    id: environment
     attributes:
-      label: Sanitised diagnostics / logcat
-      description: "Attach pymobile doctor, get_diagnostics(), and Android API/device model where relevant."
+      label: Environment and diagnostics
+      description: "If relevant, include Python and Android versions, device model, ABI, build mode, and sanitised output from pymobile doctor, get_diagnostics(), or logcat. Remove secrets and personal data."
+  - type: checkboxes
+    id: conduct
+    attributes:
+      label: Code of Conduct
+      options:
+        - label: I have read and agree to the [Code of Conduct](https://github.com/Maksum867/PyMobile/blob/main/docs/CODE_OF_CONDUCT.md) and accept its rules.
+          required: true

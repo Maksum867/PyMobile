@@ -156,6 +156,8 @@ _WIDGET_KEYWORDS = frozenset(
     {
         "id",
         "style",
+        "color",
+        "font_size",
         "visible",
         "enabled",
         "animate_visibility",
@@ -270,6 +272,14 @@ def _keyword_hint_for(name: str, keyword: str, valid: Collection[str]) -> str | 
                 "the contents in a tappable Card/Container."
             )
         return f"{name} takes {', '.join(handlers)} — not {keyword!r}."
+    # Keep an explanatory Style hint for a misspelt shortcut, rather than
+    # suggesting only the shorthand and obscuring the existing Style API.
+    shortcut = get_close_matches(keyword, ["color", "font_size"], n=1, cutoff=0.8)
+    if shortcut:
+        return (
+            f"Did you mean Style({shortcut[0]}=…) or {name}(…, {shortcut[0]}=…)? "
+            f"Style attributes can also be passed through style= on {name}."
+        )
     hint = _keyword_hint(keyword, sorted(valid))
     if hint is not None:
         return hint
@@ -420,6 +430,17 @@ class Widget:
     ) -> None:
         if accessibility_label is not None and not isinstance(accessibility_label, str):
             raise TypeError("accessibility_label must be a string or None")
+        # Built-ins previously rejected these keywords; custom widgets keep
+        # their existing extension-prop semantics. Explicit component-specific
+        # parameters (e.g. Icon.color) are consumed by their constructors.
+        if _is_builtin(self):
+            shortcuts = {key: props.pop(key) for key in ("color", "font_size") if key in props}
+            if shortcuts:
+                if style is not None:
+                    for key in shortcuts:
+                        if getattr(style, key) is not None:
+                            raise ValueError(f"{key} was provided both directly and in style")
+                style = (style or Style()).merge(**shortcuts)
         extension = _extra_props(extra)
         for name in props:
             if name in extension:
@@ -795,7 +816,7 @@ class Container(Widget):
 
     def __init__(
         self,
-        *children: Widget,
+        *children: Widget | Sequence[Widget],
         spacing: int | None = None,
         on_press: Callable[[], object] | None = None,
         on_long_press: Callable[[], object] | None = None,
@@ -815,7 +836,18 @@ class Container(Widget):
         self.on_press = on_press
         self.on_long_press = on_long_press
         self._children: list[Widget] = []
-        self.extend(children)
+        flattened: list[Widget] = []
+        for child in children:
+            if isinstance(child, Sequence) and not isinstance(child, (str, bytes, Widget)):
+                # Validate sequences before attaching any of their contents.
+                if any(not isinstance(item, Widget) for item in child):
+                    raise TypeError(f"{type(self).__name__} children must be Widget instances")
+                flattened.extend(child)
+            else:
+                # Keep scalar validation with add(): specialized containers
+                # such as RadioGroup have their own error type and rules.
+                flattened.append(child)
+        self.extend(flattened)
 
     @property
     def pressable(self) -> bool:
