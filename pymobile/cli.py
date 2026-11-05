@@ -21,7 +21,7 @@ import shutil
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from . import __version__ as __version__
 from .cli_tools import cmd_complete, cmd_completion, cmd_init, cmd_schema
@@ -38,6 +38,22 @@ _log = get_logger("cli")
 # ---------------------------------------------------------------------------
 # output helpers
 # ---------------------------------------------------------------------------
+def _safe_print(text: str, *, stream: TextIO | None = None, flush: bool = False) -> None:
+    """Print text without failing when a console cannot encode some characters.
+
+    Keep representable characters unchanged; escape the others rather than
+    losing application text. Do not alter the caller's stream configuration.
+    """
+    target = sys.stdout if stream is None else stream
+    encoding = getattr(target, "encoding", None)
+    if encoding:
+        try:
+            text.encode(encoding)
+        except UnicodeEncodeError:
+            text = text.encode(encoding, errors="backslashreplace").decode(encoding)
+    print(text, file=target, flush=flush)
+
+
 class _Out:
     """Minimal styled console output."""
 
@@ -50,22 +66,22 @@ class _Out:
     def ok(self, message: str) -> None:
         # stdout is block-buffered when piped while stderr is not, so progress
         # lines are flushed to keep them in order with warnings and errors.
-        print(self._paint("✓", "32") + f" {message}", flush=True)
+        _safe_print(self._paint("✓", "32") + f" {message}", flush=True)
 
     def info(self, message: str) -> None:
-        print(self._paint("•", "36") + f" {message}", flush=True)
+        _safe_print(self._paint("•", "36") + f" {message}", flush=True)
 
     def warn(self, message: str) -> None:
-        print(self._paint("!", "33") + f" {message}", file=sys.stderr)
+        _safe_print(self._paint("!", "33") + f" {message}", stream=sys.stderr)
 
     def error(self, message: str) -> None:
-        print(self._paint("✗", "31") + f" {message}", file=sys.stderr)
+        _safe_print(self._paint("✗", "31") + f" {message}", stream=sys.stderr)
 
     def hint(self, message: str) -> None:
-        print(f"  {self._paint('hint:', '2;37')} {message}", file=sys.stderr)
+        _safe_print(f"  {self._paint('hint:', '2;37')} {message}", stream=sys.stderr)
 
     def field(self, label: str, value: object) -> None:
-        print(f"  {label:<14} {value}", flush=True)
+        _safe_print(f"  {label:<14} {value}", flush=True)
 
 
 _out = _Out()

@@ -42,7 +42,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     from .core.app import App
 
     app = App.current()
-    print(render_ascii(tree, title=app.name if app is not None else config.name))
+    cli._safe_print(render_ascii(tree, title=app.name if app is not None else config.name))
     cli._out.hint("use --gui for a clickable window")
     return 0
 
@@ -328,7 +328,7 @@ def _reload(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> Non
         elapsed = (time.perf_counter() - started) * 1000
         cli._out.ok(f"wrote {args.png} in {elapsed:.0f} ms")
     else:
-        print(render_ascii(tree, show_ids=args.ids, title=display_title))
+        cli._safe_print(render_ascii(tree, show_ids=args.ids, title=display_title))
         cli._out.ok(f"rendered in {elapsed:.0f} ms")
 
 
@@ -396,7 +396,7 @@ def cmd_preview(args: argparse.Namespace) -> int:
         cli._out.ok(f"wrote a mockup of the screen to {path}")
         cli._out.hint("an approximation: fonts and system colours differ between phones")
     else:
-        print(render_ascii(tree, show_ids=args.ids, title=display_title))
+        cli._safe_print(render_ascii(tree, show_ids=args.ids, title=display_title))
     return 0
 
 

@@ -20,6 +20,9 @@ the project uses [semantic versioning](https://semver.org/).
 
 ### Fixed
 
+- CLI status messages and text previews no longer fail when redirected output
+  uses a limited encoding, such as a Windows code page. Unsupported characters
+  are escaped instead of being lost.
 - `Theme.dark_from()` checks accent contrast against the generated surface and
   can lighten colours all the way to white. The default light muted text and
   dark primary colours have been adjusted for contrast on their surfaces.
