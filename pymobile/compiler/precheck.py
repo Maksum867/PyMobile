@@ -73,6 +73,21 @@ def has_project_files(root: str | Path) -> bool:
     return _config_file(Path(root).resolve()) is not None
 
 
+def _icon_problem(config: ProjectConfig) -> PyMobileError | None:
+    """The same icon rules ``build`` enforces, without writing anything."""
+    from .icon import _validate_source
+
+    icon = config.icon_path
+    if icon is None:
+        return None
+    try:
+        _validate_source(icon)
+    except PyMobileError as exc:
+        return exc
+    return None
+
+
+
 def check_project(root: str | Path, *, run_app: bool = True) -> list[Finding]:
     """Return every problem found in the project at ``root``; empty when it is ready.
 
@@ -111,6 +126,19 @@ def check_project(root: str | Path, *, run_app: bool = True) -> list[Finding]:
         config = load_config(config_file)
     except PyMobileError as exc:
         findings.extend(_config_findings(config_file, text, exc))
+
+    if config is not None and config.icon:
+        icon_problem = _icon_problem(config)
+        if icon_problem is not None:
+            findings.append(
+                Finding(
+                    config_file,
+                    icon_problem.message,
+                    _key_line(text, "icon"),
+                    None,
+                    hint=icon_problem.hint,
+                )
+            )
 
     entry = config.entrypoint_path if config is not None else root / "main.py"
     if not entry.is_file():

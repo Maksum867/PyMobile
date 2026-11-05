@@ -3,6 +3,26 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Storage read errors are retryable.** A store that could not be read
+  (permissions, I/O) or a corrupt file that could not be moved aside no longer
+  stays failed for the rest of the process: the next access tries again. Schema
+  and migration failures are still sticky, so data is never served or rewritten
+  after a rejected load.
+- **Storage fails where it is opened.** `Storage(...)` loads the store in its
+  constructor, so a newer schema or a failing migration raises there instead of
+  at some later first access.
+- **Unknown HTTP options name the real problem.** `get(url, retries=2)` raises a
+  `TypeError` that says `retries` is set on `HttpClient(...)`, not per request;
+  unknown options are rejected by the verb that received them.
+- **`pymobile check` validates the icon.** A missing or unsupported `icon` is
+  reported by `check`, with the same rules `build` applies.
+- **Starter `form` template** sets `accessibility_label`, so `check-ui` no
+  longer warns about it.
+
 ## [0.11.1] — 2026-11-01
 
 ### Fixed
