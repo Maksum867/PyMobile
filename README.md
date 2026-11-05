@@ -245,6 +245,23 @@ $env:ANDROID_HOME = "C:\...\Android\Sdk"   # Windows PowerShell
 
 You need `build-tools;35.0.0` and `platforms;android-35`.
 
+### Environment variables
+
+PyMobile looks for the Android SDK in this order: the `--sdk PATH` option, the
+toolchain installed by `pymobile setup-sdk` (`$PYMOBILE_SDK_HOME/sdk`),
+`ANDROID_HOME`, `ANDROID_SDK_ROOT`, `PYMOBILE_SDK_HOME` itself if it contains an
+SDK, and finally `~/.andro/sdk`, `~/Android/Sdk`, `~/Library/Android/sdk` and
+`/usr/lib/android-sdk`. `pymobile doctor` shows the SDK it found.
+
+| Variable | Used for | Set it when |
+| --- | --- | --- |
+| `ANDROID_HOME` | Android SDK root (build-tools, platforms, `adb`) | You have your own SDK, for example from Android Studio |
+| `ANDROID_SDK_ROOT` | Same as `ANDROID_HOME`, read only when that is unset | Your tools already use this name |
+| `JAVA_HOME` | JDK 17 or newer for the build tools | You use your own JDK. `setup-sdk` installs one |
+| `PYMOBILE_SDK_HOME` | Where `setup-sdk` installs the toolchain (default `~/.andro`) | You want the install somewhere else |
+| `PYMOBILE_KEYSTORE_DIR` | Folder for the per-app debug keystores (default `~/.pymobile/keystores`) | You share the debug key between machines or CI runs |
+| `PYMOBILE_KS_PASS`, `PYMOBILE_KEY_PASS` | Passwords for a release keystore | You make release builds. Passing them on the command line (`--ks-pass`) still works but prints a warning |
+
 ### If the `pymobile` command is not found
 
 Common on Windows when pip's scripts directory is not on `PATH`. This form
@@ -2095,6 +2112,16 @@ client.put("/items/1", json={"name": "Updated"})
 client.delete("/items/1")
 ```
 
+`retries`, `backoff`, `cache`, `security`, `user_agent` and `base_url` are set
+once on `HttpClient(...)`. A request accepts `json`, `data`, `headers`, `timeout` and
+`retry_safe`; `get` also takes `params`. Passing a client option to a verb, as in
+`client.get("/items", retries=2)`, raises a `TypeError` that says where the
+option belongs.
+
+`retries` applies only to GET, HEAD and OPTIONS. POST, PUT and DELETE are not
+retried automatically, because a retry could repeat a side effect. Pass
+`retry_safe=True` on one request to opt in.
+
 Synchronous verbs return a `Response`; `HttpFuture.get()` returns the same
 object for an asynchronous request:
 
@@ -2638,6 +2665,18 @@ that talks to nothing, or over plain HTTP on a local network.
 16.6 MB   0.3.0                              duplicate libraries removed
 11.7 MB   0.3.0 --minimal-stdlib --no-ssl
 ```
+
+### Troubleshooting the build
+
+| What you see | Cause | Fix |
+| --- | --- | --- |
+| `Icon not found: assets/nope.png` | `icon` in `pymobile.toml` points at a missing file. Paths are relative to the project folder | Correct the path. `pymobile check` now reports the same error before you build |
+| `main.py:53:29: error: syntax error: expected ':'` | Python syntax error at file, line and column | Fix the line shown. `pymobile check` reports it without building |
+| `pymobile.toml:20: unknown configuration key 'min_sdkk'` with a "did you mean" hint | Misspelled key | Use the suggested key |
+| `start.py: entry point not found` | The entry point in `pymobile.toml` does not exist in the project | Add the file or correct the entry point |
+| `pymobile: command not found` | pip's scripts folder is not on `PATH` | Run `python -m pymobile build --native` |
+| The Android SDK or JDK is not found | No SDK or JDK where PyMobile looks | Run `pymobile setup-sdk`, or set `ANDROID_HOME` and `JAVA_HOME` (see [Environment variables](#environment-variables)), then run `pymobile doctor` |
+| An installed app refuses the new APK because the signatures differ | The new build uses a different key than the installed app | Use the same keystore, or uninstall the old app first, which deletes its data. See [Signing](#signing) |
 
 ---
 

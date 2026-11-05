@@ -23,6 +23,11 @@ the project uses [semantic versioning](https://semver.org/).
 - **Starter `form` template** sets `accessibility_label`, so `check-ui` no
   longer warns about it.
 
+### Documentation
+
+- README: environment variables and the SDK lookup order; a troubleshooting table
+  for `build`; which HTTP options belong to `HttpClient(...)` and which to a request.
+
 ## [0.11.1] — 2026-11-01
 
 ### Fixed
