@@ -95,20 +95,20 @@ def test_web_avatar_source_is_escaped_and_failure_preserves_initials():
 
 
 def test_android_identity_source_and_patch_contract():
-    source = (JAVA / "ViewControls.java").read_text()
+    source = (JAVA / "ViewControls.java").read_text(encoding="utf-8")
     assert "GradientDrawable.OVAL" in source and "pill.setCornerRadius(owner.dp(999))" in source
     assert "offsetByCodePoints" in source and "toUpperCase(java.util.Locale.ROOT)" in source
     assert "new AvatarTextView" in source and "canvas.clipPath(clip)" in source
     assert "photo.bitmap = source.isEmpty() ? null : loadLocalImage(source)" in source
     assert "image.setImageBitmap(loadLocalImage(source))" in source
-    updates = (JAVA / "ViewUpdates.java").read_text()
+    updates = (JAVA / "ViewUpdates.java").read_text(encoding="utf-8")
     assert "owner.controls.applyAvatar((TextView) view, props)" in updates
 
 
 @pytest.mark.parametrize("name", ["getView", "getDropDownView"])
 def test_android_adapters_colour_selected_and_popup_rows(name):
     for filename in ["ViewInputs.java", "AdvancedViews.java"]:
-        source = (JAVA / filename).read_text()
+        source = (JAVA / filename).read_text(encoding="utf-8")
         assert f"View {name}(" in source and f"colour(super.{name}(" in source
         assert "setTextColor(textColor)" in source and "setBackgroundColor(surfaceColor)" in source
 
@@ -125,15 +125,15 @@ def test_android_adapters_colour_selected_and_popup_rows(name):
     ],
 )
 def test_native_dynamic_tints_are_state_aware(api):
-    source = (JAVA / "ViewInputs.java").read_text()
+    source = (JAVA / "ViewInputs.java").read_text(encoding="utf-8")
     assert api in source
     assert "-android.R.attr.state_enabled" in source and "android.R.attr.state_checked" in source
     assert "owner.colorPrimary" in source
 
 
 def test_native_picker_stepper_buttons_and_dialogs_follow_theme():
-    inputs = (JAVA / "ViewInputs.java").read_text()
-    controls = (JAVA / "ViewControls.java").read_text()
+    inputs = (JAVA / "ViewInputs.java").read_text(encoding="utf-8")
+    controls = (JAVA / "ViewControls.java").read_text(encoding="utf-8")
     assert inputs.count("owner.controls.applyButton(button, new JSONObject())") == 2
     for name in ["minus", "plus"]:
         assert f"applyButton({name}, new JSONObject())" in controls

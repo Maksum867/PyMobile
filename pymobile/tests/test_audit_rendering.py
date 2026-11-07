@@ -137,20 +137,20 @@ def test_stack_layers_and_preserves_tap():
     assert 'role="button"' in html
     assert "base" in html and "overlay" in html
     source = Path(pymobile.__file__).parent / "core/ui/web.py"
-    assert ".stack > * {{ grid-area: 1 / 1;" in source.read_text()
+    assert ".stack > * {{ grid-area: 1 / 1;" in source.read_text(encoding="utf-8")
 
 
 def test_android_radius_mutates_instead_of_erasing():
-    source = (JAVA / "ViewStyles.java").read_text()
+    source = (JAVA / "ViewStyles.java").read_text(encoding="utf-8")
     assert "view.getBackground().mutate()" in source
     assert 'if (style.has("background"))' in source
     assert "&& view.getBackground() == null" in source
 
 
 def test_android_labels_are_separate_from_keys():
-    controls = (JAVA / "ViewControls.java").read_text()
-    inputs = (JAVA / "ViewInputs.java").read_text()
-    updates = (JAVA / "ViewUpdates.java").read_text()
+    controls = (JAVA / "ViewControls.java").read_text(encoding="utf-8")
+    inputs = (JAVA / "ViewInputs.java").read_text(encoding="utf-8")
+    updates = (JAVA / "ViewUpdates.java").read_text(encoding="utf-8")
     assert 'props.optJSONArray("labels")' in controls
     assert "tab.setText(optionLabel(props, i))" in controls
     assert "segment.setText(optionLabel(props, i))" in controls
@@ -162,8 +162,8 @@ def test_android_labels_are_separate_from_keys():
 
 
 def test_android_patch_dispatch_and_shared_styles():
-    source = (JAVA / "ViewUpdates.java").read_text()
-    controls = (JAVA / "ViewControls.java").read_text()
+    source = (JAVA / "ViewUpdates.java").read_text(encoding="utf-8")
+    controls = (JAVA / "ViewControls.java").read_text(encoding="utf-8")
     assert source.index("if (view instanceof RadioGroup)") < source.index(
         "if (view instanceof ViewGroup)"
     )
@@ -175,7 +175,7 @@ def test_android_patch_dispatch_and_shared_styles():
 
 
 def test_android_vector_closed_polygon_and_outline():
-    source = (JAVA / "AdvancedViews.java").read_text()
+    source = (JAVA / "AdvancedViews.java").read_text(encoding="utf-8")
     assert "if (polygon) path.close()" in source
     assert 'polygon && s.optBoolean("fill", true)' in source
     rect = source.split('else if ("rect".equals(type))')[1].split("else if")[0]
