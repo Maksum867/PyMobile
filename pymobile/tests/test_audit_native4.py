@@ -257,7 +257,7 @@ def test_mockup_primary_button_chip_and_appbar_use_semantic_colour(layout):
 
 
 def test_android_table_navigation_and_image_contracts():
-    source = (JAVA / "ViewControls.java").read_text()
+    source = (JAVA / "ViewControls.java").read_text(encoding="utf-8")
     table = source.split("View buildDataTable(")[1].split("boolean updateDataTable")[0]
     assert "new TableLayout" in table and table.count("new TableRow") == 2
     assert "setStretchAllColumns(true)" in table and "setShrinkAllColumns(true)" in table
@@ -281,7 +281,7 @@ def test_real_java_contrast_method_matches_python(tmp_path):
         java = java or shutil.which(str(binary / ("java" + suffix)))
     if not javac or not java:
         pytest.skip("JDK needed to execute the Java contrast algorithm")
-    source = (JAVA / "ViewBuilder.java").read_text()
+    source = (JAVA / "ViewBuilder.java").read_text(encoding="utf-8")
     methods = source[
         source.index("    static int readableOn(int background)") : source.index(
             "    View buildTextInput("
