@@ -47,7 +47,7 @@ final class ViewBuilder {
 
     private final ViewContainers containers = new ViewContainers(this);
     private final ViewUpdates updates = new ViewUpdates(this);
-    private final ViewControls controls = new ViewControls(this);
+    final ViewControls controls = new ViewControls(this);
     private final ViewInputs inputs = new ViewInputs(this);
     private final ViewStyles styles = new ViewStyles(this);
     private final ViewOverlays overlays = new ViewOverlays(this);
@@ -85,16 +85,13 @@ final class ViewBuilder {
         JSONObject t = theme == null ? new JSONObject() : theme;
         colorPrimary = parseColor(t.optString("PRIMARY", ""), DEFAULT_PRIMARY);
         colorBackground = parseColor(t.optString("BACKGROUND", ""), Color.WHITE);
-        // SURFACE is the palette's card colour; the light preset's #F5F5F5
-        // looks washed out as a dialog, so the light default stays white.
-        colorSurface = t.optBoolean("dark", false)
-                ? parseColor(t.optString("SURFACE", ""), Color.parseColor("#1E1E1E"))
-                : Color.WHITE;
+        colorSurface = parseColor(t.optString("SURFACE", ""),
+                t.optBoolean("dark", false) ? Color.parseColor("#1E1E1E") : Color.WHITE);
         colorText = parseColor(t.optString("TEXT", ""), Color.parseColor("#212121"));
         colorTextMuted = parseColor(t.optString("TEXT_MUTED", ""), Color.parseColor("#757575"));
         // The destructive button follows the theme's ERROR colour.
         colorError = parseColor(t.optString("ERROR", ""), Color.parseColor("#C62828"));
-        colorOnPrimary = Color.WHITE;
+        colorOnPrimary = parseColor(t.optString("ON_PRIMARY", ""), readableOn(colorPrimary, colorSurface));
         darkTheme = t.optBoolean("dark", false);
         return true;
     }
@@ -633,10 +630,21 @@ final class ViewBuilder {
 
     /** Black or white, whichever is legible on {@code background}. */
     static int readableOn(int background) {
-        double luminance = (0.299 * Color.red(background)
-                + 0.587 * Color.green(background)
-                + 0.114 * Color.blue(background)) / 255.0;
-        return luminance > 0.6 ? Color.BLACK : Color.WHITE;
+        return readableOn(background, Color.WHITE);
+    }
+
+    static int readableOn(int background, int surface) {
+        double a = Color.alpha(background) / 255.0, sa = Color.alpha(surface) / 255.0;
+        double r = Color.red(background) * a + (Color.red(surface) * sa + 255 * (1 - sa)) * (1 - a);
+        double g = Color.green(background) * a + (Color.green(surface) * sa + 255 * (1 - sa)) * (1 - a);
+        double b = Color.blue(background) * a + (Color.blue(surface) * sa + 255 * (1 - sa)) * (1 - a);
+        double luminance = 0.2126 * linearChannel(r) + 0.7152 * linearChannel(g) + 0.0722 * linearChannel(b);
+        return (luminance + 0.05) / 0.05 >= 1.05 / (luminance + 0.05) ? Color.BLACK : Color.WHITE;
+    }
+
+    private static double linearChannel(double channel) {
+        double value = channel / 255.0;
+        return value <= 0.04045 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4);
     }
 
     View buildTextInput(final String id, JSONObject props) {
@@ -875,6 +883,8 @@ final class ViewBuilder {
     void setLongPress(View row, final String id, boolean enabled) {
         listRenderer.setLongPress(row, id, enabled);
     }
+
+    void tintProgress(android.widget.ProgressBar bar) { inputs.tintProgress(bar); }
 
     View buildProgress(JSONObject props) {
         return controls.buildProgress(props);

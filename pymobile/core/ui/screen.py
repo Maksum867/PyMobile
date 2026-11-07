@@ -14,6 +14,7 @@ from ...errors import PyMobileError
 from ...log import get_logger
 from ..events import Event, Subscription
 from ..i18n import translations
+from ..jobs import JobHandle
 from .widget import W, Widget, widget_scope
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -103,6 +104,8 @@ class Screen:
         self._warned_manual_render = False
         self._warned_offstage_refresh = False
         self._subscriptions: list[Subscription] = []
+        self._jobs: list[JobHandle] = []
+        self._job_generation = 0
 
     @property
     def app(self) -> App:
@@ -165,8 +168,7 @@ class Screen:
                 # build() → rebuild() is a request for the *next* frame: the
                 # tree being assembled right now is the newest one available.
                 raise PyMobileError(
-                    f"{type(self).__name__}.build() asked for a rebuild while it "
-                    "was running",
+                    f"{type(self).__name__}.build() asked for a rebuild while it was running",
                     hint=(
                         "A build() cannot rebuild itself. Move the call out of "
                         "build() (a button handler, on_show, on_mount) or emit "
@@ -419,9 +421,7 @@ class Screen:
         opened: the list under a form kept saying "2 items" after the third
         one was saved, with no error to explain it.
         """
-        self.app.notify_data_changed(
-            rebuild_current=rebuild_current, source=self.title
-        )
+        self.app.notify_data_changed(rebuild_current=rebuild_current, source=self.title)
 
     def _warn_offstage_refresh(self, message: str) -> None:
         """Explain a refresh() that cannot repaint anything — once per screen."""
@@ -495,6 +495,33 @@ class Screen:
         subscription = self._app.events.on(event, handler)
         self._subscriptions.append(subscription)
         return subscription
+
+    def enqueue_job(self, fn: Callable[[], Any], *, name: str | None = None) -> JobHandle:
+        """Run background work bound to this mount of the screen.
+
+        Register success/error callbacks with ``.then(...)`` as usual. Both
+        queued and late callbacks are suppressed after unmount, even if this
+        same Screen instance is subsequently mounted again. Covered screens
+        remain mounted and may receive results. Running Python work cannot be
+        interrupted; only delivery and pending work are cancelled.
+        """
+        if not self.mounted:
+            raise PyMobileError("enqueue_job() requires a mounted screen")
+        generation = self._job_generation
+        handle = self.app.jobs.enqueue(
+            fn,
+            name=name,
+            callback_guard=lambda: self.mounted and self._job_generation == generation,
+        )
+        self._jobs = [job for job in self._jobs if not job.done]
+        self._jobs.append(handle)
+        return handle
+
+    def _cancel_jobs(self) -> None:
+        self._job_generation += 1
+        for handle in self._jobs:
+            handle.cancel()
+        self._jobs.clear()
 
     def _cancel_subscriptions(self) -> None:
         """Drop every subscription made through :meth:`on`."""
@@ -600,6 +627,7 @@ class Navigator:
         screen._is_current = False
         screen._mounted = False
         screen._detached = True
+        screen._cancel_jobs()
         try:
             screen.on_unmount()
         finally:
@@ -690,9 +718,7 @@ class Navigator:
             try:
                 self._discard(top)
             except Exception:
-                _log.exception(
-                    "on_unmount of %s raised; the screen was still released", top.title
-                )
+                _log.exception("on_unmount of %s raised; the screen was still released", top.title)
         return self._show_new(screen)
 
     def reset(self, screen: ScreenT) -> ScreenT:

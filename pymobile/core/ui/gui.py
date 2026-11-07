@@ -11,7 +11,8 @@ whenever the structure is unchanged. Rebuilding wholesale would destroy the
 focused Entry on every keystroke, which is precisely the bug the device
 renderer already learned to avoid.
 
-Tkinter ships with CPython, so this costs no dependency. It is a developer
+Tkinter needs no third-party Python package; Avatar photos optionally use Pillow.
+This is a developer
 tool: no attempt is made to look like Material Design, only to be faithful
 about structure, state and interaction.
 """
@@ -19,6 +20,7 @@ about structure, state and interaction.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ...log import get_logger
@@ -45,10 +47,14 @@ _PALETTE = {
     "text": "#212121",
     "muted": "#757575",
     "line": "#DFE3E8",
+    "surface": "#F5F5F5",
+    "primary": "#3F51B5",
+    "on_primary": "#FFFFFF",
+    "error": "#C62828",
 }
 
 #: Containers that simply stack their children vertically in the preview.
-_VERTICAL = ("Column", "Container", "SafeArea", "Stack", "Expanded", "Flexible")
+_VERTICAL = ("Column", "Container", "SafeArea", "Expanded", "Flexible")
 
 
 def tkinter_available() -> bool:
@@ -60,9 +66,7 @@ def tkinter_available() -> bool:
     return True
 
 
-def place_flow(
-    frame: Any, cells: list[Any], gap: int, run_gap: int, align: str = "start"
-) -> None:
+def place_flow(frame: Any, cells: list[Any], gap: int, run_gap: int, align: str = "start") -> None:
     """Lay ``cells`` out inside ``frame`` in lines, like the device's ``FlowLayout``.
 
     Tk has no flow geometry manager, so the cells are ``place()``d by hand from
@@ -94,15 +98,15 @@ def place_flow(
 
 
 def skeleton(node: dict[str, Any]) -> tuple[Any, ...]:
-    """Structural fingerprint of a tree: type, id and shape, but no values.
+    """Structural fingerprint, excluding values supported by in-place patches.
 
     Two trees with the same skeleton can be patched into one another; anything
-    else needs a rebuild.
+    else needs a rebuild. Styles and rebuild-required properties are included.
     """
     props = node.get("props", {})
     # Props that change which Tk widgets exist (a refresh button, swipe
     # buttons) are structure too.
-    extra = tuple(
+    extra: tuple[Any, ...] = tuple(
         bool(props.get(name))
         for name in ("refreshable", "refreshing", "swipe_left", "swipe_right")
         if name in props
@@ -110,6 +114,37 @@ def skeleton(node: dict[str, Any]) -> tuple[Any, ...]:
     if node.get("type") == "PageView":
         # Another page is another subtree: it cannot be patched into this one.
         extra += (props.get("value"), props.get("item_count"), props.get("loop"))
+    mutable = {
+        "Label": {"text"},
+        "Button": {"text"},
+        "TextInput": {"value", "revision"},
+        "SearchBar": {"value"},
+        "Switch": {"checked"},
+        "Checkbox": {"checked", "text"},
+        "Slider": {"value", "minimum", "maximum", "step"},
+        "Stepper": {"value"},
+        "Dropdown": {"value"},
+        "SegmentedButtons": {"value"},
+        "BottomNavigation": {"value"},
+        "Chip": {"selected", "text"},
+        "RadioButton": {"selected", "text"},
+        "ProgressBar": {"value", "maximum", "indeterminate"},
+        "ProgressText": {"value", "maximum", "text", "fraction", "percent"},
+        "Badge": {"text"},
+        "Avatar": {"text", "source"},
+        "RatingBar": {"rating"},
+        "ListTile": {"title", "subtitle", "trailing"},
+        "Icon": {"drawing"},
+        "IconButton": {"drawing"},
+        "Canvas": {"drawing", "background"},
+        "Chart": {"drawing", "background", "values"},
+        "AutoComplete": {"value", "revision", "options"},
+        "RangeSlider": {"low", "high"},
+    }.get(node.get("type", ""), set())
+    extra += (
+        repr(node.get("style", {})),
+        tuple((key, repr(value)) for key, value in sorted(props.items()) if key not in mutable),
+    )
     return (
         node.get("type"),
         node.get("id"),
@@ -126,25 +161,29 @@ class GuiPreview:
     turns rendered trees into Tk widgets and feeds interactions back in.
     """
 
-    def __init__(self, app: App, *, title: str = "", scale: float = 1.0) -> None:
+    def __init__(
+        self, app: App, *, title: str = "", scale: float = 1.0, assets: str | Path | None = None
+    ) -> None:
         import tkinter as tk
 
         self.app = app
+        self.assets = Path(assets) if assets is not None else Path.cwd()
         self._tk = tk
         self.root = tk.Tk()
         self.root.title(title or app.name)
         width, height = (int(value * scale) for value in _WINDOW)
         self.root.geometry(f"{width}x{height}")
-        self.root.configure(bg=_PALETTE["chrome"])
+        self.root.configure(bg=self.palette["chrome"])
         self.root.protocol("WM_DELETE_WINDOW", self._close)
 
-        header = tk.Frame(self.root, bg=_PALETTE["chrome"])
+        header = tk.Frame(self.root, bg=self.palette["chrome"])
         header.pack(fill="x")
+        self._header = header
         self._title = tk.Label(
             header,
             text=app.name,
-            bg=_PALETTE["chrome"],
-            fg=_PALETTE["text"],
+            bg=self.palette["chrome"],
+            fg=self.palette["text"],
             font=("TkDefaultFont", 10, "bold"),
             anchor="w",
             padx=12,
@@ -154,14 +193,14 @@ class GuiPreview:
         self._back = tk.Button(header, text="← back", command=self.back, relief="flat")
         # Packed and forgotten dynamically, so it only shows when it works.
 
-        self._canvas = tk.Frame(self.root, bg=_PALETTE["bg"])
+        self._canvas = tk.Frame(self.root, bg=self.palette["bg"])
         self._canvas.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
         self._status = tk.Label(
             self.root,
             text="",
-            bg=_PALETTE["chrome"],
-            fg=_PALETTE["muted"],
+            bg=self.palette["chrome"],
+            fg=self.palette["muted"],
             font=("TkDefaultFont", 9),
             anchor="w",
             padx=12,
@@ -208,6 +247,8 @@ class GuiPreview:
         self._skeleton: tuple[Any, ...] | None = None
         self._patching = False
         self._closing = False
+        self._revisions: dict[str, int] = {}
+        self._sync_theme()
 
     # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:
@@ -245,6 +286,8 @@ class GuiPreview:
     def _apply(self, tree: dict[str, Any]) -> None:
         if self._closing:
             return
+        if self._sync_theme():
+            self._skeleton = None
         depth = self.app.navigator.depth
         self._title.configure(text=str(tree.get("screen") or self.app.name))
         if depth > 1:
@@ -271,7 +314,12 @@ class GuiPreview:
         self._widgets.clear()
         self._variables.clear()
         self._extra_states.clear()
-        self._build(self._canvas, tree)
+        self._revisions.clear()
+        self._patching = True
+        try:
+            self._build(self._canvas, tree)
+        finally:
+            self._patching = False
 
     def _patch(self, node: dict[str, Any]) -> None:
         """Update the values of existing widgets in place."""
@@ -300,27 +348,91 @@ class GuiPreview:
             self._paint_stars(widget, props.get("rating", 0))
         elif widget is not None:
             state = "normal" if node.get("enabled", True) else "disabled"
-            if kind in ("Button", "TextInput", "Switch"):
+            if kind in (
+                "Button",
+                "TextInput",
+                "SearchBar",
+                "Switch",
+                "Checkbox",
+                "Chip",
+                "RadioButton",
+                "Dropdown",
+                "Slider",
+            ):
                 widget.configure(state=state)
             if kind in ("Label", "Button"):
                 widget.configure(text=text_value(props.get("text", "")))
-            elif kind == "ProgressBar":
-                if not props.get("indeterminate"):
-                    widget.configure(value=float(props.get("value", 0)))
-            elif kind == "Switch":
+            elif kind in ("ProgressBar", "ProgressText"):
+                bar = widget if kind == "ProgressBar" else widget.bar
+                mode = "indeterminate" if props.get("indeterminate") else "determinate"
+                changed = str(bar.cget("mode")) != mode
+                if changed:
+                    bar.stop()
+                bar.configure(
+                    maximum=float(props.get("maximum", 100)) or 100,
+                    value=float(props.get("value", 0)),
+                    mode=mode,
+                )
+                if changed and mode == "indeterminate":
+                    bar.start(60)
+                if kind == "ProgressText":
+                    widget.label.configure(text=text_value(props.get("text")))
+            elif kind == "Slider":
+                widget.configure(
+                    from_=float(props.get("minimum", 0)),
+                    to=float(props.get("maximum", 100)),
+                    resolution=float(props.get("step") or -1),
+                )
+                variable = self._variables[node["id"]]
+                if variable.get() != float(props.get("value", 0)):
+                    variable.set(float(props.get("value", 0)))
+            elif kind == "Dropdown":
+                values = props.get("options") or []
+                labels = props.get("labels") or values
+                value = props.get("value", "")
+                index = values.index(value) if value in values else -1
+                self._variables[node["id"]].set(
+                    labels[index] if 0 <= index < len(labels) else value
+                )
+            elif kind == "Stepper":
+                widget.label.configure(text=text_value(props.get("value", 0)))
+                for button in widget.buttons:
+                    button.configure(state=state)
+            elif kind in ("SegmentedButtons", "BottomNavigation"):
+                self._selection(widget, props, state)
+            elif kind == "Chip":
+                widget.configure(text=text_value(props.get("text")))
+                self._chip_colour(widget, node)
+            elif kind == "RadioButton":
+                widget.configure(text=text_value(props.get("text")))
+                self._variables[node["id"]].set(int(bool(props.get("selected"))))
+            elif kind in ("Avatar", "Badge"):
+                self._paint_identity(widget, node)
+            elif kind == "ListTile":
+                widget.configure(text=self._tile_text(props), state=state)
+            elif kind in ("Switch", "Checkbox"):
                 variable = self._variables.get(node["id"])
                 checked = bool(props.get("checked"))
                 if variable is not None and variable.get() != checked:
                     variable.set(checked)
-                widget.configure(text="on" if checked else "off")
-            elif kind == "TextInput":
+                widget.configure(
+                    text=text_value(props.get("text", ""))
+                    if kind == "Checkbox"
+                    else ("on" if checked else "off")
+                )
+            elif kind in ("TextInput", "SearchBar"):
                 variable = self._variables.get(node["id"])
                 value = text_value(props.get("value", ""))
                 # Never write into the field being typed in: it would move the
                 # caret to the end after every keystroke.
                 focused = self.root.focus_get() is widget
-                if variable is not None and not focused and variable.get() != value:
+                revision = int(props.get("revision", 0))
+                forced = kind == "SearchBar" or revision != self._revisions.get(node["id"], 0)
+                if variable is not None and (not focused or forced) and variable.get() != value:
+                    caret = widget.index("insert")
                     variable.set(value)
+                    widget.icursor(min(caret, len(value)))
+                self._revisions[node["id"]] = revision
 
         for child in node.get("children", ()):
             self._patch_node(child)
@@ -374,7 +486,7 @@ class GuiPreview:
         style = node.get("style", {})
         enabled = node.get("enabled", True)
         widget_id = str(node.get("id", ""))
-        background = self._background(style)
+        background = self._colour(style.get("background"), str(parent.cget("bg")))
         pad = 2
 
         custom = preview_renderer(kind, "gui")
@@ -391,7 +503,7 @@ class GuiPreview:
                 tk.Label(
                     parent,
                     text=f"<{kind}: {type(error).__name__}>",
-                    fg=_PALETTE["muted"],
+                    fg=self.palette["muted"],
                     bg=background,
                 ).pack(anchor="w")
             return
@@ -417,6 +529,36 @@ class GuiPreview:
             build_extra_gui(self, parent, node, background)
             return
 
+        if kind == "Stack":
+            frame = tk.Frame(parent, bg=background)
+            frame.pack(fill="x", pady=pad)
+            cells = []
+            for child in node.get("children", ()):
+                if not child.get("visible", True):
+                    continue
+                cell = tk.Frame(frame, bg=background)
+                self._build(cell, child)
+                cell.place(x=0, y=0, relwidth=1)
+                cells.append(cell)
+
+            def size_stack(_event: object = None) -> None:
+                height = style.get("height")
+                height = (
+                    int(height)
+                    if isinstance(height, (int, float))
+                    else max((cell.winfo_reqheight() for cell in cells), default=1)
+                )
+                if int(frame.cget("height")) != height:
+                    frame.configure(height=height)
+
+            frame.bind("<Configure>", size_stack)
+            for cell in cells:
+                cell.bind("<Configure>", size_stack)
+            frame.after_idle(size_stack)
+            self._widgets[widget_id] = frame
+            self._bind_tap(frame, node, widget_id)
+            return
+
         if kind in _VERTICAL:
             frame = tk.Frame(parent, bg=background)
             frame.pack(fill="both" if kind != "Column" else "x", expand=kind != "Column", pady=pad)
@@ -440,7 +582,7 @@ class GuiPreview:
 
         if kind == "Divider":
             thickness = max(1, int(props.get("thickness", 1)))
-            colour = _PALETTE["line"]
+            colour = self.palette["line"]
             tk.Frame(parent, height=thickness, bg=colour).pack(fill="x", pady=6)
             return
 
@@ -449,7 +591,7 @@ class GuiPreview:
                 parent,
                 text=text_value(props.get("text", "")),
                 bg=background,
-                fg=self._colour(style.get("color"), _PALETTE["text"]),
+                fg=self._colour(style.get("color"), self.palette["text"]),
                 font=self._font(style),
                 justify="left",
                 anchor="w",
@@ -467,12 +609,13 @@ class GuiPreview:
                 state="normal" if enabled else "disabled",
                 command=lambda: self._dispatch(widget_id, "press", ""),
             )
+            self._button_colour(button, node)
             button.pack(fill="x", pady=pad)
             self._widgets[widget_id] = button
             return
 
         if kind == "TextInput":
-            variable = tk.StringVar(value=text_value(props.get("value", "")))
+            variable = tk.StringVar(master=self.root, value=text_value(props.get("value", "")))
             entry = tk.Entry(
                 parent,
                 textvariable=variable,
@@ -487,12 +630,13 @@ class GuiPreview:
             )
             self._widgets[widget_id] = entry
             self._variables[widget_id] = variable
+            self._revisions[widget_id] = int(props.get("revision", 0))
             if props.get("placeholder") and not props.get("value"):
                 self._show_placeholder(entry, str(props["placeholder"]))
             return
 
         if kind == "Switch":
-            variable = tk.BooleanVar(value=bool(props.get("checked")))
+            variable = tk.BooleanVar(master=self.root, value=bool(props.get("checked")))
             toggle = tk.Checkbutton(
                 parent,
                 variable=variable,
@@ -515,6 +659,7 @@ class GuiPreview:
             maximum = float(props.get("maximum", 100)) or 100.0
             bar = ttk.Progressbar(
                 parent,
+                style="PyMobile.Horizontal.TProgressbar",
                 maximum=maximum,
                 value=float(props.get("value", 0)),
                 mode="indeterminate" if props.get("indeterminate") else "determinate",
@@ -529,7 +674,7 @@ class GuiPreview:
             image = tk.Label(
                 parent,
                 text=f"🖼 {props.get('source', '')}",
-                fg=_PALETTE["muted"],
+                fg=self.palette["muted"],
                 bg=background,
                 anchor="w",
             )
@@ -542,10 +687,11 @@ class GuiPreview:
             return
 
         if kind in ("Checkbox",):
-            variable = tk.BooleanVar(value=bool(props.get("checked")))
+            variable = tk.BooleanVar(master=self.root, value=bool(props.get("checked")))
             box = tk.Checkbutton(
                 parent,
                 variable=variable,
+                text=text_value(props.get("text", "")),
                 bg=background,
                 state="normal" if enabled else "disabled",
                 command=lambda: self._dispatch(
@@ -558,12 +704,14 @@ class GuiPreview:
             return
 
         if kind == "Slider":
-            variable = tk.DoubleVar(value=float(props.get("value", 0)))
+            variable = tk.DoubleVar(master=self.root, value=float(props.get("value", 0)))
             scale = tk.Scale(
                 parent,
                 from_=float(props.get("minimum", 0)),
                 to=float(props.get("maximum", 100)),
                 orient="horizontal",
+                resolution=float(props.get("step") or -1),
+                state="normal" if enabled else "disabled",
                 variable=variable,
                 command=lambda v: self._dispatch(widget_id, "change", str(v)),
             )
@@ -576,7 +724,7 @@ class GuiPreview:
             maximum = max(1, int(props.get("maximum", 5) or 5))
             frame = tk.Frame(parent, bg=background)
             frame.pack(anchor="w", pady=pad)
-            colour = self._colour(style.get("color"), _PALETTE["text"])
+            colour = self._colour(style.get("color"), self.palette["text"])
             stars: list[Any] = []
             for number in range(1, maximum + 1):
                 star = tk.Label(frame, bg=background, fg=colour, font=("TkDefaultFont", 18))
@@ -605,7 +753,7 @@ class GuiPreview:
                 current_label = option_labels[option_values.index(current_value)]
             except ValueError:
                 current_label = current_value
-            variable = tk.StringVar(value=current_label)
+            variable = tk.StringVar(master=self.root, value=current_label)
 
             def _pick(
                 lbl: str,
@@ -618,57 +766,82 @@ class GuiPreview:
                     self._dispatch(widget_id, "change", lbl)
 
             menu = tk.OptionMenu(parent, variable, *(option_labels or [""]), command=_pick)
+            menu.configure(state="normal" if enabled else "disabled")
             menu.pack(fill="x", pady=pad)
             self._widgets[widget_id] = menu
             self._variables[widget_id] = variable
             return
 
-        if kind in ("Chip", "Badge"):
-            tk.Label(
+        if kind == "Chip":
+            button = tk.Button(
                 parent,
-                text=text_value(props.get("text", "")),
-                bg=background,
-                fg=self._colour(style.get("color"), _PALETTE["text"]),
-                anchor="w",
-            ).pack(fill="x", pady=pad)
+                text=text_value(props.get("text")),
+                state="normal" if enabled else "disabled",
+                command=lambda: self._dispatch(widget_id, "press", ""),
+            )
+            self._chip_colour(button, node)
+            button.pack(anchor="w", pady=pad)
+            self._widgets[widget_id] = button
+            return
+
+        if kind in ("Badge", "Avatar"):
+            canvas = tk.Canvas(parent, bg=background, highlightthickness=0)
+            canvas.pack(anchor="w", pady=pad)
+            self._widgets[widget_id] = canvas
+            self._paint_identity(canvas, node)
             return
 
         if kind == "Stepper":
             frame = tk.Frame(parent, bg=background)
             frame.pack(fill="x", pady=pad)
-            tk.Button(
+            minus = tk.Button(
                 frame,
                 text="-",
+                state="normal" if enabled else "disabled",
                 command=lambda: self._dispatch(widget_id, "decrement", ""),
-            ).pack(side="left")
-            tk.Label(frame, text=text_value(props.get("value", 0)), bg=background).pack(
-                side="left", padx=8
             )
-            tk.Button(
+            minus.pack(side="left")
+            label = tk.Label(frame, text=text_value(props.get("value", 0)), bg=background)
+            label.pack(side="left", padx=8)
+            plus = tk.Button(
                 frame,
                 text="+",
+                state="normal" if enabled else "disabled",
                 command=lambda: self._dispatch(widget_id, "increment", ""),
-            ).pack(side="left")
+            )
+            plus.pack(side="left")
+            frame.label = label
+            frame.buttons = [minus, plus]
+            self._widgets[widget_id] = frame
             return
 
         if kind == "SearchBar":
-            variable = tk.StringVar(value=text_value(props.get("value", "")))
-            entry = tk.Entry(parent, textvariable=variable)
+            variable = tk.StringVar(master=self.root, value=text_value(props.get("value", "")))
+            entry = tk.Entry(
+                parent, textvariable=variable, state="normal" if enabled else "disabled"
+            )
             entry.pack(fill="x", pady=pad)
             variable.trace_add(
                 "write", lambda *_: self._dispatch(widget_id, "change", variable.get())
             )
             self._widgets[widget_id] = entry
+            self._variables[widget_id] = variable
             return
 
         if kind == "RadioButton":
-            tk.Radiobutton(
+            variable = tk.IntVar(master=self.root, value=int(bool(props.get("selected"))))
+            radio = tk.Radiobutton(
                 parent,
-                text=text_value(props.get("text", "")),
-                value=text_value(props.get("text", "")),
+                text=text_value(props.get("text")),
+                variable=variable,
+                value=1,
                 bg=background,
+                state="normal" if enabled else "disabled",
                 command=lambda: self._dispatch(widget_id, "press", ""),
-            ).pack(anchor="w")
+            )
+            radio.pack(anchor="w")
+            self._variables[widget_id] = variable
+            self._widgets[widget_id] = radio
             return
 
         if kind == "RadioGroup":
@@ -697,15 +870,30 @@ class GuiPreview:
                 buttons.append(button)
                 if not wrap:  # one row; Tk never squeezes a word into a column of letters
                     button.pack(side="left", expand=True, fill="x")
+            frame.buttons = buttons
+            self._selection(frame, props, "normal" if enabled else "disabled")
+            self._widgets[widget_id] = frame
             if wrap:
                 self._flow(frame, buttons, 0, 0, "start")
             return
 
         if kind == "ProgressText":
-            label_text = text_value(props.get("text", ""))
-            tk.Label(parent, text=label_text, bg=background, anchor="w").pack(
-                fill="x", pady=pad
+            from tkinter import ttk
+
+            frame = tk.Frame(parent, bg=background)
+            frame.pack(fill="x", pady=pad)
+            bar = ttk.Progressbar(
+                frame,
+                maximum=float(props.get("maximum", 100)) or 100,
+                value=float(props.get("value", 0)),
+                style="PyMobile.Horizontal.TProgressbar",
             )
+            bar.pack(fill="x")
+            label = tk.Label(frame, text=text_value(props.get("text")), bg=background, anchor="w")
+            label.pack(fill="x")
+            frame.bar = bar
+            frame.label = label
+            self._widgets[widget_id] = frame
             return
 
         if kind == "Link":
@@ -734,17 +922,6 @@ class GuiPreview:
                     bg=background,
                     anchor="w",
                 ).pack(fill="x")
-            return
-
-        if kind == "Avatar":
-            tk.Label(
-                parent,
-                text=text_value(props.get("text", "?")),
-                bg=self._colour(props.get("background"), "#3F51B5"),
-                fg=self._colour(props.get("color"), "#FFFFFF"),
-                width=4,
-                height=2,
-            ).pack(pady=pad)
             return
 
         if kind in ("List", "ListTile"):
@@ -784,10 +961,12 @@ class GuiPreview:
                         ).pack(side="right")
             tile = tk.Button(
                 holder,
-                text=text_value(props.get("title", "")),
+                text=self._tile_text(props),
+                state="normal" if enabled else "disabled",
                 command=lambda: self._dispatch(widget_id, "press", ""),
                 anchor="w",
             )
+            self._widgets[widget_id] = tile
             if holder is parent:
                 tile.pack(fill="x", pady=pad)
             else:
@@ -807,14 +986,20 @@ class GuiPreview:
             option_labels = [str(lbl) for lbl in (props.get("labels") or option_values)]
             while len(option_labels) < len(option_values):
                 option_labels.append(option_values[len(option_labels)])
+            buttons = []
             for val, lbl in zip(option_values, option_labels, strict=False):
                 selected = val == props.get("value")
-                tk.Button(
+                button = tk.Button(
                     bar,
                     text=lbl,
                     relief="sunken" if selected else "raised",
                     command=lambda v=val: self._dispatch(widget_id, "change", v),
-                ).pack(side="left", expand=True, fill="x")
+                )
+                button.pack(side="left", expand=True, fill="x")
+                buttons.append(button)
+            bar.buttons = buttons
+            self._selection(bar, props, "normal" if enabled else "disabled")
+            self._widgets[widget_id] = bar
             return
 
         if kind == "Dialog":
@@ -835,7 +1020,7 @@ class GuiPreview:
             entry.pack(anchor="w", pady=pad)
             return
 
-        tk.Label(parent, text=f"<{kind}>", fg=_PALETTE["muted"], bg=background).pack(anchor="w")
+        tk.Label(parent, text=f"<{kind}>", fg=self.palette["muted"], bg=background).pack(anchor="w")
 
     def _build_children(self, frame: tk.Misc, node: dict[str, Any], background: str) -> None:
         """Stack children vertically, honouring the container's spacing."""
@@ -973,12 +1158,12 @@ class GuiPreview:
     def _show_placeholder(self, entry: tk.Entry, text: str) -> None:
         """Grey placeholder text that disappears on focus."""
         entry.insert(0, text)
-        entry.configure(fg=_PALETTE["muted"])
+        entry.configure(fg=self.palette["muted"])
 
         def on_focus_in(_event: object) -> None:
             if entry.get() == text:
                 entry.delete(0, "end")
-                entry.configure(fg=_PALETTE["text"])
+                entry.configure(fg=self.palette["text"])
 
         entry.bind("<FocusIn>", on_focus_in)
 
@@ -1003,7 +1188,174 @@ class GuiPreview:
         return f"#{value[3:]}" if len(value) == 9 else value
 
     def _background(self, style: dict[str, Any]) -> str:
-        return self._colour(style.get("background"), _PALETTE["bg"])
+        return self._colour(style.get("background"), self.palette["bg"])
+
+    @property
+    def palette(self) -> dict[str, str]:
+        return getattr(self, "_palette", _PALETTE)
+
+    def _sync_theme(self) -> bool:
+        from tkinter import ttk
+
+        from .theme import Theme
+
+        theme = getattr(self.app, "theme", Theme.light())
+        names = {
+            "bg": "BACKGROUND",
+            "chrome": "SURFACE",
+            "surface": "SURFACE",
+            "text": "TEXT",
+            "muted": "TEXT_MUTED",
+            "line": "TEXT_MUTED",
+            "primary": "PRIMARY",
+            "on_primary": "ON_PRIMARY",
+            "error": "ERROR",
+        }
+        palette = {
+            key: self._colour(theme[name], _PALETTE.get(key, "#FFFFFF"))
+            for key, name in names.items()
+        }
+        if getattr(self, "_palette", None) == palette:
+            return False
+        self._palette = palette
+        self.root.configure(bg=palette["chrome"])
+        self._header.configure(bg=palette["chrome"])
+        self._canvas.configure(bg=palette["bg"])
+        self._title.configure(bg=palette["chrome"], fg=palette["text"])
+        self._status.configure(bg=palette["chrome"], fg=palette["muted"])
+        self._back.configure(
+            bg=palette["chrome"],
+            fg=palette["text"],
+            activebackground=palette["surface"],
+            activeforeground=palette["text"],
+        )
+        for resource, colour in {
+            "Background": palette["bg"],
+            "Foreground": palette["text"],
+            "activeBackground": palette["surface"],
+            "activeForeground": palette["text"],
+            "selectColor": palette["surface"],
+            "insertBackground": palette["text"],
+            "selectBackground": palette["primary"],
+            "selectForeground": palette["on_primary"],
+            "disabledForeground": palette["muted"],
+            "troughColor": palette["surface"],
+        }.items():
+            self.root.option_add("*" + resource, colour)
+        style = ttk.Style(self.root)
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+        style.configure(
+            "PyMobile.Horizontal.TProgressbar",
+            background=palette["primary"],
+            troughcolor=palette["surface"],
+            bordercolor=palette["surface"],
+        )
+        return True
+
+    def _button_colour(self, button: Any, node: dict[str, Any]) -> None:
+        from .theme import _readable_on
+
+        variant = node.get("props", {}).get("variant", "primary")
+        bg, fg = self.palette["primary"], self.palette["on_primary"]
+        if variant in ("text", "outlined", "tonal"):
+            bg, fg = self.palette["surface"], self.palette["primary"]
+        elif variant == "danger":
+            bg = self.palette["error"]
+            fg = _readable_on(bg)
+        style = node.get("style", {})
+        bg, fg = self._colour(style.get("background"), bg), self._colour(style.get("color"), fg)
+        button.configure(bg=bg, fg=fg, activebackground=bg, activeforeground=fg)
+
+    def _chip_colour(self, button: Any, node: dict[str, Any]) -> None:
+        selected = node.get("props", {}).get("selected", False)
+        style = node.get("style", {})
+        bg = self._colour(
+            style.get("background"), self.palette["primary" if selected else "surface"]
+        )
+        fg = self._colour(style.get("color"), self.palette["on_primary" if selected else "text"])
+        button.configure(
+            bg=bg,
+            fg=fg,
+            activebackground=bg,
+            activeforeground=fg,
+            relief="sunken" if selected else "raised",
+        )
+
+    def _selection(self, frame: Any, props: dict[str, Any], state: str) -> None:
+        for button, value in zip(frame.buttons, props.get("options", ()), strict=False):
+            selected = value == props.get("value")
+            bg = self.palette["primary" if selected else "surface"]
+            fg = self.palette["on_primary" if selected else "text"]
+            button.configure(
+                relief="sunken" if selected else "raised",
+                bg=bg,
+                fg=fg,
+                activebackground=bg,
+                activeforeground=fg,
+                state=state,
+            )
+
+    @staticmethod
+    def _tile_text(props: dict[str, Any]) -> str:
+        title = text_value(props.get("title"))
+        subtitle, trailing = text_value(props.get("subtitle")), text_value(props.get("trailing"))
+        return (
+            title + ("    " + trailing if trailing else "") + ("\n" + subtitle if subtitle else "")
+        )
+
+    def _paint_identity(self, canvas: Any, node: dict[str, Any]) -> None:
+        from tkinter.font import Font
+
+        props, style = node.get("props", {}), node.get("style", {})
+        signature = (repr(props), repr(style))
+        if getattr(canvas, "identity_signature", None) == signature:
+            return
+        canvas.identity_signature = signature
+        avatar = node.get("type") == "Avatar"
+        text = text_value(props.get("text"))
+        if avatar:
+            text = text[:2].upper()
+        font = self._font(style)
+        measured = Font(root=self.root, font=font)
+        natural_w = props.get("size", 48) if avatar else measured.measure(text) + 12
+        natural_h = props.get("size", 48) if avatar else measured.metrics("linespace") + 4
+        width, height = style.get("width"), style.get("height")
+        width = max(1, int(width if isinstance(width, (int, float)) else natural_w))
+        height = max(1, int(height if isinstance(height, (int, float)) else natural_h))
+        bg = self._colour(style.get("background", props.get("background")), self.palette["primary"])
+        fg = self._colour(style.get("color", props.get("color")), self.palette["on_primary"])
+        canvas.configure(width=width, height=height)
+        canvas.delete("all")
+        canvas.photo = None
+        if avatar:
+            canvas.create_oval(0, 0, width, height, fill=bg, outline="")
+        else:
+            radius = min(width, height) / 2
+            canvas.create_oval(0, 0, radius * 2, height, fill=bg, outline="")
+            canvas.create_oval(width - radius * 2, 0, width, height, fill=bg, outline="")
+            canvas.create_rectangle(radius, 0, width - radius, height, fill=bg, outline="")
+        canvas.create_text(width / 2, height / 2, text=text, fill=fg, font=font)
+        source = text_value(props.get("source")) if avatar else ""
+        if source:
+            try:
+                from PIL import Image, ImageChops, ImageDraw, ImageOps, ImageTk
+
+                path = Path(source)
+                if not path.is_absolute():
+                    path = self.assets / path
+                with Image.open(path) as original:
+                    photo = ImageOps.fit(original.convert("RGBA"), (width, height))
+                mask = Image.new("L", (width, height))
+                ImageDraw.Draw(mask).ellipse((0, 0, width - 1, height - 1), fill=255)
+                photo.putalpha(ImageChops.multiply(mask, photo.getchannel("A")))
+                canvas.photo = ImageTk.PhotoImage(photo, master=self.root)
+                # Photo replaces initials, but retains the coloured circular fallback.
+                canvas.delete("all")
+                canvas.create_oval(0, 0, width, height, fill=bg, outline="")
+                canvas.create_image(0, 0, anchor="nw", image=canvas.photo)
+            except (ImportError, OSError, ValueError):
+                pass  # Pillow is optional; missing/unsupported images keep initials.
 
     @property
     def tk(self) -> Any:

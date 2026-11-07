@@ -13,6 +13,8 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
+import android.widget.TableLayout;
+import android.widget.TableRow;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -49,6 +51,13 @@ final class ViewControls {
         return view;
     }
 
+    static String optionLabel(JSONObject props, int index) {
+        JSONArray labels = props.optJSONArray("labels");
+        JSONArray options = props.optJSONArray("options");
+        return labels != null && index < labels.length() && !labels.isNull(index)
+                ? labels.optString(index, "") : options.optString(index, "");
+    }
+
     // -- leaves -----------------------------------------------------------
 
     View buildBottomNavigation(final String id, JSONObject props) throws JSONException {
@@ -60,16 +69,23 @@ final class ViewControls {
             for (int i = 0; i < options.length(); i++) {
                 final String label = options.optString(i, "");
                 Button tab = new Button(owner.context);
-                tab.setText(label);
+                tab.setText(optionLabel(props, i));
+                tab.setTag(label);
                 tab.setAllCaps(false);
+                tab.setMinWidth(0);
+                tab.setMinimumWidth(0);
+                tab.setPadding(owner.dp(6), owner.dp(8), owner.dp(6), owner.dp(8));
+                tab.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+                tab.setSingleLine(true);
+                tab.setEllipsize(android.text.TextUtils.TruncateAt.END);
                 tab.setLayoutParams(new LinearLayout.LayoutParams(
                         0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
                 owner.styleTab(tab, label.equals(value));
                 tab.setOnClickListener(new View.OnClickListener() {
                     @Override
                     public void onClick(View v) {
-                        // Read the label at click time: a patch may rename tabs.
-                        Native.dispatchEvent(id, "change", ((Button) v).getText().toString());
+                        // The visible label may be translated; dispatch the stable key.
+                        Native.dispatchEvent(id, "change", String.valueOf(v.getTag()));
                     }
                 });
                 bar.addView(tab);
@@ -123,11 +139,23 @@ final class ViewControls {
      * are visually distinct on the device as well as in the previews.
      */
     View buildButton(final String id, JSONObject props) {
+        Button button = new Button(owner.context);
+        applyButton(button, props);
+        button.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Native.dispatchEvent(id, "press", "");
+            }
+        });
+        return button;
+    }
+
+    void applyButton(Button button, JSONObject props) {
         String variant = props.optString("variant", "primary");
         GradientDrawable shape = new GradientDrawable();
         shape.setCornerRadius(owner.dp(variant.equals("text") ? 0 : 10));
         int fill = owner.colorPrimary;
-        int textColour = Color.WHITE;
+        int textColour = owner.colorOnPrimary;
         if ("tonal".equals(variant)) {
             fill = owner.blend(owner.colorPrimary, owner.colorSurface, 0.82f);
             textColour = owner.readableOn(fill);
@@ -145,31 +173,17 @@ final class ViewControls {
         if (!"outlined".equals(variant) && !"text".equals(variant)) {
             shape.setColor(fill);
         }
-        Button button = new Button(owner.context);
         button.setBackground(shape);
         button.setTextColor(textColour);
         button.setText(props.optString("text", ""));
         button.setAllCaps(false);
         button.setElevation(owner.dp("primary".equals(variant) || "danger".equals(variant) ? 2 : 0));
         button.setPadding(owner.dp(20), owner.dp(10), owner.dp(20), owner.dp(10));
-        button.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                Native.dispatchEvent(id, "press", "");
-            }
-        });
-        return button;
     }
 
     View buildChip(final String id, JSONObject props) {
         Button chip = new Button(owner.context);
-        chip.setText(props.optString("text", ""));
-        chip.setAllCaps(false);
-        if (props.optBoolean("selected", false)) {
-            chip.setTextColor(Color.parseColor("#FFFFFF"));
-            chip.setBackgroundColor(owner.parseColor(props.optString("selectedColor", ""),
-                    owner.colorPrimary));
-        }
+        applyChip(chip, props);
         chip.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -179,15 +193,40 @@ final class ViewControls {
         return chip;
     }
 
-    View buildBadge(JSONObject props) {
-        TextView badge = new TextView(owner.context);
+    void applyChip(Button chip, JSONObject props) {
+        boolean selected = props.optBoolean("selected", false);
+        chip.setText(props.optString("text", ""));
+        chip.setAllCaps(false);
+        chip.setSelected(selected);
+        chip.setTextColor(selected ? owner.colorOnPrimary : owner.colorText);
+        GradientDrawable shape = new GradientDrawable();
+        shape.setColor(selected ? owner.colorPrimary : owner.colorSurface);
+        shape.setCornerRadius(owner.dp(999));
+        chip.setBackground(shape);
+    }
+
+    void applySegment(TextView segment, boolean selected) {
+        segment.setSelected(selected);
+        segment.setTextColor(selected ? owner.colorOnPrimary : owner.colorText);
+        segment.setBackgroundColor(selected ? owner.colorPrimary : Color.TRANSPARENT);
+    }
+
+    void applyBadge(TextView badge, JSONObject props) {
         badge.setText(props.optString("text", ""));
         badge.setTextColor(owner.parseColor(props.optString("color", "#FFFFFF"),
                 Color.parseColor("#FFFFFF")));
-        badge.setBackgroundColor(owner.parseColor(props.optString("background", ""), owner.colorPrimary));
+        android.graphics.drawable.GradientDrawable pill = new android.graphics.drawable.GradientDrawable();
+        pill.setColor(owner.parseColor(props.optString("background", ""), owner.colorPrimary));
+        pill.setCornerRadius(owner.dp(999));
+        badge.setBackground(pill);
         badge.setGravity(Gravity.CENTER);
         int pad = owner.dp(6);
         badge.setPadding(pad, owner.dp(2), pad, owner.dp(2));
+    }
+
+    View buildBadge(JSONObject props) {
+        TextView badge = new TextView(owner.context);
+        applyBadge(badge, props);
         return badge;
     }
 
@@ -197,6 +236,7 @@ final class ViewControls {
         row.setGravity(Gravity.CENTER);
 
         Button minus = new Button(owner.context);
+        applyButton(minus, new JSONObject());
         minus.setText("−");
         minus.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -211,6 +251,7 @@ final class ViewControls {
         value.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
         value.setTextColor(owner.colorText);
         Button plus = new Button(owner.context);
+        applyButton(plus, new JSONObject());
         plus.setText("+");
         plus.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -254,19 +295,15 @@ final class ViewControls {
             for (int i = 0; i < options.length(); i++) {
                 final String label = options.optString(i, "");
                 Button segment = new Button(owner.context);
-                segment.setText(label);
+                segment.setText(optionLabel(props, i));
+                segment.setTag(label);
                 segment.setAllCaps(false);
-                if (label.equals(selected)) {
-                    segment.setTextColor(owner.colorOnPrimary);
-                    segment.setBackgroundColor(owner.colorPrimary);
-                    selectedSegment = segment;
-                } else {
-                    segment.setTextColor(owner.colorText);
-                }
+                applySegment(segment, label.equals(selected));
+                if (label.equals(selected)) selectedSegment = segment;
                 segment.setOnClickListener(new View.OnClickListener() {
                     @Override
                     public void onClick(View v) {
-                        Native.dispatchEvent(id, "change", label);
+                        Native.dispatchEvent(id, "change", String.valueOf(v.getTag()));
                     }
                 });
                 if (wrap) {
@@ -327,6 +364,7 @@ final class ViewControls {
         box.setOrientation(LinearLayout.VERTICAL);
         ProgressBar bar = new ProgressBar(owner.context, null,
                 android.R.attr.progressBarStyleHorizontal);
+        owner.tintProgress(bar);
         owner.setScaledProgress(bar, props);
         box.addView(bar, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -339,13 +377,13 @@ final class ViewControls {
     }
 
     View buildDataTable(JSONObject node, JSONObject props) throws JSONException {
-        LinearLayout table = new LinearLayout(owner.context);
-        table.setOrientation(LinearLayout.VERTICAL);
+        TableLayout table = new TableLayout(owner.context);
+        table.setStretchAllColumns(true);
+        table.setShrinkAllColumns(true);
         JSONArray headers = props.optJSONArray("headers");
         JSONArray rows = props.optJSONArray("rows");
         if (headers != null) {
-            LinearLayout head = new LinearLayout(owner.context);
-            head.setOrientation(LinearLayout.HORIZONTAL);
+            TableRow head = new TableRow(owner.context);
             for (int i = 0; i < headers.length(); i++) {
                 TextView cell = new TextView(owner.context);
                 cell.setText(headers.optString(i, ""));
@@ -358,8 +396,7 @@ final class ViewControls {
         }
         if (rows != null) {
             for (int r = 0; r < rows.length(); r++) {
-                LinearLayout row = new LinearLayout(owner.context);
-                row.setOrientation(LinearLayout.HORIZONTAL);
+                TableRow row = new TableRow(owner.context);
                 JSONArray cells = rows.optJSONArray(r);
                 for (int c = 0; c < (cells == null ? 0 : cells.length()); c++) {
                     TextView cell = new TextView(owner.context);
@@ -386,7 +423,8 @@ final class ViewControls {
         int index = 0;
         if (headers != null) {
             View head = table.getChildAt(index++);
-            if (!(head instanceof ViewGroup)) {
+            if (!(head instanceof ViewGroup)
+                    || ((ViewGroup) head).getChildCount() != headers.length()) {
                 return false;
             }
             for (int c = 0; c < headers.length(); c++) {
@@ -418,20 +456,57 @@ final class ViewControls {
         return true;
     }
 
-    View buildAvatar(JSONObject props) {
-        TextView avatar = new TextView(owner.context);
+    void applyAvatar(TextView avatar, JSONObject props) {
         String text = props.optString("text", "");
-        if (text.length() > 2) {
-            text = text.substring(0, 2);
+        int end = text.offsetByCodePoints(0, Math.min(2, text.codePointCount(0, text.length())));
+        avatar.setText(text.substring(0, end).toUpperCase(java.util.Locale.ROOT));
+        if (avatar instanceof AvatarTextView) {
+            AvatarTextView photo = (AvatarTextView) avatar;
+            String source = props.optString("source", "");
+            if (!source.equals(photo.source)) {
+                photo.source = source;
+                photo.bitmap = source.isEmpty() ? null : loadLocalImage(source);
+                photo.invalidate();
+            }
         }
-        avatar.setText(text.toUpperCase());
         avatar.setTextColor(owner.parseColor(props.optString("color", "#FFFFFF"),
                 Color.parseColor("#FFFFFF")));
         avatar.setGravity(Gravity.CENTER);
         int size = owner.dp(props.optInt("size", 48));
-        avatar.setBackgroundColor(owner.parseColor(props.optString("background", ""), owner.colorPrimary));
+        android.graphics.drawable.GradientDrawable circle = new android.graphics.drawable.GradientDrawable();
+        circle.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+        circle.setColor(owner.parseColor(props.optString("background", ""), owner.colorPrimary));
+        avatar.setBackground(circle);
         avatar.setMinimumWidth(size);
         avatar.setMinimumHeight(size);
+    }
+
+    /** Keep TextView semantics/fallback while clipping the optional photo. */
+    static final class AvatarTextView extends TextView {
+        android.graphics.Bitmap bitmap;
+        String source = "";
+        final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG
+                | android.graphics.Paint.FILTER_BITMAP_FLAG);
+        AvatarTextView(android.content.Context context) { super(context); }
+        @Override protected void onDraw(android.graphics.Canvas canvas) {
+            if (bitmap == null) { super.onDraw(canvas); return; }
+            float w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return;
+            float scale = Math.max(w / bitmap.getWidth(), h / bitmap.getHeight());
+            float bw = bitmap.getWidth() * scale, bh = bitmap.getHeight() * scale;
+            android.graphics.Path clip = new android.graphics.Path();
+            clip.addOval(new android.graphics.RectF(0, 0, w, h), android.graphics.Path.Direction.CW);
+            int save = canvas.save();
+            canvas.clipPath(clip);
+            canvas.drawBitmap(bitmap, null, new android.graphics.RectF(
+                    (w - bw) / 2, (h - bh) / 2, (w + bw) / 2, (h + bh) / 2), paint);
+            canvas.restoreToCount(save);
+        }
+    }
+
+    View buildAvatar(JSONObject props) {
+        TextView avatar = new AvatarTextView(owner.context);
+        applyAvatar(avatar, props);
         return avatar;
     }
 
@@ -441,9 +516,11 @@ final class ViewControls {
                 owner.context, null,
                 indeterminate ? android.R.attr.progressBarStyle
                               : android.R.attr.progressBarStyleHorizontal);
+        owner.tintProgress(bar);
         bar.setIndeterminate(indeterminate);
         if (!indeterminate) {
-            owner.setScaledProgress(bar, props);
+            owner.tintProgress(bar);
+        owner.setScaledProgress(bar, props);
         }
         return bar;
     }
@@ -456,15 +533,20 @@ final class ViewControls {
 
     /** Load the image source and fit; used for the first build and for patches. */
     void applyImage(ImageView image, JSONObject props) {
-        image.setScaleType("cover".equals(props.optString("fit", "contain"))
-                ? ImageView.ScaleType.CENTER_CROP
+        String fit = props.optString("fit", "contain");
+        image.setScaleType("cover".equals(fit) ? ImageView.ScaleType.CENTER_CROP
+                : "fill".equals(fit) ? ImageView.ScaleType.FIT_XY
+                : "none".equals(fit) ? ImageView.ScaleType.CENTER
                 : ImageView.ScaleType.FIT_CENTER);
         String source = props.optString("source", "");
         if (source.equals(owner.imageSources.get(image))) {
             return;
         }
         owner.imageSources.put(image, source);
-        image.setImageDrawable(null);
+        image.setImageBitmap(loadLocalImage(source));
+    }
+
+    android.graphics.Bitmap loadLocalImage(String source) {
         try {
             java.io.File file = new java.io.File(source);
             if (!file.isAbsolute()) {
@@ -476,7 +558,7 @@ final class ViewControls {
                 if (bitmap == null) {
                     android.util.Log.w("pymobile", "Image decode failed: " + source);
                 } else {
-                    image.setImageBitmap(bitmap);
+                    return bitmap;
                 }
             } else if (source.startsWith("http://") || source.startsWith("https://")
                     || source.startsWith("data:")) {
@@ -493,6 +575,7 @@ final class ViewControls {
             // A broken image must not take the whole screen down.
             android.util.Log.w("pymobile", "Image failed to load: " + source, error);
         }
+        return null;
     }
 
     View buildSpacer(JSONObject props) {

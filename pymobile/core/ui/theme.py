@@ -20,6 +20,7 @@ __all__ = ["Theme", "Space", "TextScale"]
 #: Semantic colour names a theme may (or may not) override.
 _SEMANTIC = (
     "PRIMARY",
+    "ON_PRIMARY",
     "ACCENT",
     "BACKGROUND",
     "SURFACE",
@@ -79,13 +80,43 @@ class TextScale:
     )
 
 
+def _readable_on(background: str, surface: str = "#FFFFFF") -> str:
+    """WCAG black/white foreground for a colour composited over its surface."""
+
+    def rgba(value: str) -> tuple[int, int, int, int]:
+        value = Color.validate(value)[1:]
+        if len(value) == 3:
+            value = "".join(ch * 2 for ch in value)
+        alpha = int(value[:2], 16) if len(value) == 8 else 255
+        rgb = value[-6:]
+        return int(rgb[:2], 16), int(rgb[2:4], 16), int(rgb[4:], 16), alpha
+
+    r, g, b, alpha = rgba(background)
+    sr, sg, sb, sa = rgba(surface)
+    channels = [
+        fg * alpha / 255 + (bg * sa / 255 + 255 * (1 - sa / 255)) * (1 - alpha / 255)
+        for fg, bg in zip((r, g, b), (sr, sg, sb), strict=True)
+    ]
+
+    def linear(channel: float) -> float:
+        value = channel / 255
+        return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+
+    luminance = sum(
+        weight * linear(channel)
+        for weight, channel in zip((0.2126, 0.7152, 0.0722), channels, strict=True)
+    )
+    return "#000000" if (luminance + 0.05) / 0.05 >= 1.05 / (luminance + 0.05) else "#FFFFFF"
+
+
 class Theme:
     """A named set of colours resolved through the semantic palette.
 
     ``colors`` maps semantic names (or any name) to ``#RRGGBB`` hex strings.
     Unknown semantic names fall back to the built-in :class:`Color` defaults, so
     a partial theme (e.g. only ``BACKGROUND`` and ``TEXT`` for a dark mode) is
-    enough.
+    enough. ``ON_PRIMARY`` defaults to whichever of black/white has higher
+    WCAG contrast on PRIMARY (composited over SURFACE), unless explicitly set.
     """
 
     __slots__ = ("name", "_colors")
@@ -178,9 +209,7 @@ class Theme:
                 return float(pow((channel + 0.055) / 1.055, 2.4))
 
             weighted: float = (
-                0.2126 * linear(colour[0])
-                + 0.7152 * linear(colour[1])
-                + 0.0722 * linear(colour[2])
+                0.2126 * linear(colour[0]) + 0.7152 * linear(colour[1]) + 0.0722 * linear(colour[2])
             )
             return weighted
 
@@ -243,6 +272,8 @@ class Theme:
         key = name.upper()
         if key in self._colors:
             return self._colors[key]
+        if key == "ON_PRIMARY":
+            return _readable_on(self.color("PRIMARY"), self.color("SURFACE"))
         fallback = getattr(Color, key, None)
         if fallback is not None:
             return str(fallback)

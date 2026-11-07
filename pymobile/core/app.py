@@ -969,10 +969,16 @@ class App:
                     payload["navigation"] = dict(native_navigation)
             if getattr(self.bridge, "accepts_theme", False):
                 # The device renderer paints its own defaults (text, surfaces,
-                # selected tabs …) from the palette; previews ignore it.
+                # selected tabs …) from the palette; theme-aware previews and
+                # StubBridge also retain it for consistent PNG rendering.
                 payload = {
                     **payload,
                     "theme": {**self._theme.as_dict(), "dark": self._theme.is_dark},
+                }
+            if getattr(self.bridge, "accepts_chrome", False):
+                payload = {
+                    **payload,
+                    "chrome": {"title": screen.title, "can_go_back": self.navigator.depth > 1},
                 }
             self.bridge.render(payload)
             if native_navigation is not None:

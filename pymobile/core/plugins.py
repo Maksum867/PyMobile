@@ -21,6 +21,7 @@ Example::
 from __future__ import annotations
 
 import weakref
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 from ..log import get_logger
@@ -78,6 +79,18 @@ class PluginRegistry:
     def names(self) -> tuple[str, ...]:
         """Names of all registered plugins."""
         return tuple(self._plugins)
+
+    def __iter__(self) -> Iterator[str]:
+        """Iterate a snapshot of names, in registration order (mapping semantics)."""
+        return iter(self.names)
+
+    def all(self) -> tuple[Plugin, ...]:
+        """Return a snapshot of plugin instances, in registration order."""
+        return tuple(self._plugins.values())
+
+    def items(self) -> tuple[tuple[str, Plugin], ...]:
+        """Return a snapshot of (name, instance) pairs."""
+        return tuple(self._plugins.items())
 
     def register(self, plugin: Plugin) -> None:
         """Register ``plugin``; duplicates are ignored."""

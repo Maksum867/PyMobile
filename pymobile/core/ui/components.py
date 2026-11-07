@@ -17,7 +17,10 @@ from urllib.parse import unquote, urlparse
 
 from ...deprecation import ALIASES_DEPRECATED_IN, ALIASES_REMOVED_IN, warn_deprecated
 from ...log import get_logger
+from .contract import WidgetNode
+from .drawing import theme_color
 from .style import Color
+from .theme import _readable_on
 from .widget import Container, Widget, callback_name, in_build_scope
 
 _log = get_logger("ui.components")
@@ -82,8 +85,7 @@ def _parse_options(options: Sequence[Any]) -> tuple[list[str], list[str]]:
             labels.append(opt[1])
         else:
             raise ValueError(
-                "options must be strings or (value, label) pairs of strings, "
-                f"got {opt!r}"
+                f"options must be strings or (value, label) pairs of strings, got {opt!r}"
             )
     return values, labels
 
@@ -113,9 +115,7 @@ def _alias(kwargs: dict[str, Any], alias: str, name: str, value: Any, default: A
     return default if value is None else value
 
 
-def _deprecated_on_change(
-    on_select: object, on_change: object, *, exclusive: bool = True
-) -> None:
+def _deprecated_on_change(on_select: object, on_change: object, *, exclusive: bool = True) -> None:
     """``on_change=`` of a selection widget: an alias of ``on_select=``, deprecated.
 
     Widgets that pick one option of several (``Dropdown``, ``SegmentedButtons``,
@@ -134,6 +134,7 @@ def _deprecated_on_change(
         removal=ALIASES_REMOVED_IN,
         stacklevel=3,
     )
+
 
 def _as_checked(value: object) -> bool:
     """Coerce a stored/JSON value into a toggle state.
@@ -276,7 +277,13 @@ class TextInput(Widget):
 
     type_name = "TextInput"
     __slots__ = (
-        "_value", "placeholder", "multiline", "password", "max_length", "on_change", "_revision"
+        "_value",
+        "placeholder",
+        "multiline",
+        "password",
+        "max_length",
+        "on_change",
+        "_revision",
     )
 
     def __init__(
@@ -383,7 +390,12 @@ class TextInput(Widget):
 
 
 class Image(Widget):
-    """An image loaded from a packaged resource, a file path or a URL."""
+    """An image loaded from a packaged resource, a file path or a URL.
+
+    ``fit`` is contain (whole image), cover (centred crop), fill (stretch), or
+    none (intrinsic size, centred and clipped). Constrain width/height to make
+    the fitting box explicit. Source-loader support differs by renderer.
+    """
 
     type_name = "Image"
     __slots__ = ("_source", "_fit", "decorative")
@@ -657,8 +669,7 @@ class Slider(Widget):
         super().__init__(**kwargs)
         if maximum <= minimum:
             raise ValueError(
-                f"maximum ({maximum}) must be greater than minimum ({minimum}); "
-                "did you swap them?"
+                f"maximum ({maximum}) must be greater than minimum ({minimum}); did you swap them?"
             )
         if step is not None and step <= 0:
             raise ValueError("step must be positive")
@@ -729,18 +740,32 @@ class Checkbox(Widget):
     """
 
     type_name = "Checkbox"
-    __slots__ = ("_checked", "on_toggle")
+    __slots__ = ("_checked", "on_toggle", "_text")
 
     def __init__(
         self,
         checked: bool = False,
         *,
+        text: str = "",
         on_toggle: Callable[[bool], None] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._checked = _as_checked(checked)
         self.on_toggle = on_toggle
+        self._text = str(text)
+
+    @property
+    def text(self) -> str:
+        """The clickable label; assignment schedules a redraw."""
+        return self._text
+
+    @text.setter
+    def text(self, value: str) -> None:
+        value = str(value)
+        if self._text != value:
+            self._text = value
+            self.invalidate()
 
     @property
     def checked(self) -> bool:
@@ -775,6 +800,7 @@ class Checkbox(Widget):
         return {
             **super().props(),
             "checked": self._checked,
+            "text": self._text,
             "on_toggle": callback_name(self.on_toggle),
         }
 
@@ -877,9 +903,7 @@ class Dropdown(Widget):
         self._labels = labels
         self.on_select = on_select or on_change
         if value is not None and value not in self.options:
-            raise ValueError(
-                f"value {value!r} is not one of the options {self.options!r}"
-            )
+            raise ValueError(f"value {value!r} is not one of the options {self.options!r}")
         self._value = value if value is not None else self.options[0]
 
     @property
@@ -894,10 +918,7 @@ class Dropdown(Widget):
     def select(self, value: str) -> None:
         """Choose ``value``, notifying listeners only on a real change."""
         if value not in self.options:
-            raise ValueError(
-                f"{value!r} is not one of the options; "
-                f"available: {self.options!r}"
-            )
+            raise ValueError(f"{value!r} is not one of the options; available: {self.options!r}")
         if value != self._value:
             self._value = value
             self.invalidate()
@@ -990,14 +1011,14 @@ class Badge(Widget):
         self,
         text: str | int = "",
         *,
-        color: str = Color.BACKGROUND,
-        background: str = Color.PRIMARY,
+        color: str | None = None,
+        background: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._text = str(text)
-        self.color = Color.validate(color)
-        self.background = Color.validate(background)
+        self.color = Color.validate(color) if color is not None else None
+        self.background = Color.validate(background) if background is not None else None
 
     @property
     def text(self) -> str:
@@ -1011,12 +1032,22 @@ class Badge(Widget):
             self._text = value
             self.invalidate()
 
+    def to_dict(self) -> WidgetNode:
+        node = super().to_dict()
+        node["style"] = {**{"width": "wrap", "corner_radius": 999}, **node.get("style", {})}
+        return node
+
     def props(self) -> dict[str, Any]:
         return {
             **super().props(),
             "text": self._text,
-            "color": self.color,
-            "background": self.background,
+            "color": self.color
+            or (
+                theme_color(self, "ON_PRIMARY")
+                if self.background is None
+                else _readable_on(self.background, theme_color(self, "SURFACE"))
+            ),
+            "background": self.background or theme_color(self, "PRIMARY"),
         }
 
 
@@ -1375,9 +1406,7 @@ class SegmentedButtons(Widget):
         self.on_select = on_select or on_change
         self.wrap = bool(wrap)
         if value is not None and value not in self.options:
-            raise ValueError(
-                f"value {value!r} is not one of the options {self.options!r}"
-            )
+            raise ValueError(f"value {value!r} is not one of the options {self.options!r}")
         self._value = value if value is not None else self.options[0]
 
     @property
@@ -1392,10 +1421,7 @@ class SegmentedButtons(Widget):
     def select(self, value: str) -> None:
         """Choose ``value``, notifying listeners only on a real change."""
         if value not in self.options:
-            raise ValueError(
-                f"{value!r} is not one of the options; "
-                f"available: {self.options!r}"
-            )
+            raise ValueError(f"{value!r} is not one of the options; available: {self.options!r}")
         if value != self._value:
             self._value = value
             self.invalidate()
@@ -1628,9 +1654,7 @@ def _looks_like_image_source(value: str) -> bool:
     if "/" in value or "\\" in value:
         return True
     lower = value.lower()
-    return lower.endswith(
-        (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg", ".ico")
-    )
+    return lower.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg", ".ico"))
 
 
 class Avatar(Widget):
@@ -1667,8 +1691,8 @@ class Avatar(Widget):
         image: str | None = None,
         is_image: bool | None = None,
         size: int = 48,
-        color: str = Color.BACKGROUND,
-        background: str = Color.PRIMARY,
+        color: str | None = None,
+        background: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -1700,8 +1724,16 @@ class Avatar(Widget):
         self.source = source
         self.text = text
         self.size = size
-        self.color = Color.validate(color)
-        self.background = Color.validate(background)
+        self.color = Color.validate(color) if color is not None else None
+        self.background = Color.validate(background) if background is not None else None
+
+    def to_dict(self) -> WidgetNode:
+        node = super().to_dict()
+        node["style"] = {
+            **{"width": self.size, "height": self.size, "corner_radius": self.size / 2},
+            **node.get("style", {}),
+        }
+        return node
 
     def props(self) -> dict[str, Any]:
         return {
@@ -1709,8 +1741,13 @@ class Avatar(Widget):
             "source": self.source,
             "text": self.text,
             "size": self.size,
-            "color": self.color,
-            "background": self.background,
+            "color": self.color
+            or (
+                theme_color(self, "ON_PRIMARY")
+                if self.background is None
+                else _readable_on(self.background, theme_color(self, "SURFACE"))
+            ),
+            "background": self.background or theme_color(self, "PRIMARY"),
         }
 
 

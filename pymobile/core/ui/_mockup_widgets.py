@@ -11,6 +11,7 @@ from ._mockup_colors import _blend, _Colour, _rgba, _with_alpha
 from ._mockup_context import _MockupContext
 from ._mockup_paint import _LINE, _Box, _Painter, _PaintFn
 from .contract import text_value
+from .theme import _readable_on
 
 
 class _WidgetLayout(_MockupContext):
@@ -29,6 +30,7 @@ class _WidgetLayout(_MockupContext):
         min_w: float = 0.0,
         align: str = "",
         background: Callable[[_Painter, float, float, _Box], None] | None = None,
+        single_line: bool = False,
     ) -> _Box:
         size = float(style.get("font_size") or size)
         colour = _rgba(style.get("color"), colour) if style.get("color") else colour
@@ -36,7 +38,13 @@ class _WidgetLayout(_MockupContext):
         align = str(style.get("align") or align)
         pad = self._padding(style, pad)
         inner = max(1.0, w - pad[0] - pad[2])
-        lines = self.fonts.wrap(text, size, bold, inner)
+
+        def wrap(width: float) -> list[str]:
+            if single_line:
+                return [self.fonts.ellipsize(text, size, bold, width)]
+            return self.fonts.wrap(text, size, bold, width)
+
+        lines = wrap(inner)
         text_w = max((self.fonts.width(line, size, bold) for line in lines), default=0.0)
         text_h = len(lines) * size * _LINE
         box_w = w if fill else min(w, max(min_w, text_w + pad[0] + pad[2]))
@@ -46,11 +54,7 @@ class _WidgetLayout(_MockupContext):
             if background is not None:
                 background(p, x, y, b)
             inner_w = b.w - pad[0] - pad[2]
-            wrapped = (
-                lines
-                if inner_w >= inner - 0.5
-                else self.fonts.wrap(text, size, bold, max(1.0, inner_w))
-            )
+            wrapped = lines if inner_w >= inner - 0.5 else wrap(max(1.0, inner_w))
             height = len(wrapped) * size * _LINE
             top = (
                 y + pad[1] + max(0.0, (b.h - pad[1] - pad[3] - height) / 2) if min_h else y + pad[1]
@@ -61,11 +65,11 @@ class _WidgetLayout(_MockupContext):
 
     #: Fill and text colour of each ButtonVariant in the picture (P1).
     _VARIANTS: ClassVar[dict[str, tuple[str | None, str | _Colour | None]]] = {
-        "primary": ("PRIMARY", (255, 255, 255, 255)),
+        "primary": ("PRIMARY", "ON_PRIMARY"),
         "tonal": ("_TONAL", None),
         "outlined": (None, "PRIMARY"),
         "text": (None, "PRIMARY"),
-        "danger": ("ERROR", (255, 255, 255, 255)),
+        "danger": ("ERROR", None),
     }
 
     def _button(
@@ -83,7 +87,8 @@ class _WidgetLayout(_MockupContext):
         # An explicit Style(background=…) always wins; without one the variant
         # decides. Before this, ``custom`` made the painter skip the button
         # background entirely, which is why every button came out grey.
-        custom = style.get("background") is not None or style.get("corner_radius") is not None
+        custom = style.get("background") is not None
+        radius = float(style["corner_radius"]) if style.get("corner_radius") is not None else 2.0
         fill_key, text_key = self._VARIANTS.get(variant, self._VARIANTS["primary"])
         transparent = variant == "text"
         if fill_colour is None and fill_key is not None and not custom:
@@ -95,11 +100,10 @@ class _WidgetLayout(_MockupContext):
         if text_colour is None and text_key is not None and not custom:
             text_colour = self.p[text_key] if isinstance(text_key, str) else text_key
         if variant == "tonal" and not custom and text_colour is None:
-            # White on a light lavender fill is unreadable; Material uses the
-            # primary colour for tonal labels.
-            text_colour = self.p["PRIMARY"]
+            assert fill_colour is not None
+            text_colour = _rgba(_readable_on("#{:02X}{:02X}{:02X}".format(*fill_colour[:3])))
         elif text_colour is None and fill_key is not None and not custom and fill_colour:
-            text_colour = (255, 255, 255, 255)
+            text_colour = _rgba(_readable_on("#{:02X}{:02X}{:02X}".format(*fill_colour[:3])))
         bg = fill_colour or self.p["BUTTON"]
         outline = None
         if variant == "outlined" and not custom:
@@ -112,7 +116,7 @@ class _WidgetLayout(_MockupContext):
             if transparent:
                 return  # a text button is just its label
             if flat:
-                p.rect(x, y, b.w, b.h, bg, outline=outline, radius=2)
+                p.rect(x, y, b.w, b.h, None if outline else bg, outline=outline, radius=radius)
                 return
             if outline is not None:
                 # An outlined button is a hairline, not a raised surface.
@@ -123,7 +127,7 @@ class _WidgetLayout(_MockupContext):
                     b.h - 2 * inset_y,
                     None,
                     outline=outline,
-                    radius=2,
+                    radius=radius,
                 )
                 return
             p.shadow(
@@ -131,10 +135,12 @@ class _WidgetLayout(_MockupContext):
                 y + inset_y,
                 b.w - 2 * inset_x,
                 b.h - 2 * inset_y,
-                radius=2,
+                radius=radius,
                 elevation=2,
             )
-            p.rect(x + inset_x, y + inset_y, b.w - 2 * inset_x, b.h - 2 * inset_y, bg, radius=2)
+            p.rect(
+                x + inset_x, y + inset_y, b.w - 2 * inset_x, b.h - 2 * inset_y, bg, radius=radius
+            )
 
         return self._text_box(
             text,
@@ -183,6 +189,7 @@ class _WidgetLayout(_MockupContext):
             variant = text_value(props.get("variant")) or "primary"
             return self._button(text, style, w, fill, variant=variant)
         if kind == "Chip":
+            style = {"corner_radius": 999, **style}
             if props.get("selected"):
                 return self._button(
                     text,
@@ -191,7 +198,7 @@ class _WidgetLayout(_MockupContext):
                     fill,
                     flat=True,
                     fill_colour=_rgba(props.get("selectedColor"), p["PRIMARY"]),
-                    text_colour=(255, 255, 255, 255),
+                    text_colour=p["ON_PRIMARY"],
                 )
             # P1: a Chip used to be drawn as a plain grey pill whatever the app
             # asked for — its Style(background=…) and Style(color=…) were
@@ -205,7 +212,7 @@ class _WidgetLayout(_MockupContext):
                 fill,
                 flat=True,
                 fill_colour=own_background if own_background[3] else self.p["BUTTON"],
-                text_colour=_rgba(own_text, p["BUTTON_TEXT"]) if own_text else None,
+                text_colour=_rgba(own_text, p["BUTTON_TEXT"]) if own_text else p["BUTTON_TEXT"],
             )
         if kind in ("DatePicker", "TimePicker"):
             value = str(
@@ -237,7 +244,7 @@ class _WidgetLayout(_MockupContext):
 
             def badge_bg(pt: _Painter, x: float, y: float, b: _Box) -> None:
                 if style.get("background") is None:
-                    pt.rect(x, y, b.w, b.h, bg)
+                    pt.rect(x, y, b.w, b.h, bg, radius=b.h / 2)
 
             return self._text_box(
                 text,
@@ -254,13 +261,27 @@ class _WidgetLayout(_MockupContext):
             size = float(props.get("size", 48) or 48)
             bg = _rgba(props.get("background"), p["PRIMARY"])
             label = text[:2].upper()
+            picture = self._load_image(text_value(props.get("source")))
 
             def avatar_bg(pt: _Painter, x: float, y: float, b: _Box) -> None:
                 if style.get("background") is None:
-                    pt.rect(x, y, b.w, b.h, bg)
+                    pt.rect(x, y, b.w, b.h, bg, radius=min(b.w, b.h) / 2)
+                if picture is not None:
+                    from PIL import Image, ImageDraw, ImageOps
+
+                    dimensions = (max(1, round(b.w * pt.s)), max(1, round(b.h * pt.s)))
+                    photo = ImageOps.fit(picture, dimensions)
+                    mask = Image.new("L", dimensions)
+                    ImageDraw.Draw(mask).ellipse(
+                        (0, 0, dimensions[0] - 1, dimensions[1] - 1), fill=255
+                    )
+                    from PIL import ImageChops
+
+                    mask = ImageChops.multiply(mask, photo.getchannel("A"))
+                    pt.image.paste(photo, (round(x * pt.s), round(y * pt.s)), mask)
 
             return self._text_box(
-                label,
+                "" if picture is not None else label,
                 14,
                 _rgba(props.get("color"), (255, 255, 255, 255)),
                 style,
@@ -324,6 +345,7 @@ class _WidgetLayout(_MockupContext):
             pad=(8, 12, 8, 14),
             min_w=64,
             background=underline,
+            single_line=not props.get("multiline", False),
         )
         box.h = max(box.h, lines_min * line_h + 26)
         if not props.get("multiline"):
@@ -548,7 +570,17 @@ class _WidgetLayout(_MockupContext):
                     )
                 )
             else:
-                segments.append(self._button(label, {}, offer, False, text_colour=p["TEXT"]))
+                segments.append(
+                    self._button(
+                        label,
+                        {},
+                        offer,
+                        False,
+                        flat=True,
+                        variant="outlined",
+                        text_colour=p["TEXT"],
+                    )
+                )
         if wrap:
             placed, height, widest = self._flow(segments, w, 0.0, 0.0, "start")
             box = _Box(w if fill else min(w, widest), height)
@@ -574,8 +606,8 @@ class _WidgetLayout(_MockupContext):
         for index, (value, label) in enumerate(pairs):
             on = value == selected
             tab = self._button(
-                label,
-                {},
+                self.fonts.ellipsize(label, 13, False, max(0, tab_w - 12)),
+                {"font_size": 13, "padding": [6, 10, 6, 10], "min_width": 0},
                 tab_w,
                 True,
                 flat=True,
@@ -586,37 +618,44 @@ class _WidgetLayout(_MockupContext):
         return box
 
     def _table(self, props: dict[str, Any], w: float, fill: bool) -> _Box:
-        # Like the device: every row is its own wrapping LinearLayout, so the
-        # columns are only aligned when the cells happen to be equally wide.
-        box = _Box(w if fill else 0, 0)
-        y = 0.0
         rows: list[tuple[list[Any], bool]] = []
         if props.get("headers"):
             rows.append((list(props["headers"]), True))
         rows += [(list(r or ()), False) for r in props.get("rows", ()) or ()]
-        widest = 0.0
+        columns = max((len(cells) for cells, _ in rows), default=0)
+        if not columns:
+            return _Box(w if fill else 0, 0)
+        widths = [16.0] * columns
         for cells, bold in rows:
-            x = 0.0
-            height = 0.0
-            for cell in cells:
-                cell_box = self._text_box(
-                    str(cell),
+            for index, cell in enumerate(cells):
+                widths[index] = max(widths[index], self.fonts.width(str(cell), 14, bold) + 16)
+        natural = sum(widths)
+        if natural > w:
+            widths = [width * w / natural for width in widths]
+        elif fill:
+            widths = [width + (w - natural) / columns for width in widths]
+        box = _Box(sum(widths), 0)
+        for cells, bold in rows:
+            row = [
+                self._text_box(
+                    str(cells[index]) if index < len(cells) else "",
                     14,
                     self.p["TEXT"],
                     {},
-                    max(1.0, w - x),
-                    False,
+                    width,
+                    True,
                     pad=(8, 4, 8, 4),
                     bold=bold,
                 )
-                box.kids.append((x, y, cell_box))
-                x += cell_box.w
-                height = max(height, cell_box.h)
-            widest = max(widest, x)
-            y += height
-        box.h = y
-        if not fill:
-            box.w = min(w, widest)
+                for index, width in enumerate(widths)
+            ]
+            height = max(cell.h for cell in row)
+            x = 0.0
+            for cell in row:
+                cell.h = height
+                box.kids.append((x, box.h, cell))
+                x += cell.w
+            box.h += height
         return box
 
     def _list_tile(self, props: dict[str, Any], style: dict[str, Any], w: float) -> _Box:
@@ -652,7 +691,7 @@ class _WidgetLayout(_MockupContext):
         p = self.p
         source = text_value(props.get("source", "") or "")
         picture = self._load_image(source)
-        cover = props.get("fit") == "cover"
+        fit = text_value(props.get("fit", "contain"))
         if picture is not None:
             natural_w = picture.width / self.scale
             natural_h = picture.height / self.scale
@@ -678,7 +717,7 @@ class _WidgetLayout(_MockupContext):
                 )
                 pt.circle(cx + 10, cy - 12, 4, _with_alpha(p["MUTED"], 0.6))
                 return
-            self._paste_image(pt, picture, x, y, b.w, b.h, cover)
+            self._paste_image(pt, picture, x, y, b.w, b.h, fit)
 
         return _Box(box_w, box_h, paint)
 
@@ -700,21 +739,31 @@ class _WidgetLayout(_MockupContext):
         return None
 
     def _paste_image(
-        self, pt: _Painter, picture: Any, x: float, y: float, w: float, h: float, cover: bool
+        self, pt: _Painter, picture: Any, x: float, y: float, w: float, h: float, fit: str
     ) -> None:
+        from PIL import Image
+
+        if w <= 0 or h <= 0:
+            return
         s = pt.s
         target_w, target_h = max(1, round(w * s)), max(1, round(h * s))
-        ratio = (max if cover else min)(target_w / picture.width, target_h / picture.height)
-        size = (max(1, round(picture.width * ratio)), max(1, round(picture.height * ratio)))
-        resized = picture.resize(size)
-        if cover:
-            left = (size[0] - target_w) // 2
-            top = (size[1] - target_h) // 2
-            resized = resized.crop((left, top, left + target_w, top + target_h))
-            offset = (round(x * s), round(y * s))
+        if fit == "none":
+            resized = picture
+        elif fit == "fill":
+            resized = picture.resize((target_w, target_h))
         else:
-            offset = (
-                round(x * s) + (target_w - size[0]) // 2,
-                round(y * s) + (target_h - size[1]) // 2,
+            ratio = (max if fit == "cover" else min)(
+                target_w / picture.width, target_h / picture.height
             )
-        pt.image.paste(resized, offset, resized)
+            size = (max(1, round(picture.width * ratio)), max(1, round(picture.height * ratio)))
+            resized = picture.resize(size)
+        # Composite into a bounded tile, including for an oversized fit=none
+        # image. Pasting straight into the screen would paint across neighbours.
+        tile = Image.new("RGBA", (target_w, target_h))
+        offset = ((target_w - resized.width) // 2, (target_h - resized.height) // 2)
+        tile.paste(resized, offset)
+        destination = (round(x * s), round(y * s))
+        if pt.image.mode == "RGBA":
+            pt.image.alpha_composite(tile, dest=destination)
+        else:
+            pt.image.paste(tile, destination, tile)

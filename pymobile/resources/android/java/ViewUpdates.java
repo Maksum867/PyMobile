@@ -121,7 +121,7 @@ final class ViewUpdates {
         }
         if ("AutoComplete".equals(type)) {
             if (!(view instanceof AdvancedViews.AutoInput)) return false;
-            ((AdvancedViews.AutoInput) view).bind(id, props, owner.colorText, owner.colorTextMuted);
+            ((AdvancedViews.AutoInput) view).bind(id, props, owner.colorText, owner.colorTextMuted, owner.colorSurface);
             return true;
         }
         if ("RatingBar".equals(type)) {
@@ -199,11 +199,13 @@ final class ViewUpdates {
                     return false;
                 }
                 Button tab = (Button) child;
-                String label = options.optString(i, "");
+                String label = ViewControls.optionLabel(props, i);
+                String key = options.optString(i, "");
+                tab.setTag(key);
                 if (!label.contentEquals(tab.getText())) {
                     tab.setText(label);
                 }
-                owner.styleTab(tab, label.equals(value));
+                owner.styleTab(tab, key.equals(value));
             }
             return true;
         }
@@ -244,11 +246,12 @@ final class ViewUpdates {
             JSONArray options = props.optJSONArray("options");
             int count = options == null ? 0 : options.length();
             android.widget.SpinnerAdapter adapter = spinner.getAdapter();
-            if (adapter == null || adapter.getCount() != count) {
+            if (!(adapter instanceof ViewInputs.OptionAdapter) || adapter.getCount() != count) {
                 return false;
             }
             for (int i = 0; i < count; i++) {
-                if (!options.optString(i, "").equals(String.valueOf(adapter.getItem(i)))) {
+                if (!ViewControls.optionLabel(props, i).equals(String.valueOf(adapter.getItem(i)))
+                        || !options.optString(i, "").equals(((ViewInputs.OptionAdapter) adapter).values[i])) {
                     return false;  // options changed: rebuild with the new list
                 }
             }
@@ -274,27 +277,14 @@ final class ViewUpdates {
                     || props.optBoolean("wrap", false) != (view instanceof FlowLayout)) {
                 return false;
             }
-            for (int i = 0; i < count; i++) {
-                View segment = group.getChildAt(i);
-                if (!(segment instanceof TextView)
-                        || !options.optString(i, "").contentEquals(((TextView) segment).getText())) {
-                    return false;
-                }
-            }
             String selected = props.optString("value", "");
-            for (int i = 0; i < group.getChildCount(); i++) {
+            for (int i = 0; i < count; i++) {
                 View child = group.getChildAt(i);
-                if (child instanceof TextView) {
-                    boolean isSelected = ((TextView) child).getText().toString()
-                            .equals(selected);
-                    if (isSelected) {
-                        child.setBackgroundColor(owner.colorPrimary);
-                        ((TextView) child).setTextColor(owner.colorOnPrimary);
-                    } else {
-                        child.setBackgroundColor(Color.TRANSPARENT);
-                        ((TextView) child).setTextColor(owner.colorText);
-                    }
-                }
+                if (!(child instanceof TextView)) return false;
+                String key = options.optString(i, "");
+                child.setTag(key);
+                ((TextView) child).setText(ViewControls.optionLabel(props, i));
+                owner.controls.applySegment((TextView) child, key.equals(selected));
             }
             return true;
         }
@@ -303,6 +293,24 @@ final class ViewUpdates {
             // serialises as a leaf, so patch it live — otherwise add_row()
             // and cell edits never reach the screen.
             return owner.updateDataTable((ViewGroup) view, props);
+        }
+
+        if (view instanceof RadioGroup) {
+            // Each radio is patched from its own node (its `selected` and
+            // `text`). Matching the group's `value` against the labels checked
+            // every radio that shared the selected text.
+            RadioGroup group = (RadioGroup) view;
+            JSONArray radios = node.optJSONArray("children");
+            int count = radios == null ? 0 : radios.length();
+            if (group.getChildCount() != count) {
+                return false;
+            }
+            for (int i = 0; i < count; i++) {
+                if (!owner.updateNode(group.getChildAt(i), radios.getJSONObject(i))) {
+                    return false;
+                }
+            }
+            return true;
         }
 
         if (view instanceof ViewGroup) {
@@ -328,24 +336,6 @@ final class ViewUpdates {
             }
             for (int i = 0; i < count; i++) {
                 if (!owner.updateNode(target.getChildAt(i), children.getJSONObject(i))) {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        if (view instanceof RadioGroup) {
-            // Each radio is patched from its own node (its `selected` and
-            // `text`). Matching the group's `value` against the labels checked
-            // every radio that shared the selected text.
-            RadioGroup group = (RadioGroup) view;
-            JSONArray radios = node.optJSONArray("children");
-            int count = radios == null ? 0 : radios.length();
-            if (group.getChildCount() != count) {
-                return false;
-            }
-            for (int i = 0; i < count; i++) {
-                if (!owner.updateNode(group.getChildAt(i), radios.getJSONObject(i))) {
                     return false;
                 }
             }
@@ -383,6 +373,7 @@ final class ViewUpdates {
             // its listener, so we cannot save/restore it; setChecked here is a
             // programmatic sync and the Python side guards against echo loops.
             CheckBox checkbox = (CheckBox) view;
+            checkbox.setText(props.optString("text", ""));
             boolean checked = props.optBoolean("checked", false);
             if (checkbox.isChecked() != checked) {
                 checkbox.setChecked(checked);
@@ -402,6 +393,22 @@ final class ViewUpdates {
             if (!shown.contentEquals(((Button) view).getText())) {
                 ((Button) view).setText(shown);
             }
+            return true;
+        }
+        if ("Button".equals(type) && view instanceof Button) {
+            owner.controls.applyButton((Button) view, props);
+            owner.applyStyle(view, node.optJSONObject("style"));
+            return true;
+        }
+        if ("Chip".equals(type) && view instanceof Button) {
+            owner.controls.applyChip((Button) view, props);
+            owner.applyStyle(view, node.optJSONObject("style"));
+            return true;
+        }
+        if (("Badge".equals(type) || "Avatar".equals(type)) && view instanceof TextView) {
+            if ("Badge".equals(type)) owner.controls.applyBadge((TextView) view, props);
+            else owner.controls.applyAvatar((TextView) view, props);
+            owner.applyStyle(view, node.optJSONObject("style"));
             return true;
         }
         if (view instanceof Button) {

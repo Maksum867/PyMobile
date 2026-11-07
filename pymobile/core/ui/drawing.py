@@ -208,10 +208,21 @@ def drawing_svg(drawing: Mapping[str, Any], *, label: str = "") -> str:
                 f'stroke-width="{float(s.get("width", 2)):g}" '
                 'stroke-linecap="round" stroke-linejoin="round"/>'
             )
+        elif t == "polygon":
+            pts = " ".join(f"{float(x):g},{float(y):g}" for x, y in s["points"])
+            fill = color if s.get("fill", True) else "none"
+            stroke = "none" if s.get("fill", True) else color
+            items.append(
+                f'<polygon points="{pts}" fill="{fill}" stroke="{stroke}" '
+                f'stroke-width="{float(s.get("width", 1)):g}" stroke-linejoin="round"/>'
+            )
         elif t == "rect":
+            fill = color if s.get("fill", True) else "none"
+            stroke = "none" if s.get("fill", True) else color
             items.append(
                 f'<rect x="{float(s["x"]):g}" y="{float(s["y"]):g}" '
-                f'width="{float(s["w"]):g}" height="{float(s["h"]):g}" fill="{color}"/>'
+                f'width="{float(s["w"]):g}" height="{float(s["h"]):g}" fill="{fill}" '
+                f'stroke="{stroke}" stroke-width="{float(s.get("width", 1)):g}"/>'
             )
         elif t == "circle":
             fill = color if s.get("fill", True) else "none"

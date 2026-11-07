@@ -77,9 +77,7 @@ def render_extra_html(
     kind, props = node["type"], node.get("props", {})
     wid = escape(str(node.get("id", "")), quote=True)
     disabled = "" if node.get("enabled", True) else " disabled"
-    label = escape(
-        str(props.get("accessibility_label") or props.get("label", "")), quote=True
-    )
+    label = escape(str(props.get("accessibility_label") or props.get("label", "")), quote=True)
     if kind in ("RangeSlider", "PageView", "Chart", "AutoComplete", "Canvas"):
         # A column aligns its children to the start and would shrink these to nothing.
         css = f"width:100%;{css}"
@@ -89,9 +87,7 @@ def render_extra_html(
             # A canvas is a surface, not an icon: keep its own aspect ratio and
             # paint the background it asked for instead of a sheet of white.
             background = escape(str(props.get("background") or "transparent"), quote=True)
-            return (
-                f'<div data-wid="{wid}" style="background:{background};{css}">{svg}</div>'
-            )
+            return f'<div data-wid="{wid}" style="background:{background};{css}">{svg}</div>'
         if kind == "IconButton":
             return (
                 f'<button class="w" data-wid="{wid}" title="{label}" aria-label="{label}" '
@@ -301,12 +297,23 @@ def paint_tk(
                     joinstyle="round",
                     tags="drawing",
                 )
+        elif kind == "polygon":
+            points = [coordinate for x, y in s["points"] for coordinate in xy(x, y)]
+            if len(points) >= 6:
+                canvas.create_polygon(
+                    *points,
+                    fill=color if s.get("fill", True) else "",
+                    outline="" if s.get("fill", True) else color,
+                    width=max(1, s.get("width", 1) * scale),
+                    tags="drawing",
+                )
         elif kind == "rect":
             canvas.create_rectangle(
                 *xy(s["x"], s["y"]),
                 *xy(s["x"] + s["w"], s["y"] + s["h"]),
-                fill=color,
-                outline="",
+                fill=color if s.get("fill", True) else "",
+                outline="" if s.get("fill", True) else color,
+                width=max(1, s.get("width", 1) * scale),
                 tags="drawing",
             )
         elif kind in ("circle", "sector"):
@@ -396,7 +403,7 @@ def build_extra_gui(preview: Any, parent: Any, node: dict[str, Any], background:
     if kind == "AutoComplete":
         frame = tk.Frame(parent, bg=background)
         frame.pack(fill="x", pady=2)
-        variable = tk.StringVar(value=str(props.get("value", "")))
+        variable = tk.StringVar(master=preview.root, value=str(props.get("value", "")))
         entry = tk.Entry(
             frame, textvariable=variable, state=state, show="•" if props.get("password") else ""
         )
@@ -459,9 +466,11 @@ def build_extra_gui(preview: Any, parent: Any, node: dict[str, Any], background:
             x1 = 20 + (data["low"] - p["minimum"]) / span * (width - 40)
             x2 = 20 + (data["high"] - p["minimum"]) / span * (width - 40)
             canvas.create_line(20, 25, width - 20, 25, fill="#BDBDBD", width=4)
-            canvas.create_line(x1, 25, x2, 25, fill="#3F51B5", width=4)
+            canvas.create_line(x1, 25, x2, 25, fill=preview.palette["primary"], width=4)
             for x in (x1, x2):
-                canvas.create_oval(x - 9, 16, x + 9, 34, fill="#3F51B5", outline="")
+                canvas.create_oval(
+                    x - 9, 16, x + 9, 34, fill=preview.palette["primary"], outline=""
+                )
             canvas.create_text(width / 2, 52, text=f"{data['low']:g} – {data['high']:g}")
 
         def move(event: Any) -> None:
@@ -639,9 +648,24 @@ def extra_mockup(layout: Any, kind: str, node: dict[str, Any], w: float, fill: b
                         color,
                         shape.get("width", 2) * scale,
                     )
+                elif t == "polygon":
+                    points = [xy(px, py) for px, py in shape["points"]]
+                    if len(points) >= 3:
+                        if shape.get("fill", True):
+                            p.polygon(points, color)
+                        else:
+                            p.line([*points, points[0]], color, shape.get("width", 1) * scale)
                 elif t == "rect":
                     px, py = xy(shape["x"], shape["y"])
-                    p.rect(px, py, shape["w"] * scale, shape["h"] * scale, color)
+                    p.rect(
+                        px,
+                        py,
+                        shape["w"] * scale,
+                        shape["h"] * scale,
+                        color if shape.get("fill", True) else None,
+                        outline=None if shape.get("fill", True) else color,
+                        width=shape.get("width", 1) * scale,
+                    )
                 elif t == "circle":
                     px, py = xy(shape["x"], shape["y"])
                     p.circle(

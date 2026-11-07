@@ -13,13 +13,17 @@ the preview cannot drift from the real renderer.
 
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import secrets
 import threading
 from collections.abc import Sequence
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import unquote, urlsplit
 
 from ...log import get_logger
 from .contract import text_value
@@ -109,7 +113,7 @@ _PAGE = """<!doctype html>
      palette, so the phone shell follows dark mode without a page reload. */
   :root {{ color-scheme: {color_scheme};
     --page-bg: {page_bg}; --phone-bg: {phone_bg}; --text: {text}; --bar-bg: {bar_bg};
-    --line: {line}; --primary: {primary}; --muted: {muted};
+    --line: {line}; --primary: {primary}; --on-primary: {on_primary}; --muted: {muted};
     --snack-bg: {snack_bg}; --snack-fg: {snack_fg}; --snack-action: {snack_action}; }}
   * {{ box-sizing: border-box; }}
   body {{ margin: 0; background: var(--page-bg); color: var(--text);
@@ -126,6 +130,8 @@ _PAGE = """<!doctype html>
              min-height: 28px; color: var(--muted); font-size: 13px; }}
   .row {{ display: flex; }}
   .col {{ display: flex; flex-direction: column; }}
+  .stack {{ display: grid; }}
+  .stack > * {{ grid-area: 1 / 1; min-width: 0; }}
   .grid {{ display: grid; }}
   button.w {{ font: inherit; padding: 9px 14px; border-radius: 8px; cursor: pointer;
               border: 1px solid var(--line); background: var(--bar-bg); color: var(--text);
@@ -146,6 +152,14 @@ _PAGE = """<!doctype html>
   .seg.wrap {{ flex-wrap: wrap; overflow-x: visible; }}
   .seg.wrap button {{ white-space: normal; }}
   .phone {{ position: relative; }}
+  #modals {{ position: absolute; inset: 0; z-index: 30; pointer-events: none; }}
+  .modal-overlay {{ position: absolute; inset: 0; background: rgba(0,0,0,.45);
+    display: flex; align-items: center; justify-content: center; padding: 16px;
+    pointer-events: auto; }}
+  .modal-overlay.sheet {{ align-items: flex-end; padding: 0; }}
+  .modal-surface {{ width: 100%; max-height: 100%; overflow: auto; padding: 16px;
+    background: var(--bar-bg); color: var(--text); border: 1px solid var(--line);
+    box-shadow: 0 6px 18px rgba(0,0,0,.18); }}
   .swipe {{ width: auto; flex: 0 0 auto; padding: 9px 10px; color: #fff; border: 0; }}
   .refresh {{ text-align: center; }}
   #snack {{ position: absolute; left: 12px; right: 12px; bottom: 40px; display: none;
@@ -164,6 +178,7 @@ _PAGE = """<!doctype html>
   </div>
   <div class="screen" id="screen">{body}</div>
   <div class="status" id="status"></div>
+  <div id="modals"></div>
   <div id="snack"><span id="snack-text"></span>
     <button id="snack-action" onclick="send('__snackbar__','press',this.dataset.token)"></button>
     <button title="dismiss" onclick="send('__snackbar__','dismiss',this.dataset.token)"
@@ -199,6 +214,47 @@ function applyChrome(chrome) {{
   }}
   if (chrome.color_scheme) root.style.colorScheme = chrome.color_scheme;
 }}
+let modalReturn = null;
+function syncModals(previousFocus) {{
+  const host = document.getElementById('modals');
+  const hadModal = host.children.length > 0;
+  host.replaceChildren();
+  document.querySelectorAll('#screen .modal-overlay').forEach(layer => host.append(layer));
+  const layers = Array.from(host.children);
+  const top = layers[layers.length - 1];
+  if (top && !hadModal) modalReturn = previousFocus || document.activeElement.dataset.wid;
+  document.querySelectorAll('.phone > .bar, #screen, #status, #snack')
+    .forEach(el => el.inert = !!top);
+  layers.forEach(layer => layer.inert = layer !== top);
+  if (top && !top.contains(document.activeElement)) {{
+    (top.querySelector('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href]')
+      || top.querySelector('[role="dialog"]')).focus();
+  }} else if (!top && modalReturn) {{
+    const trigger = Array.from(document.querySelectorAll('[data-wid]'))
+      .find(el => el.dataset.wid === modalReturn);
+    if (trigger) trigger.focus();
+    modalReturn = null;
+  }}
+}}
+document.addEventListener('keydown', function(event) {{
+  const top = document.getElementById('modals').lastElementChild;
+  if (!top) return;
+  if (event.key === 'Escape') {{
+    event.preventDefault(); send(top.dataset.dialogId, 'dismiss', ''); return;
+  }}
+  if (event.key !== 'Tab') return;
+  const focusable = Array.from(top.querySelectorAll(
+    'button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href],[tabindex="0"]'
+  )).filter(el => el.getClientRects().length);
+  const current = focusable.indexOf(document.activeElement);
+  if (!focusable.length) {{ event.preventDefault(); return; }}
+  if (event.shiftKey && current <= 0) {{
+    event.preventDefault(); focusable[focusable.length - 1].focus();
+  }}
+  else if (!event.shiftKey && (current < 0 || current === focusable.length - 1)) {{
+    event.preventDefault(); focusable[0].focus();
+  }}
+}});
 function apply(state) {{
   applyChrome(state.chrome);  // the shell follows App.set_theme() every poll
   if (state.version === version) return;
@@ -220,6 +276,7 @@ function apply(state) {{
     action.dataset.token = state.snackbar.token;
     document.getElementById('snack-close').dataset.token = state.snackbar.token;
   }} else {{ snack.style.display = 'none'; }}
+  syncModals(keep);
   document.querySelectorAll('[data-scroll-serial]').forEach(function (list) {{
     const serial = list.dataset.scrollSerial;
     if (serial === '0' || scrolled[list.dataset.wid] === serial) return;
@@ -244,6 +301,7 @@ async function poll() {{
   catch (e) {{ document.getElementById('status').textContent = 'disconnected'; }}
   setTimeout(poll, 400);
 }}
+syncModals();
 poll();
 </script>
 </body>
@@ -357,13 +415,11 @@ def _render_html_node(node: dict[str, Any]) -> str:
                 error,
             )
             return (
-                f'<div class="muted">&lt;{escape(kind)}: '
-                f"{escape(type(error).__name__)}&gt;</div>"
+                f'<div class="muted">&lt;{escape(kind)}: {escape(type(error).__name__)}&gt;</div>'
             )
         if not isinstance(markup, str):
             raise TypeError(
-                "a web preview renderer must return an HTML string, "
-                f"got {type(markup).__name__}"
+                f"a web preview renderer must return an HTML string, got {type(markup).__name__}"
             )
         return markup
 
@@ -409,7 +465,12 @@ def _render_html_node(node: dict[str, Any]) -> str:
             f'data-scroll-serial="{serial}" style="{extra}">{inner}</div>'
         )
 
-    if kind in ("Column", "Container", "SafeArea", "Stack", "RadioGroup"):
+    if kind == "Stack":
+        tap = _tap_attributes(kind, props, widget_id, disabled)
+        access = ' role="button" tabindex="0"' if tap else ""
+        return f'<div class="stack" style="{css}"{access}{tap}>{inner}</div>'
+
+    if kind in ("Column", "Container", "SafeArea", "RadioGroup"):
         gap = props.get("spacing", 0)
         align = _alignment(props.get("cross_align"))
         extra = f"gap:{gap}px;align-items:{align};{css}"
@@ -471,12 +532,20 @@ def _render_html_node(node: dict[str, Any]) -> str:
         return f'<div style="flex:{flex} {flex} {basis};min-width:0;{css}">{inner}</div>'
 
     if kind == "Divider":
+        thickness = props.get("thickness", 1)
+        inset = props.get("inset", 0)
+        colour = text_value(props.get("color", ""))
+        colour = "var(--line)" if colour in ("", "#1F000000") else _css_colour(colour)
         if props.get("vertical"):
-            width = props.get("thickness", 1)
             return (
-                f'<div style="width:{width}px;align-self:stretch;background:rgba(0,0,0,.12)"></div>'
+                f'<div role="separator" aria-orientation="vertical" '
+                f'style="width:{thickness}px;flex-shrink:0;align-self:stretch;'
+                f'margin:{inset}px 0;background:{colour};{css}"></div>'
             )
-        return f'<hr class="w" style="{css}">'
+        return (
+            f'<hr class="w" style="border-top:{thickness}px solid {colour};'
+            f'margin:8px {inset}px;width:calc(100% - {2 * inset}px);{css}">'
+        )
 
     if kind == "Label":
         # The id is carried through so the browser inspector shows which
@@ -530,13 +599,17 @@ def _render_html_node(node: dict[str, Any]) -> str:
         label = "" if props.get("decorative") else text_value(props.get("accessibility_label", ""))
         alt = escape(label, quote=True)
         hidden = ' aria-hidden="true"' if props.get("decorative") else ""
-        # http(s)/data sources render directly; APK-local asset paths degrade
-        # to the message on the right via the onerror fallback.
+        # WebPreview embeds safe local assets; other sources use the normal
+        # browser loader and retain this unavailable-image fallback.
         onerror = "this.replaceWith(document.createTextNode('[image unavailable]'))"
+        fit = props.get("fit", "contain")
+        fit = fit if fit in ("contain", "cover", "fill", "none") else "contain"
+        height = "100%" if style.get("height") is not None or style.get("aspect_ratio") else "auto"
         return (
             f'<div style="{css}">'
             f'<img data-wid="{widget_id}" src="{source}" alt="{alt}"{hidden} '
-            f'style="max-width:100%;display:block" onerror="{onerror}">'
+            f'style="width:100%;height:{height};object-fit:{fit};display:block" '
+            f'onerror="{onerror}">'
             f"</div>"
         )
 
@@ -559,7 +632,7 @@ def _render_html_node(node: dict[str, Any]) -> str:
             f'<label style="display:flex;gap:8px;align-items:center;{css}">'
             f'<input type="checkbox" data-wid="{widget_id}"{checked}{disabled} '
             f"onchange=\"send(this.dataset.wid,'toggle',this.checked?'true':'false')\">"
-            f"</label>"
+            f"{escape(text_value(props.get('text', '')))}</label>"
         )
 
     if kind == "RatingBar":
@@ -582,7 +655,7 @@ def _render_html_node(node: dict[str, Any]) -> str:
         selected = text_value(props.get("value", ""))
         items = "".join(
             f'<option value="{escape(val, quote=True)}"'
-            f'{" selected" if val == selected else ""}>{escape(lbl)}</option>' 
+            f"{' selected' if val == selected else ''}>{escape(lbl)}</option>"
             for val, lbl in zip(options, labels, strict=False)
         )
         return (
@@ -592,7 +665,7 @@ def _render_html_node(node: dict[str, Any]) -> str:
 
     if kind == "Chip":
         label = escape(text_value(props.get("text", "")))
-        selected = " font-weight:700;" if props.get("selected") else ""
+        selected = _SELECTED_CSS if props.get("selected") else ""
         return (
             f'<button class="w" data-wid="{widget_id}"{disabled} '
             f'style="border-radius:999px;{selected}{css}" '
@@ -601,10 +674,11 @@ def _render_html_node(node: dict[str, Any]) -> str:
 
     if kind == "Badge":
         label = escape(text_value(props.get("text", "")))
-        bg = _css_colour(text_value(props.get("background", "#3F51B5")))
+        bg = _css_colour(text_value(props.get("background", "var(--primary)")))
         fg = _css_colour(text_value(props.get("color", "#FFFFFF")))
         return (
-            f'<span data-wid="{widget_id}" style="display:inline-block;padding:2px 8px;'
+            f'<span data-wid="{widget_id}" style="align-self:flex-start;'
+            "display:inline-block;padding:2px 8px;"
             f'border-radius:999px;background:{bg};color:{fg};font-size:12px;{css}">'
             f"{label}</span>"
         )
@@ -649,7 +723,7 @@ def _render_html_node(node: dict[str, Any]) -> str:
         selected = text_value(props.get("value", ""))
         buttons = ""
         for val, lbl in zip(options, labels, strict=False):
-            active = "font-weight:700;" if val == selected else ""
+            active = _SELECTED_CSS if val == selected else ""
             buttons += (
                 f'<button class="w" data-wid="{widget_id}"{disabled} '
                 f'style="{active}" '
@@ -690,14 +764,22 @@ def _render_html_node(node: dict[str, Any]) -> str:
         )
 
     if kind == "Avatar":
-        text = escape(text_value(props.get("text", "") or "?"))
+        text = escape(text_value(props.get("text", "") or "?")[:2].upper())
+        source = escape(text_value(props.get("source")), quote=True)
+        photo = (
+            f'<img src="{source}" alt="" style="position:absolute;inset:0;width:100%;'
+            'height:100%;object-fit:cover;border-radius:50%" onerror="this.remove()">'
+            if source
+            else ""
+        )
         size = int(props.get("size", 48) or 48)
-        bg = _css_colour(text_value(props.get("background", "#3F51B5")))
+        bg = _css_colour(text_value(props.get("background", "var(--primary)")))
         fg = _css_colour(text_value(props.get("color", "#FFFFFF")))
         return (
             f'<div class="avatar" data-wid="{widget_id}" '
-            f'style="width:{size}px;height:{size}px;background:{bg};color:{fg};{css}">'
-            f"{text}</div>"
+            f'style="position:relative;overflow:hidden;flex-shrink:0;align-self:flex-start;'
+            f'width:{size}px;height:{size}px;background:{bg};color:{fg};{css}">'
+            f"{text}{photo}</div>"
         )
 
     if kind == "ListTile":
@@ -741,7 +823,7 @@ def _render_html_node(node: dict[str, Any]) -> str:
         tabs = []
         for val, lbl in zip(options, labels, strict=False):
             active = val == props.get("value")
-            look = "font-weight:700;background:#3F51B5;color:#fff;" if active else ""
+            look = _SELECTED_CSS if active else ""
             tabs.append(
                 f'<button class="w" data-wid="{widget_id}"{disabled} '
                 f'style="flex:1;border-radius:0;{look}" '
@@ -752,17 +834,19 @@ def _render_html_node(node: dict[str, Any]) -> str:
 
     if kind == "Dialog":
         title = escape(text_value(props.get("title", "")))
+        accessible = escape(text_value(props.get("title") or "Dialog"), quote=True)
         sheet = bool(props.get("sheet"))
         radius = "16px 16px 0 0" if sheet else "12px"
-        margin = "24px 0 0" if sheet else "12px 0"
         head = f'<h4 style="margin:0 0 8px">{title}</h4>' if title else ""
         gap = props.get("spacing", 0)
-        # C-2: the dialog's own spacing separates its children, like a Column.
-        body = f'<div class="col" style="gap:{gap}px">{inner}</div>' if gap else inner
+        body = f'<div class="col" style="gap:{gap}px">{inner}</div>'
+        classes = "modal-overlay sheet" if sheet else "modal-overlay"
         return (
-            f'<section style="border:1px solid #b0bec5;border-radius:{radius};'
-            f'padding:12px;margin:{margin};box-shadow:0 6px 18px rgba(0,0,0,.18);{css}">'
-            f"{head}{body}</section>"
+            f'<div class="{classes}" data-dialog-id="{widget_id}" '
+            f"onclick=\"if(event.target===this)send(this.dataset.dialogId,'dismiss','')\">"
+            f'<section class="modal-surface" role="dialog" aria-modal="true" '
+            f'aria-label="{accessible}" tabindex="-1" style="border-radius:{radius};{css}">'
+            f"{head}{body}</section></div>"
         )
 
     if kind == "DatePicker":
@@ -795,15 +879,23 @@ def _render_html_node(node: dict[str, Any]) -> str:
     return f'<div class="muted">&lt;{escape(kind)}&gt;</div>'
 
 
+_SELECTED_CSS = (
+    "font-weight:700;background:var(--primary);color:var(--on-primary);border-color:var(--primary);"
+)
+
 #: Colours of the five ButtonVariant roles in the browser preview.
 _BUTTON_VARIANTS = {
     "primary": (
-        "background:#3F51B5;color:#fff;border:1px solid #3F51B5;"
+        "background:var(--primary);color:var(--on-primary);border:1px solid var(--primary);"
         "box-shadow:0 1px 3px rgba(0,0,0,.24);"
     ),
-    "tonal": "background:#e3e6f5;color:#26305e;border:1px solid #c9cfe9;",
-    "outlined": "background:transparent;color:#3F51B5;border:1px solid #3F51B5;",
-    "text": "background:transparent;color:#3F51B5;border:1px solid transparent;",
+    "tonal": (
+        "background:var(--bar-bg);"
+        "background:color-mix(in srgb,var(--primary) 18%,var(--bar-bg));"
+        "color:var(--text);border:1px solid var(--primary);"
+    ),
+    "outlined": "background:transparent;color:var(--primary);border:1px solid var(--primary);",
+    "text": "background:transparent;color:var(--primary);border:1px solid transparent;",
     "danger": (
         "background:#C62828;color:#fff;border:1px solid #C62828;"
         "box-shadow:0 1px 3px rgba(0,0,0,.24);"
@@ -907,8 +999,10 @@ class WebPreview:
         require_token: bool = True,
         allow_origins: Sequence[str] = (),
         frame_options: str = "DENY",
+        assets: str | Path | None = None,
     ) -> None:
         self.app = app
+        self.assets = (Path(assets) if assets is not None else Path.cwd() / "assets").resolve()
         self.host = host
         self.port = port
         self.exposed = not _is_loopback(host)
@@ -974,12 +1068,54 @@ class WebPreview:
         return {
             "version": version,
             "title": str(tree.get("screen") or self.app.name),
-            "body": render_html(tree) if tree else "",
+            "body": render_html(self._asset_tree(tree)) if tree else "",
             "depth": self.app.navigator.depth,
             "status": status,
             "snackbar": tree.get("snackbar") if tree else None,
             "chrome": self._theme_vars(),
         }
+
+    def _asset_tree(self, node: dict[str, Any]) -> dict[str, Any]:
+        """Copy the tree and embed only bounded image files under the assets root.
+
+        No arbitrary project files, remote fetches or file:// access. Resolving
+        before the containment check rejects traversal and escaping symlinks.
+        """
+        result = dict(node)
+        props = node.get("props", {})
+        if node.get("type") in ("Image", "Avatar") and props.get("source"):
+            source = str(props["source"])
+            try:
+                parts = urlsplit(source)
+            except ValueError:
+                parts = None
+            if parts is not None and not parts.scheme and not parts.netloc:
+                relative = unquote(parts.path).replace("\\", "/")
+                if relative.startswith("assets/"):
+                    relative = relative[len("assets/") :]
+                try:
+                    path = (self.assets / relative).resolve()
+                    mime = mimetypes.guess_type(path.name)[0]
+                    allowed = {
+                        "image/png",
+                        "image/jpeg",
+                        "image/gif",
+                        "image/webp",
+                        "image/bmp",
+                        "image/x-icon",
+                        "image/svg+xml",
+                    }
+                    if path.is_relative_to(self.assets) and path.is_file() and mime in allowed:
+                        with path.open("rb") as file:
+                            data = file.read(8 * 1024 * 1024 + 1)
+                        if len(data) <= 8 * 1024 * 1024:
+                            source = f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
+                except (OSError, ValueError):
+                    pass  # retain the normal image-unavailable fallback
+                result["props"] = {**props, "source": source}
+        if "children" in node:
+            result["children"] = [self._asset_tree(child) for child in node["children"]]
+        return result
 
     def _theme_vars(self) -> dict[str, str]:
         """Chrome colours that follow ``App(theme=...)``."""
@@ -995,14 +1131,19 @@ class WebPreview:
                     pass
             return dark_value if dark else light
 
+        from .theme import _readable_on
+
+        primary = pick("PRIMARY", "#3F51B5", "#9fa8da")
+        on_primary = _readable_on(primary, pick("SURFACE", "#FFFFFF", "#1E1E1E"))
         return {
+            "on_primary": _css_colour(pick("ON_PRIMARY", on_primary, on_primary)),
             "color_scheme": "dark" if dark else "light",
             "page_bg": "#121212" if dark else "#eceff1",
             "phone_bg": pick("BACKGROUND", "#fff", "#121212"),
             "bar_bg": pick("SURFACE", "#f7f8fa", "#1e1e1e"),
             "text": pick("TEXT", "#212121", "#EEEEEE"),
             "muted": pick("TEXT_MUTED", "#607d8b", "#9e9e9e"),
-            "primary": pick("PRIMARY", "#3F51B5", "#9fa8da"),
+            "primary": _css_colour(primary),
             "line": "#333" if dark else "#e3e7ea",
             "snack_bg": "#e6e6e6" if dark else "#323232",
             "snack_fg": "#212121" if dark else "#ffffff",
@@ -1129,9 +1270,9 @@ class WebPreview:
             return False
         host = (
             (
-            headers.get("X-Forwarded-Host")
-            or headers.get("X-Forwarded-Server")
-            or headers.get("Host", "")
+                headers.get("X-Forwarded-Host")
+                or headers.get("X-Forwarded-Server")
+                or headers.get("Host", "")
             )
             .split(",")[0]
             .strip()
@@ -1240,9 +1381,7 @@ class WebPreview:
                     return
                 length = int(self.headers.get("Content-Length") or 0)
                 if length > MAX_EVENT_BYTES:
-                    self._reject(
-                        f"event body larger than {MAX_EVENT_BYTES} bytes\n".encode(), 413
-                    )
+                    self._reject(f"event body larger than {MAX_EVENT_BYTES} bytes\n".encode(), 413)
                     return
                 try:
                     event = json.loads(self.rfile.read(length) or b"{}")

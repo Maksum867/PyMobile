@@ -285,9 +285,13 @@ final class ViewStyles {
         }
 
         if (style.has("background") || style.has("corner_radius")) {
-            GradientDrawable shape = new GradientDrawable();
-            shape.setColor(owner.parseColor(style.optString("background", "#00000000"),
-                    Color.TRANSPARENT));
+            GradientDrawable shape = view.getBackground() instanceof GradientDrawable
+                    ? (GradientDrawable) view.getBackground().mutate() : new GradientDrawable();
+            if (style.has("background")) {
+                shape.setColor(owner.parseColor(style.optString("background"), Color.TRANSPARENT));
+            } else if (view.getBackground() instanceof android.graphics.drawable.ColorDrawable) {
+                shape.setColor(((android.graphics.drawable.ColorDrawable) view.getBackground()).getColor());
+            }
             shape.setCornerRadius(owner.dp(style.optInt("corner_radius", 0)));
             view.setBackground(shape);
         }
@@ -301,7 +305,7 @@ final class ViewStyles {
             view.setElevation(elevation);
             // A shadow needs something opaque to fall from; a view with no
             // background casts none, which looks like elevation being ignored.
-            if (!style.has("background")) {
+            if (!style.has("background") && view.getBackground() == null) {
                 view.setBackgroundColor(owner.colorSurface);
             }
         }
