@@ -24,6 +24,7 @@ class Color:
     """Named colours plus validation for ``#RGB``/``#RRGGBB``/``#AARRGGBB``."""
 
     PRIMARY = "#3F51B5"
+    ON_PRIMARY = "#FFFFFF"
     ACCENT = "#FF4081"
     BACKGROUND = "#FFFFFF"
     SURFACE = "#F5F5F5"

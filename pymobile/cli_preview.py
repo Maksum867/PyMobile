@@ -74,7 +74,7 @@ def _run_gui(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> in
 
     cli._out.ok(f"{app.name} is running — close the window to stop")
     try:
-        preview = GuiPreview(app, title=app.name)
+        preview = GuiPreview(app, title=app.name, assets=config.source_path)
         bridge.attach(preview)
         preview.run()
     except Exception as error:  # pragma: no cover - display problems
@@ -110,6 +110,7 @@ def _run_web(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> in
         require_token=not getattr(args, "no_token", False),
         allow_origins=tuple(getattr(args, "allow_origin", None) or ()),
         frame_options="" if getattr(args, "embed", False) else "DENY",
+        assets=config.root / "assets",
     )
     bridge.attach(preview)
     cli._out.ok(f"{app.name} is running at {browser_url(args.host, preview.port, preview.token)}")
@@ -233,7 +234,7 @@ def _open_gui_window(bridge: Any, config: ProjectConfig) -> Any:
     app = App.current()
     if app is None:
         return None
-    preview = GuiPreview(app, title=f"{app.name} — dev")
+    preview = GuiPreview(app, title=f"{app.name} — dev", assets=config.source_path)
     bridge.attach(preview)
     preview.root.update_idletasks()
     preview.root.update()
@@ -322,7 +323,7 @@ def _reload(config: ProjectConfig, entry: Path, args: argparse.Namespace) -> Non
             tree,
             args.png,
             theme=app.theme if app is not None else None,
-            title=display_title,
+            title=str(tree.get("screen") or display_title),
             assets=config.source_path,
         )
         elapsed = (time.perf_counter() - started) * 1000
@@ -388,7 +389,7 @@ def cmd_preview(args: argparse.Namespace) -> int:
                 width=width,
                 height=height,
                 theme=theme,
-                title=display_title,
+                title=str(tree.get("screen") or display_title),
                 assets=config.source_path,
             )
         except ValueError as exc:

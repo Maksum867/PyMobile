@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._mockup_colors import _mix
+from ._mockup_colors import _mix, _rgba
 from ._mockup_context import _MockupContext
 from ._mockup_paint import _LINE, _Box, _Painter
 from .contract import text_value
+from .theme import _readable_on
 
 _STATUS_BAR = 24
 _APP_BAR = 56
@@ -21,9 +22,10 @@ class _ChromeLayout(_MockupContext):
     def _paint_load_more(self, pt: _Painter, x: float, y: float, b: _Box) -> None:
         pt.arc(x + b.w / 2, y + b.h / 2, 10, -90, 200, self.p["PRIMARY"], 3)
 
-    def paint_chrome(self, pt: _Painter, width: float, title: str) -> None:
+    def paint_chrome(self, pt: _Painter, width: float, title: str, *, back: bool = False) -> None:
         primary = self.p["PRIMARY"]
-        white = (255, 255, 255, 255)
+        status = _mix(primary, (0, 0, 0, 255), 0.2)
+        white = _rgba(_readable_on("#{:02X}{:02X}{:02X}".format(*status[:3])))
         pt.rect(0, 0, width, _STATUS_BAR, _mix(primary, (0, 0, 0, 255), 0.2))
         pt.text(16, (_STATUS_BAR - 13 * _LINE) / 2, "12:00", 13, white)
         # battery and signal
@@ -33,11 +35,17 @@ class _ChromeLayout(_MockupContext):
         pt.rect(0, _STATUS_BAR, width, _APP_BAR, primary)
         for i in range(4):
             pt.rect(0, _STATUS_BAR + _APP_BAR + i, width, 1, (0, 0, 0, 36 - i * 9))
+        on_primary = self.p["ON_PRIMARY"]
+        if back:
+            cy = _STATUS_BAR + _APP_BAR / 2
+            pt.line([(30, cy - 8), (22, cy), (30, cy + 8)], on_primary, 2)
+            pt.line([(22, cy), (40, cy)], on_primary, 2)
+        left = 56 if back else 16
         if title:
-            text = title
-            while text and self.fonts.width(text, 20, True) > width - 32:
-                text = text[:-2] + "…" if len(text) > 2 else ""
-            pt.text(16, _STATUS_BAR + (_APP_BAR - 20 * _LINE) / 2, text, 20, white, bold=True)
+            text = self.fonts.ellipsize(title, 20, True, max(0, width - left - 16))
+            pt.text(
+                left, _STATUS_BAR + (_APP_BAR - 20 * _LINE) / 2, text, 20, on_primary, bold=True
+            )
 
     def paint_dialog(
         self, pt: _Painter, node: dict[str, Any], screen: tuple[float, float, float, float]

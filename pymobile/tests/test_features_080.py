@@ -513,12 +513,17 @@ def test_mockup_paints_dialogs_and_the_snackbar(tmp_path: Path, PIL: Any) -> Non
         def on_mount(self) -> None:
             self.dialog.open()
 
+    from PIL import ImageColor
+
     app, stub = _run(WithDialog())
-    app.snackbar("Deleted", action="Undo")
-    path = render_mockup(stub.last_tree, tmp_path / "shot.png", height=640)
-    image = PIL.Image.open(path).convert("RGB")
-    assert _pixel(image, 180, 600) != (255, 255, 255)  # dimmed by the dialog
-    assert _pixel(image, 180, 320) == (255, 255, 255)  # the dialog surface
+    try:
+        app.snackbar("Deleted", action="Undo")
+        path = render_mockup(stub.last_tree, tmp_path / "shot.png", height=640)
+        image = PIL.Image.open(path).convert("RGB")
+        assert _pixel(image, 180, 600) != (255, 255, 255)  # dimmed by the dialog
+        assert _pixel(image, 180, 320) == ImageColor.getrgb(app.theme["SURFACE"])
+    finally:
+        app.stop()
 
 
 def test_preview_png_writes_a_mockup_and_text_keeps_the_old_picture(

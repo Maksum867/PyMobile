@@ -3,6 +3,85 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.13.1] — 2026-11-07
+
+### Added
+
+- Optional `GuiPreview(assets=...)` base directory for local Avatar photos;
+  CLI GUI/dev previews use the project source directory.
+- `JobHandle.wait(..., include_callbacks=True)` to explicitly wait for completion
+  callback delivery without changing the default outcome-only wait.
+- `Screen.enqueue_job()` binds completion callbacks to the current mount and
+  cancels tracked work on unmount; stale callbacks stay suppressed after remount.
+- Keyword-only `Checkbox(text=...)` with reactive label updates across previews
+  and Android.
+- Public root exports for `Bridge` and `StubBridge`, and registration-order
+  snapshot iteration, `all()` and `items()` for `PluginRegistry`.
+
+### Fixed
+
+- Render circular Avatar photos with initials fallback on Android/PNG/web/Tk;
+  use intrinsic avatar dimensions and wrap-content pill badges rather than
+  stretching them across a Column. Keep Unicode-safe native fallback casing
+  consistent during patches.
+- Apply dynamic theme text/surface colours to native Spinner/AutoComplete
+  adapters, shared button styling to pickers/Stepper, light/dark picker dialogs,
+  and state-aware tint lists to switches, checks, radios, sliders and progress
+  controls.
+- Give Tk per-window themes, true Stack overlays with height remeasurement,
+  clickable selected Chips/MultiSelect, selected RadioButtons, ProgressText bars
+  and complete ListTile text.
+- Patch Tk control values and disabled states without callback echoes or loss of
+  unrelated input focus. Support progress/identity updates and focused explicit
+  text changes; rebuild when styles or unsupported structural properties change
+  rather than keeping stale options or handlers.
+- Share DataTable column widths across all rows in Android and PNG; remeasure
+  updates and rebuild on changed header structure.
+- Implement Image `fill` and `none` alongside `contain`/`cover` in Android,
+  web and PNG, including bounded clipping of unscaled PNG images.
+- Keep Android bottom-navigation labels on one compact ellipsized line; apply
+  the same measured single-line layout to PNG tabs.
+- Show the active screen title and back-navigation indicator in PNG chrome;
+  preserve explicit render_mockup title overrides and stop CLI PNG paths from
+  replacing screen titles with the application name.
+- Compute a shared WCAG black/white ON_PRIMARY for themes, Android/PNG/web and
+  selected TabView/Calendar controls, retaining explicit overrides.
+  Badge/text Avatar foreground defaults now follow their background contrast.
+- Thin/truncate chart axis labels according to available space, reserve room
+  outside signed bar extrema for value annotations, truncate long titles, and
+  show an omitted-entry count in overflowing pie legends.
+- Resolve web button/navigation colours through theme variables and visibly
+  distinguish selected chips and segments. Badge/Avatar default backgrounds now
+  follow the mounted App theme while explicit backgrounds remain unchanged.
+- Embed bounded local image assets in authenticated web preview responses,
+  restricting reads to the configured assets directory.
+- Show web dialogs and bottom sheets in a phone-level modal layer, with backdrop
+  dismissal, Escape, focus containment/restoration and redraw-safe inputs;
+  respect divider tint, thickness and inset in either orientation.
+- Add a one-dp ring around ColorPicker swatches without reducing their button
+  hit targets, and compact Pagination buttons/centre gap labels.
+- Include theme metadata in `StubBridge.last_tree`, use a visible divider in
+  dark PNG previews, and honour explicit light/dark SURFACE colours in Android
+  and PNG rather than forcing a white light surface.
+- Scan local Python modules, not only the entrypoint, for invalid public imports
+  during `pymobile check`, excluding generated/test/virtual-environment folders
+  and symlinks.
+- Preserve Android control fills/strokes and PNG button variants when only
+  `Style.corner_radius` is supplied.
+- Display translated Android navigation, segment and dropdown labels while
+  retaining stable option values for events.
+- Share Android Button, Chip, Badge and text Avatar styling between creation and
+  updates; keep segment appearance consistent and handle RadioGroup before the
+  generic container traversal.
+- Fill Canvas polygons and support outlined rectangles across Android, SVG/web,
+  Tk and PNG renderers.
+- Correct inactive PNG segment fills/heights, chip text contrast and pill shape,
+  and single-line input overflow, including after layout shrinkage.
+- Overlay web Stack children in a shared grid cell while preserving tap
+  attributes.
+- Rebuild the bundled Android launcher and source-provenance manifest for these
+  Java changes.
+
 ## [0.13.0] — 2026-11-05
 
 ### Added

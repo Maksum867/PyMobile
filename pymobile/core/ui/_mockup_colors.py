@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .theme import _readable_on
+
 _Colour = tuple[int, int, int, int]
 
 
@@ -72,15 +74,13 @@ def _palette(theme: Any) -> dict[str, Any]:
         "dark": dark,
         "PRIMARY": _rgba(colours.get("PRIMARY"), (0x3F, 0x51, 0xB5, 255)),
         "BACKGROUND": _rgba(colours.get("BACKGROUND"), (18, 18, 18, 255) if dark else white),
-        # Like the device: the light preset's #F5F5F5 surface is replaced by white.
-        "SURFACE": _rgba(colours.get("SURFACE"), (30, 30, 30, 255)) if dark else white,
+        "SURFACE": _rgba(colours.get("SURFACE"), (30, 30, 30, 255) if dark else white),
         "TEXT": _rgba(
             colours.get("TEXT"), (0xEE, 0xEE, 0xEE, 255) if dark else (0x21, 0x21, 0x21, 255)
         ),
         "MUTED": _rgba(
             colours.get("TEXT_MUTED"), (0x9E, 0x9E, 0x9E, 255) if dark else (0x75, 0x75, 0x75, 255)
         ),
-        "ON_PRIMARY": white,
         # Semantic accents, so a danger button or a success badge is the same
         # colour as on the phone (P1: the palette only knew PRIMARY).
         "ACCENT": _rgba(colours.get("ACCENT"), (0xFF, 0x40, 0x81, 255)),
@@ -93,6 +93,12 @@ def _palette(theme: Any) -> dict[str, Any]:
         "CONTROL": (255, 255, 255, 0xB3) if dark else (0, 0, 0, 0x8A),
         "TRACK_OFF": (255, 255, 255, 0x4D) if dark else (0, 0, 0, 0x61),
         "THUMB_OFF": (0xBD, 0xBD, 0xBD, 255) if dark else (0xFA, 0xFA, 0xFA, 255),
-        "DIVIDER": (0, 0, 0, 0x1F),
+        "DIVIDER": (255, 255, 255, 0x1F) if dark else (0, 0, 0, 0x1F),
     }
+
+    def hexed(colour: _Colour) -> str:
+        return "#{:02X}{:02X}{:02X}{:02X}".format(colour[3], *colour[:3])
+
+    automatic = _rgba(_readable_on(hexed(palette["PRIMARY"]), hexed(palette["SURFACE"])))
+    palette["ON_PRIMARY"] = _rgba(colours.get("ON_PRIMARY"), automatic)
     return palette

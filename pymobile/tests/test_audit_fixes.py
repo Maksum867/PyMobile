@@ -345,10 +345,14 @@ class TestThemeAndLocale:
         assert tree["theme"]["dark"] is True
         assert tree["theme"]["PRIMARY"].startswith("#")
 
-    def test_previews_get_the_plain_tree(self, bridge: Any) -> None:
+    def test_renderers_can_opt_out_of_theme_metadata(self, bridge: Any) -> None:
+        bridge.accepts_theme = False
         app = App("Demo", bridge=bridge)
-        app.run(_Plain("Plain"))
-        assert "theme" not in bridge.last_tree
+        try:
+            app.run(_Plain("Plain"))
+            assert "theme" not in bridge.last_tree
+        finally:
+            app.stop()
 
     def test_language_change_becomes_an_app_event(self, bridge: Any) -> None:
         app = App("Demo", bridge=bridge)

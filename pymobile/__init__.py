@@ -18,7 +18,7 @@ Build it with ``pymobile build``.
 
 from __future__ import annotations
 
-__version__ = "0.13.0"
+__version__ = "0.13.1"
 __author__ = "MAKSYM KHLYSTUN"
 __license__ = "MIT"
 
@@ -35,7 +35,7 @@ from .core.api import (
 )
 from .core.api.audio import AudioPlayer, AudioRecorder
 from .core.app import App
-from .core.bridge import PickedFile
+from .core.bridge import Bridge, PickedFile, StubBridge
 from .core.config import ProjectConfig, load_config
 from .core.events import Event, EventBus
 from .core.i18n import (
@@ -237,6 +237,8 @@ __all__ = [
     "AudioPlayer",
     "AudioRecorder",
     "PickedFile",
+    "Bridge",
+    "StubBridge",
     "Permission",
     "PermissionManager",
     "Storage",

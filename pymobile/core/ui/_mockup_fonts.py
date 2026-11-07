@@ -124,6 +124,22 @@ class _Fonts:
                 runs.append((chosen, ch))
         return runs
 
+    def ellipsize(self, text: str, size: float, bold: bool, width: float) -> str:
+        """Fit a single line, including the ellipsis, using actual glyph widths."""
+        text = " ".join(text.splitlines())
+        if self.width(text, size, bold) <= width:
+            return text
+        if self.width("…", size, bold) > width:
+            return ""
+        low, high = 0, len(text)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if self.width(text[:middle] + "…", size, bold) <= width:
+                low = middle
+            else:
+                high = middle - 1
+        return text[:low] + "…"
+
     def width(self, text: str, size: float, bold: bool = False) -> float:
         total = 0.0
         for font, chunk in self.runs(text, size, bold):

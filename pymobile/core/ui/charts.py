@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -128,6 +129,29 @@ class _Chart(Widget):
             "align": align,
         }
 
+    @staticmethod
+    def _fit_text(text: str, width: float, size: int) -> str:
+        """Conservative font-independent fit in the shared logical view box.
+
+        Budget one em per character (combining marks take no extra space),
+        rather than assuming that every locale has narrow Latin glyphs.
+        """
+        text = " ".join(text.splitlines())
+
+        def measure(value: str) -> float:
+            return sum(0 if unicodedata.combining(ch) else size for ch in value)
+
+        if measure(text) <= width:
+            return text
+        if width < size:
+            return ""
+        result = ""
+        for ch in text:
+            if measure(result + ch + "…") > width:
+                break
+            result += ch
+        return result + "…"
+
     def _drawing(self) -> dict[str, Any]:
         width, height = 320, self.height
         text = theme_color(self, "TEXT")
@@ -137,7 +161,9 @@ class _Chart(Widget):
         shapes: list[dict[str, Any]] = []
         top = 30 if self.title else 12
         if self.title:
-            shapes.append(self._text(12, 5, self.title, text, size=15))
+            shapes.append(
+                self._text(12, 5, self._fit_text(self.title, width - 24, 15), text, size=15)
+            )
         if not self.data or (self.chart_kind == "pie" and sum(self.data) == 0):
             shapes.append(self._text(160, height / 2, self.empty_text, muted, align="center"))
             return {"width": width, "height": height, "shapes": shapes}
@@ -145,6 +171,8 @@ class _Chart(Widget):
             radius = max(8.0, min((height - top - 20) / 2, 76))
             cx, cy = 94.0, top + radius + 6
             angle, total = -90.0, sum(self.data)
+            slots = max(1, (height - top - 2) // 20)
+            visible = slots if len(self.data) <= slots else slots - 1
             for i, (name, value) in enumerate(zip(self.labels, self.data, strict=True)):
                 color = self._colors[i % len(self._colors)]
                 sweep = value / total * 360
@@ -162,7 +190,7 @@ class _Chart(Widget):
                 angle += sweep
                 # Keep a legible legend inside the view; the accessible summary
                 # and ASCII preview retain every entry when a legend is too long.
-                if top + i * 20 + 18 < height:
+                if i < visible:
                     shapes.append(
                         {
                             "type": "rect",
@@ -174,16 +202,26 @@ class _Chart(Widget):
                         }
                     )
                     suffix = f" {value / total:.0%}" if self.show_values else ""
-                    shapes.append(self._text(199, top + i * 20 - 1, name[:14] + suffix, text))
+                    label = self._fit_text(name + suffix, width - 199 - 8, 11)
+                    shapes.append(self._text(199, top + i * 20 - 1, label, text))
+            if len(self.data) > visible:
+                shapes.append(
+                    self._text(185, top + visible * 20, f"+{len(self.data) - visible} more", muted)
+                )
         else:
             left, right, bottom = 42.0, 306.0, height - 30.0
             low, high = min(0.0, min(self.data)), max(0.0, max(self.data))
             if low == high:
                 high = low + 1
             span = high - low
+            # Keep value annotations outside both signed extremes, not inside
+            # filled bars or on the zero baseline. Tiny charts omit values.
+            annotate = self.show_values and len(self.data) <= 12 and bottom - top >= 48
+            data_top = top + 16 if annotate else top
+            data_bottom = bottom - 16 if annotate else bottom
 
             def y(value: float) -> float:
-                return bottom - (value - low) / span * (bottom - top)
+                return data_bottom - (value - low) / span * (data_bottom - data_top)
 
             zero = y(0)
             shapes.append(line([(left, top), (left, bottom), (right, bottom)], muted, 1))
@@ -194,7 +232,8 @@ class _Chart(Widget):
             shapes.append(line([(left, zero), (right, zero)], muted, 1))
             count = len(self.data)
             pitch = (right - left) / count
-            skip = max(1, math.ceil(count / 8))
+            longest = max((min(len(name), 8) for name in self.labels), default=1)
+            skip = max(1, math.ceil(count / 8), math.ceil((longest * 11 + 8) / pitch))
             points = []
             for i, (name, value) in enumerate(zip(self.labels, self.data, strict=True)):
                 x = left + (i + 0.5) * pitch
@@ -217,10 +256,13 @@ class _Chart(Widget):
                             {"type": "circle", "x": x, "y": y(value), "r": 3, "color": primary}
                         )
                 if i % skip == 0:
-                    shapes.append(self._text(x, bottom + 8, name[:8], muted, align="center"))
-                    if self.show_values and count <= 12:
-                        label_y = min(bottom - 12, max(top, y(value) - 14))
-                        shapes.append(self._text(x, label_y, f"{value:g}", text, align="center"))
+                    label_width = min(pitch * skip - 8, 2 * (x - 4), 2 * (width - 4 - x))
+                    label = self._fit_text(name, label_width, 11)
+                    shapes.append(self._text(x, bottom + 8, label, muted, align="center"))
+                    if annotate:
+                        label_y = y(value) + 3 if value < 0 else y(value) - 14
+                        value_label = self._fit_text(f"{value:g}", label_width, 11)
+                        shapes.append(self._text(x, label_y, value_label, text, align="center"))
             if points:
                 shapes.append(line(points, primary, 2))
         return {"width": width, "height": height, "shapes": shapes}

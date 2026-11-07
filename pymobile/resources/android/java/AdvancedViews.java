@@ -143,8 +143,10 @@ final class AdvancedViews {
                 paint.setStrokeJoin(Paint.Join.ROUND);
                 String type = s.optString("type", "");
                 float x = (float) s.optDouble("x", 0), y = (float) s.optDouble("y", 0);
-                if ("line".equals(type)) {
-                    paint.setStyle(Paint.Style.STROKE);
+                if ("line".equals(type) || "polygon".equals(type)) {
+                    boolean polygon = "polygon".equals(type);
+                    paint.setStyle(polygon && s.optBoolean("fill", true)
+                            ? Paint.Style.FILL : Paint.Style.STROKE);
                     JSONArray points = s.optJSONArray("points");
                     Path path = new Path();
                     if (points != null) for (int j = 0; j < points.length(); j++) {
@@ -153,8 +155,10 @@ final class AdvancedViews {
                         float px = (float) p.optDouble(0), py = (float) p.optDouble(1);
                         if (j == 0) path.moveTo(px, py); else path.lineTo(px, py);
                     }
+                    if (polygon) path.close();
                     canvas.drawPath(path, paint);
                 } else if ("rect".equals(type)) {
+                    paint.setStyle(s.optBoolean("fill", true) ? Paint.Style.FILL : Paint.Style.STROKE);
                     canvas.drawRect(x, y, x + (float) s.optDouble("w"), y + (float) s.optDouble("h"), paint);
                 } else if ("circle".equals(type)) {
                     paint.setStyle(s.optBoolean("fill", true) ? Paint.Style.FILL : Paint.Style.STROKE);
@@ -178,9 +182,22 @@ final class AdvancedViews {
     /** Case-insensitive substring filtering, rather than Android's prefix-only filter. */
     private static final class SuggestionAdapter extends ArrayAdapter<String> {
         private final List<String> all;
-        SuggestionAdapter(Context context, List<String> values) {
+        private final int textColor, surfaceColor;
+        SuggestionAdapter(Context context, List<String> values, int text, int surface) {
             super(context, android.R.layout.simple_dropdown_item_1line, new ArrayList<>(values));
             all = new ArrayList<>(values);
+            textColor = text; surfaceColor = surface;
+        }
+        private View colour(View view) {
+            ((android.widget.TextView) view).setTextColor(textColor);
+            view.setBackgroundColor(surfaceColor);
+            return view;
+        }
+        @Override public View getView(int position, View convertView, android.view.ViewGroup parent) {
+            return colour(super.getView(position, convertView, parent));
+        }
+        @Override public View getDropDownView(int position, View convertView, android.view.ViewGroup parent) {
+            return colour(super.getDropDownView(position, convertView, parent));
         }
         @Override public Filter getFilter() {
             return new Filter() {
@@ -229,12 +246,13 @@ final class AdvancedViews {
             });
         }
 
-        void bind(String id, JSONObject props, int textColor, int hintColor) {
+        void bind(String id, JSONObject props, int textColor, int hintColor, int surfaceColor) {
             this.id = id;
             binding = true;
             try {
                 setTextColor(textColor);
                 setHintTextColor(hintColor);
+                setDropDownBackgroundDrawable(new android.graphics.drawable.ColorDrawable(surfaceColor));
                 setHint(props.optString("placeholder", ""));
                 setThreshold(props.optInt("threshold", 1));
                 int inputType = InputType.TYPE_CLASS_TEXT;
@@ -244,11 +262,11 @@ final class AdvancedViews {
                 int maximum = props.optInt("max_length", 0);
                 setFilters(maximum > 0 ? new InputFilter[]{new InputFilter.LengthFilter(maximum)} : new InputFilter[0]);
                 JSONArray options = props.optJSONArray("options");
-                String signature = options == null ? "[]" : options.toString();
+                String signature = (options == null ? "[]" : options.toString()) + textColor + ":" + surfaceColor;
                 if (!signature.equals(optionsSignature)) {
                     ArrayList<String> values = new ArrayList<>();
                     if (options != null) for (int i = 0; i < options.length(); i++) values.add(options.optString(i));
-                    setAdapter(new SuggestionAdapter(getContext(), values));
+                    setAdapter(new SuggestionAdapter(getContext(), values, textColor, surfaceColor));
                     optionsSignature = signature;
                 }
                 String value = props.optString("value", "");

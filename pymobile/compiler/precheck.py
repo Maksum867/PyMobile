@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import ast
 import difflib
+import os
 import re
+import tokenize
 import traceback
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -85,7 +87,6 @@ def _icon_problem(config: ProjectConfig) -> PyMobileError | None:
     except PyMobileError as exc:
         return exc
     return None
-
 
 
 def check_project(root: str | Path, *, run_app: bool = True) -> list[Finding]:
@@ -155,13 +156,12 @@ def check_project(root: str | Path, *, run_app: bool = True) -> list[Finding]:
     try:
         tree = ast.parse(source, filename=str(entry))
     except SyntaxError as exc:
-        findings.append(
-            Finding(entry, f"syntax error: {exc.msg}", exc.lineno, exc.offset)
-        )
+        findings.append(Finding(entry, f"syntax error: {exc.msg}", exc.lineno, exc.offset))
         return findings
 
     name_findings = _import_findings(entry, tree)
     findings.extend(name_findings)
+    findings.extend(_module_findings(root, entry))
     if findings or config is None or not run_app:
         return findings
     return _startup_findings(config, entry)
@@ -219,6 +219,28 @@ def _config_findings(config_file: Path, text: str, exc: PyMobileError) -> list[F
             )
         return findings
     return [Finding(config_file, message, hint=exc.hint)]
+
+
+def _module_findings(root: Path, entry: Path) -> list[Finding]:
+    """Check local Python modules without importing or executing them."""
+    excluded = {"tests", "test", "build", "dist", "venv", "env", "__pycache__", "node_modules"}
+    findings: list[Finding] = []
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if d not in excluded and not d.startswith("."))
+        for name in sorted(files):
+            path = Path(directory) / name
+            if not name.endswith(".py") or path.is_symlink() or path.resolve() == entry.resolve():
+                continue
+            try:
+                with tokenize.open(path) as source:
+                    tree = ast.parse(source.read(), filename=str(path))
+            except SyntaxError as exc:
+                findings.append(Finding(path, f"syntax error: {exc.msg}", exc.lineno, exc.offset))
+            except (OSError, UnicodeError) as exc:
+                findings.append(Finding(path, f"cannot read Python source: {exc}"))
+            else:
+                findings.extend(_import_findings(path, tree))
+    return findings
 
 
 def _import_findings(entry: Path, tree: ast.AST) -> list[Finding]:

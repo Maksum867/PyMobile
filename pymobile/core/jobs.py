@@ -10,10 +10,11 @@ Jobs fire on a daemon thread, so the UI is never blocked. An exception inside a
 job is captured on the handle and delivered to ``on_error`` (if any) rather than
 crashing the app. All jobs are cancelled automatically when the app stops.
 
-``then()`` callbacks run on the job's worker thread. To change widgets from
-them, hand the update to the UI with :meth:`App.dispatch`. An exception raised
-by a callback is logged with its traceback and passed to that callback's
-``on_error``; it never changes the job's own result.
+A standalone manager runs ``then()`` callbacks on its worker thread; App
+provides UI-side delivery. ``wait(include_callbacks=True)`` explicitly waits
+for that delivery as well as the result; never use it on the UI thread that
+must deliver those callbacks. An exception raised by a callback is logged
+and passed to that callback's ``on_error``; it never changes the job's result.
 """
 
 from __future__ import annotations
@@ -59,6 +60,9 @@ class JobHandle:
         "_cancelled",
         "_callbacks",
         "_deliver",
+        "_callbacks_done",
+        "_pending_callbacks",
+        "_callback_guard",
     )
 
     def __init__(
@@ -66,6 +70,7 @@ class JobHandle:
         job_id: str,
         cancel_fn: Callable[[], None],
         deliver: Callable[[Callable[[], None]], None] | None = None,
+        callback_guard: Callable[[], bool] | None = None,
     ) -> None:
         self.id = job_id
         #: Runs completion callbacks; App passes one that moves them to the
@@ -73,6 +78,9 @@ class JobHandle:
         self._deliver = deliver
         self._cancel_fn = cancel_fn
         self._done = threading.Event()
+        self._callbacks_done = threading.Event()
+        self._pending_callbacks = 0
+        self._callback_guard = callback_guard
         self._result: Any = None
         self._error: BaseException | None = None
         self._lock = threading.Lock()
@@ -94,6 +102,8 @@ class JobHandle:
         with self._lock:
             self._cancelled = True
             self._callbacks.clear()
+            self._pending_callbacks = 0
+            self._callbacks_done.set()
         # ``done`` is not set here: the worker may still be running. It is set
         # by _finish_cancelled() / _complete() when the worker really stops.
         self._cancel_fn()
@@ -141,10 +151,14 @@ class JobHandle:
                 # Re-check at delivery time: cancel() may have run after this
                 # wrapper was queued, and the documented contract is that a
                 # cancelled job fires no callbacks at all.
-                if self._cancelled:
+                if self._cancelled or (
+                    self._callback_guard is not None and not self._callback_guard()
+                ):
                     return
                 self._fire(done, on_error)
 
+            self._pending_callbacks += 1
+            self._callbacks_done.clear()
             if not self._done.is_set():
                 self._callbacks.append(callback)
                 return self
@@ -155,18 +169,57 @@ class JobHandle:
         return self
 
     def _run(self, callback: Callable[[], None]) -> None:
-        if self._deliver is None:
-            callback()
-        else:
-            self._deliver(callback)
+        completed = False
 
-    def wait(self, timeout: float | None = None) -> Any:
+        def finish() -> None:
+            nonlocal completed
+            with self._lock:
+                if completed:
+                    return
+                completed = True
+                self._pending_callbacks = max(0, self._pending_callbacks - 1)
+                if self._pending_callbacks == 0:
+                    self._callbacks_done.set()
+
+        def delivered() -> None:
+            try:
+                callback()
+            finally:
+                finish()
+
+        try:
+            if self._deliver is None:
+                delivered()
+            else:
+                self._deliver(delivered)
+        except Exception:
+            # A rejected delivery must not strand waiters or overwrite the
+            # worker's outcome. Callback exceptions are contained by _fire.
+            finish()
+            _log.exception("delivery of job %r callback failed", self.id)
+
+    def wait(self, timeout: float | None = None, *, include_callbacks: bool = False) -> Any:
         """Block until the job finishes and return its result.
 
         Raises :class:`TimeoutError` when ``timeout`` seconds elapse before the
         job completes. Raises the job's own exception if it failed.
+
+        ``include_callbacks=True`` additionally waits until registered completion
+        callbacks have run or been suppressed by cancellation. The timeout is a
+        single budget for both phases. The default waits only for the result,
+        preserving UI-thread callers that must not block their delivery queue.
+        Do not wait for callbacks from the UI thread or from a callback of this
+        same job. Callbacks registered after this method returns are not covered.
+        Cancellation releases callback waiters even if the delivery queue is no
+        longer serviced; it does not join a callback that has already started.
         """
+        started = time.monotonic()
         finished = self._done.wait(timeout)
+        if finished and include_callbacks:
+            remaining = (
+                None if timeout is None else max(0.0, timeout - (time.monotonic() - started))
+            )
+            finished = self._callbacks_done.wait(remaining)
         if not finished:
             raise TimeoutError(
                 f"Job {self.id} did not complete"
@@ -212,6 +265,8 @@ class JobHandle:
                 return
             self._result = result
             self._error = error
+            if self._pending_callbacks == 0:
+                self._callbacks_done.set()
             self._done.set()
             callbacks = list(self._callbacks)
             self._callbacks.clear()
@@ -223,6 +278,7 @@ class JobHandle:
     def _finish_cancelled(self) -> None:
         """The worker stopped before running the job at all."""
         with self._lock:
+            self._callbacks_done.set()
             self._done.set()
 
 
@@ -251,8 +307,19 @@ class JobManager:
         with self._lock:
             return [h for h in self._jobs.values() if not h.done and not h.cancelled]
 
-    def enqueue(self, fn: Callable[[], Any], *, name: str | None = None) -> JobHandle:
-        """Run ``fn`` once on a background thread; returns a :class:`JobHandle`."""
+    def enqueue(
+        self,
+        fn: Callable[[], Any],
+        *,
+        name: str | None = None,
+        callback_guard: Callable[[], bool] | None = None,
+    ) -> JobHandle:
+        """Run ``fn`` once on a background thread; returns a :class:`JobHandle`.
+
+        ``callback_guard``, when supplied, is checked immediately before each
+        completion callback. Screen.enqueue_job uses it to reject stale mounts;
+        it does not stop the background function itself.
+        """
         if not self._alive:
             raise RuntimeError("JobManager has been shut down")
         handle_id = name or job_id()
@@ -280,7 +347,12 @@ class JobManager:
                     if self._jobs.get(handle_id) is handle:
                         self._jobs.pop(handle_id, None)
 
-        handle = JobHandle(handle_id, cancel_fn=cancelled.set, deliver=self._deliver)
+        handle = JobHandle(
+            handle_id,
+            cancel_fn=cancelled.set,
+            deliver=self._deliver,
+            callback_guard=callback_guard,
+        )
         self._track(handle)
         threading.Thread(target=run, name=f"pymobile-job-{handle_id}", daemon=True).start()
         return handle

@@ -185,8 +185,7 @@ class Path(Line):
     ) -> None:
         if isinstance(points, (str, bytes)) or not isinstance(points, Sequence):
             raise TypeError(
-                "Path: points must be a sequence of (x, y) pairs; "
-                "write Path([(0, 10), (20, 30)])"
+                "Path: points must be a sequence of (x, y) pairs; write Path([(0, 10), (20, 30)])"
             )
         self.closed = bool(closed)
         super().__init__(*points, **kwargs)
@@ -232,9 +231,7 @@ class Shape(_Element):
                 "(or use the Line, Path, Rect, Circle and Polygon helpers)"
             )
         if kind == "line":
-            raise ValueError(
-                "Shape: use Line(...) for a line; Shape draws one filled primitive"
-            )
+            raise ValueError("Shape: use Line(...) for a line; Shape draws one filled primitive")
         super().__init__(**kwargs)
         self.kind = kind
         self._points: list[tuple[float, float]] = []
@@ -285,6 +282,8 @@ class Shape(_Element):
                     "w": geometry["w"],
                     "h": geometry["h"],
                     "color": colour,
+                    "fill": self.fill,
+                    "width": self.width,
                 }
             ]
         if self.kind == "circle":
@@ -300,12 +299,12 @@ class Shape(_Element):
                 }
             ]
         if self.kind == "polygon":
-            # A closed path is what every backend turns into a filled polygon.
             points = list(self._points)
             return [
                 {
-                    "type": "line",
+                    "type": "polygon",
                     "points": [[x, y] for x, y in [*points, points[0]]],
+                    "fill": self.fill,
                     "color": colour,
                     "width": self.width,
                 }
@@ -388,9 +387,7 @@ class Canvas(Widget):
         """Add elements to the drawing and redraw."""
         for element in elements:
             if not isinstance(element, _Element):
-                raise TypeError(
-                    f"Canvas.add: {type(element).__name__!r} is not a drawing element"
-                )
+                raise TypeError(f"Canvas.add: {type(element).__name__!r} is not a drawing element")
         self.elements = (*self.elements, *elements)
         self.invalidate()
 

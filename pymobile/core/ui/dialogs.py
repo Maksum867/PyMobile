@@ -1,8 +1,8 @@
 """Modal surfaces: dialogs and a bottom sheet.
 
 A dialog is a container the renderers draw as a framed, elevated surface:
-a ``LabelFrame`` in the Tk window, a bordered ``<section>`` in the browser
-preview, a modal window (``android.app.Dialog``) on Android. ``open()``/``close()``
+a ``LabelFrame`` in the Tk window, an overlay with a modal surface in the
+browser preview, a modal window (``android.app.Dialog``) on Android. ``open()``/``close()``
 flip ``visible``, so the usual reactive rules apply — a closed dialog costs
 nothing and reopening it keeps its children::
 

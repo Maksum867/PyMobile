@@ -23,6 +23,8 @@ class StubBridge(Bridge):
     """Records platform calls in memory; grants permissions by policy."""
 
     name = "stub"
+    accepts_theme = True
+    accepts_chrome = True
 
     def __init__(
         self,

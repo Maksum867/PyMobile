@@ -58,4 +58,5 @@ class _MockupContext(ABC):
         min_w: float = 0.0,
         align: str = "",
         background: Callable[[_Painter, float, float, _Box], None] | None = None,
+        single_line: bool = False,
     ) -> _Box: ...

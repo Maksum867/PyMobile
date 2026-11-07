@@ -23,7 +23,8 @@ from .controls import Icon, IconButton, PageView
 from .drawing import positive_int, theme_color
 from .layout import Column, Expanded, Grid, Row, ScrollView, Wrap
 from .style import Style
-from .widget import Widget, in_build_scope
+from .theme import _readable_on
+from .widget import Container, Widget, in_build_scope
 
 __all__ = [
     "Card",
@@ -526,7 +527,9 @@ class TabView(_Pattern):
                     background=theme_color(self, "PRIMARY")
                     if key == self.value
                     else theme_color(self, "SURFACE"),
-                    color="#FFFFFF" if key == self.value else theme_color(self, "TEXT"),
+                    color=theme_color(self, "ON_PRIMARY")
+                    if key == self.value
+                    else theme_color(self, "TEXT"),
                 ),
             )
             for key in self._tabs
@@ -565,7 +568,9 @@ class TabView(_Pattern):
                     background=theme_color(self, "PRIMARY")
                     if key == self.value
                     else theme_color(self, "SURFACE"),
-                    color="#FFFFFF" if key == self.value else theme_color(self, "TEXT"),
+                    color=theme_color(self, "ON_PRIMARY")
+                    if key == self.value
+                    else theme_color(self, "TEXT"),
                 ),
             )
         return super().to_dict()
@@ -1042,7 +1047,9 @@ class Calendar(_Pattern):
                             background=theme_color(self, "PRIMARY")
                             if selected
                             else theme_color(self, "SURFACE"),
-                            color="#FFFFFF" if selected else theme_color(self, "TEXT"),
+                            color=theme_color(self, "ON_PRIMARY")
+                            if selected
+                            else theme_color(self, "TEXT"),
                             padding=2,
                             min_width=0,
                             min_height=48,
@@ -1293,20 +1300,8 @@ def _hex_color(value: object, name: str) -> str:
 
 
 def _readable_text(background: str) -> str:
-    """Black or white, whichever has the higher WCAG contrast on ``background``.
-
-    The better of the two is always at least 4.5:1 (WCAG AA for normal text).
-    """
-
-    def linear(channel: int) -> float:
-        value = channel / 255
-        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
-
-    red, green, blue = (int(background[i : i + 2], 16) for i in (1, 3, 5))
-    luminance = 0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
-    on_black = (luminance + 0.05) / 0.05
-    on_white = 1.05 / (luminance + 0.05)
-    return "#000000" if on_black >= on_white else "#FFFFFF"
+    """Black or white, whichever has higher WCAG contrast on the background."""
+    return _readable_on(background)
 
 
 class Banner(_Pattern):
@@ -1457,7 +1452,7 @@ class Pagination(_Pattern):
         ]
         for item in self._numbers():
             if item is None:
-                controls.append(Label("…"))
+                controls.append(Label("…", style=Style(min_height=48, padding=(4, 14, 4, 14))))
                 continue
             current = item == self.current
             controls.append(
@@ -1467,6 +1462,7 @@ class Pagination(_Pattern):
                     accessibility_label=f"Page {item}" + (", current" if current else ""),
                     on_press=_bind(f"page {item}", self.select, item),
                     id=f"{self.id}:page-{item}",
+                    style=Style(min_width=40, min_height=48, padding=(10, 8, 10, 8)),
                 )
             )
         controls.append(
@@ -1616,19 +1612,29 @@ class ColorPicker(_Pattern):
             selected = color == self._value
             label = f"Color {color}" + (", selected" if selected else "")
             swatches.append(
-                Button(
-                    "✓" if selected else "",
-                    variant=ButtonVariant.TEXT,
-                    accessibility_label=label,
-                    on_press=_bind(f"pick {color}", self.select, color),
-                    style=Style(
-                        background=color,
-                        color=_readable_text(color),
-                        width=self._swatch_size,
-                        height=self._swatch_size,
-                        corner_radius=self._swatch_size // 2,
+                Container(
+                    Button(
+                        "✓" if selected else "",
+                        variant=ButtonVariant.TEXT,
+                        accessibility_label=label,
+                        on_press=_bind(f"pick {color}", self.select, color),
+                        style=Style(
+                            background=color,
+                            color=_readable_text(color),
+                            width=self._swatch_size,
+                            height=self._swatch_size,
+                            corner_radius=self._swatch_size // 2,
+                        ),
+                        id=f"{self.id}:{color[1:]}",
                     ),
-                    id=f"{self.id}:{color[1:]}",
+                    style=Style(
+                        background=theme_color(self, "TEXT_MUTED"),
+                        padding=1,
+                        width=self._swatch_size + 2,
+                        height=self._swatch_size + 2,
+                        corner_radius=self._swatch_size // 2 + 1,
+                    ),
+                    id=f"{self.id}:ring-{color[1:]}",
                 )
             )
         self._replace(

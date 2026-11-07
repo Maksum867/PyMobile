@@ -65,7 +65,8 @@ def render_mockup(
     exactly the first screenful of a typical phone. ``theme`` is a
     :class:`~pymobile.core.ui.theme.Theme`, ``"light"``/``"dark"`` or a
     colour dict; by default the tree's own theme (or the light one) is used.
-    ``title`` is shown in the action bar (the app name on a device);
+    A nonempty ``title`` overrides the current screen title in the action bar;
+    preview ``chrome`` metadata supplies the title and back-navigation indicator.
     ``chrome=False`` leaves out the status and action bars. ``assets`` is the
     directory ``Image`` sources are resolved against.
 
@@ -113,7 +114,11 @@ def render_mockup(
     if isinstance(snackbar, dict) and snackbar.get("message") is not None:
         layout.paint_snackbar(painter, snackbar, screen)
     if chrome:
-        layout.paint_chrome(painter, float(width), title or str((tree or {}).get("screen") or ""))
+        metadata = (tree or {}).get("chrome", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        heading = title or str(metadata.get("title") or (tree or {}).get("screen") or "")
+        layout.paint_chrome(painter, float(width), heading, back=bool(metadata.get("can_go_back")))
     window = (
         0.0,
         float(_STATUS_BAR if chrome else 0),
