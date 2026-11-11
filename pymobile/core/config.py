@@ -175,9 +175,9 @@ class ProjectConfig:
     optimize: bool = False
     #: Remove docstrings and asserts from the shipped code.
     strip_debug: bool = True
-    #: Drop desktop-only stdlib packages (pydoc, unittest, venv, ...) — ~1.7 MB.
+    #: Drop desktop-only stdlib packages (pydoc, unittest, venv, ...) — ~0.5 MB.
     minimal_stdlib: bool = False
-    #: Leave OpenSSL, ssl.py and the CA bundle out — ~4 MB, no HTTPS.
+    #: Leave OpenSSL, ssl.py and the CA bundle out — ~4.4 MB, no HTTPS.
     no_ssl: bool = False
     #: Glob patterns of files that are not packaged into the APK.
     exclude: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDE))

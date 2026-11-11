@@ -1,6 +1,6 @@
 {
   "build_tools": "35.0.0",
-  "dex_sha256": "6bb3b767db340823078b6a0dad6f52c6c3481447925b5463c14a4e75e7d1e6c8",
+  "dex_sha256": "c06b1098f4c81f5535b773c23462f2bdc74f725d85dac624f98df623dbcd7630",
   "min_sdk": 24,
   "schema": 1,
   "sources": {
@@ -12,6 +12,7 @@
     "MediaServices.java": "0cde7bc480812e919f890692b31e0ab2e00e2296bb3f0df248a1ff7446a400d1",
     "Native.java": "6e4ea4077f14d8ed63ba51265139d56318fad307748e8c5ce958f338617b8b78",
     "PythonRuntime.java": "298bff8d082fdb5b65fe7aeae1434e7c62f337989e116437a7bde17dab9fd6d9",
+    "SignaturePadRenderer.java": "8e0cf8cdedef7d187eacd610555358b60631c014c8e600369016deff98acc95f",
     "ViewBuilder.java": "76caea8b331e3d6719aa53929614a7eee76b02048e78928b4eaf61cc5bbb9b65",
     "ViewContainers.java": "540aeda34b371263b91925168d6d24b5d8e752478af43f8dbadeb0e30156480f",
     "ViewControls.java": "f14c4c495c75b9e10f107b80aa8018d92e77319902fadb44acc641b6a0686d60",

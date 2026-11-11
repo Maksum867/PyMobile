@@ -37,6 +37,10 @@ class Permission(str, Enum):
     RECORD_AUDIO = "android.permission.RECORD_AUDIO"
     ACCESS_FINE_LOCATION = "android.permission.ACCESS_FINE_LOCATION"
     ACCESS_COARSE_LOCATION = "android.permission.ACCESS_COARSE_LOCATION"
+    BLUETOOTH = "android.permission.BLUETOOTH"
+    BLUETOOTH_ADMIN = "android.permission.BLUETOOTH_ADMIN"
+    BLUETOOTH_SCAN = "android.permission.BLUETOOTH_SCAN"
+    BLUETOOTH_CONNECT = "android.permission.BLUETOOTH_CONNECT"
     READ_EXTERNAL_STORAGE = "android.permission.READ_EXTERNAL_STORAGE"
     WRITE_EXTERNAL_STORAGE = "android.permission.WRITE_EXTERNAL_STORAGE"
     READ_MEDIA_IMAGES = "android.permission.READ_MEDIA_IMAGES"
@@ -63,6 +67,8 @@ _RUNTIME_PERMISSIONS = frozenset(
         Permission.RECORD_AUDIO,
         Permission.ACCESS_FINE_LOCATION,
         Permission.ACCESS_COARSE_LOCATION,
+        Permission.BLUETOOTH_SCAN,
+        Permission.BLUETOOTH_CONNECT,
         Permission.READ_EXTERNAL_STORAGE,
         Permission.WRITE_EXTERNAL_STORAGE,
         Permission.READ_MEDIA_IMAGES,

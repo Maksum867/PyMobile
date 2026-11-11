@@ -18,7 +18,7 @@ Build it with ``pymobile build``.
 
 from __future__ import annotations
 
-__version__ = "0.13.1"
+__version__ = "0.14.0"
 __author__ = "MAKSYM KHLYSTUN"
 __license__ = "MIT"
 
@@ -66,6 +66,7 @@ from .core.ui import (
     Badge,
     Banner,
     BarChart,
+    BatteryLevel,
     BottomNavigation,
     BottomSheet,
     Button,
@@ -81,7 +82,9 @@ from .core.ui import (
     ColorPicker,
     Column,
     ConfirmDialog,
+    ConnectionStatus,
     Container,
+    Countdown,
     DataTable,
     DatePicker,
     DateRangePicker,
@@ -106,6 +109,7 @@ from .core.ui import (
     Link,
     List,
     ListTile,
+    MarkdownText,
     MultiSelect,
     Navigator,
     PageView,
@@ -115,6 +119,8 @@ from .core.ui import (
     Polygon,
     ProgressBar,
     ProgressText,
+    QRCode,
+    Radar,
     RadioButton,
     RadioGroup,
     RangeSlider,
@@ -127,6 +133,8 @@ from .core.ui import (
     SearchBar,
     SegmentedButtons,
     Shape,
+    SignalStrength,
+    SignaturePad,
     Skeleton,
     Slider,
     Snackbar,
@@ -138,6 +146,7 @@ from .core.ui import (
     Switch,
     Tabs,
     TabView,
+    TagInput,
     TextInput,
     TextScale,
     Theme,
@@ -209,6 +218,15 @@ __all__ = [
     "LineChart",
     "PieChart",
     "Canvas",
+    "BatteryLevel",
+    "ConnectionStatus",
+    "Radar",
+    "SignalStrength",
+    "Countdown",
+    "MarkdownText",
+    "QRCode",
+    "SignaturePad",
+    "TagInput",
     "Circle",
     "Line",
     "Path",

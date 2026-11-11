@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 from .audit import UiIssue, audit_ui
+from .bluetooth import (
+    BatteryLevel,
+    ConnectionStatus,
+    Radar,
+    SignalStrength,
+)
 from .canvas import Canvas, Circle, Line, Path, Polygon, Rect, Shape
 from .charts import BarChart, LineChart, PieChart
 from .components import (
@@ -33,6 +39,13 @@ from .components import (
 from .controls import AutoComplete, FloatingActionButton, Icon, IconButton, PageView, RangeSlider
 from .dialogs import AlertDialog, BottomSheet, ConfirmDialog, Dialog
 from .drawing import ICON_NAMES
+from .extra_widgets import (
+    Countdown,
+    MarkdownText,
+    QRCode,
+    SignaturePad,
+    TagInput,
+)
 from .layout import (
     Column,
     Divider,
@@ -112,6 +125,15 @@ __all__ = [
     "TreeNode",
     "TreeView",
     "Canvas",
+    "BatteryLevel",
+    "ConnectionStatus",
+    "Radar",
+    "SignalStrength",
+    "Countdown",
+    "MarkdownText",
+    "QRCode",
+    "SignaturePad",
+    "TagInput",
     "Circle",
     "Line",
     "Path",

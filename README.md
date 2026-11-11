@@ -9,7 +9,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 [![PyPI](https://img.shields.io/pypi/v/pymobile-framework.svg)](https://pypi.org/project/pymobile-framework/)
 [![Python](https://img.shields.io/pypi/pyversions/pymobile-framework.svg)](https://pypi.org/project/pymobile-framework/)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](https://github.com/Maksum867/PyMobile/issues)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Maksum867/PyMobile/blob/main/LICENSE)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Maksum867/PyMobile/7f84471b5fa010db106c95b0ef54cef65613b6ef/docs/assets/demo.gif"
@@ -20,7 +20,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 
 > ### ⚠️ Alpha software — known bugs, actively being fixed
 >
-> PyMobile is at **0.13.x** and is still in alpha. It builds and signs real,
+> PyMobile is at **0.14.x** and is still in alpha. It builds and signs real,
 > installable APKs today, but the API can change between minor releases and
 > there are known bugs. I am actively working on them: fixes ship in
 > every release — see the
@@ -30,7 +30,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.13.1`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.14.0`) and read the
 > changelog before upgrading. What may change, and how much notice you get, is
 > written down in the
 > [versioning and deprecation policy](#versioning-and-deprecation-policy). Bug
@@ -69,6 +69,8 @@ App("Demo").run(Home())
 ```bash
 pip install pymobile-framework
 pymobile setup-sdk           # once per machine
+pymobile init demo           # creates the project folder ./demo
+cd demo                      # replace demo/main.py with the code above
 pymobile build --native      # → apk/demo-0.1.0.apk
 ```
 
@@ -80,6 +82,7 @@ the JDK for you.
 
 ## Table of contents
 
+- [What's new in 0.14.0](#whats-new-in-0140)
 - [Why PyMobile](#why-pymobile)
 - [Build diagnostics and APK size](#build-diagnostics-and-apk-size)
 - [Third-party Python packages (experimental)](#third-party-python-packages-experimental)
@@ -130,13 +133,31 @@ the JDK for you.
 
 ---
 
+## What's new in 0.14.0
+
+Version 0.14.0 adds widgets for QR codes, tags, countdowns, Markdown, drawing
+and Bluetooth data, plus the Bluetooth permissions. The full list is in the
+[changelog](https://github.com/Maksum867/PyMobile/blob/main/CHANGELOG.md#0140--2026-11-11).
+
+- **New widgets:** [`QRCode`](#qrcode), [`TagInput`](#taginput),
+  [`Countdown`](#countdown), [`MarkdownText`](#markdowntext) and
+  [`SignaturePad`](#signaturepad).
+- **Bluetooth widgets:** [`SignalStrength`, `BatteryLevel`, `Radar` and
+  `ConnectionStatus`](#bluetooth-widgets). They show values your app provides;
+  the framework does not scan for devices yet.
+- **Bluetooth permissions:** `BLUETOOTH`, `BLUETOOTH_ADMIN`, `BLUETOOTH_SCAN` and
+  `BLUETOOTH_CONNECT`. See [Bluetooth](#bluetooth) under Permissions.
+- **Install the QR extra** with `pip install "pymobile-framework[qr]"`.
+
+---
+
 ## Why PyMobile
 
 | | |
 | --- | --- |
 | **Real APKs** | Signed with v2+v3 schemes, containing `classes.dex`, `resources.arsc` and an embedded CPython 3.14 for ARM64. |
 | **Native views** | Widgets become genuine `TextView`, `Button`, `EditText`, `Switch`, `ProgressBar` and `LinearLayout` instances — not a web view or a custom canvas. |
-| **Fast** | About five seconds per build. An unchanged rebuild is instant. |
+| **Fast** | A clean native build takes about 6–9 seconds on a 2-vCPU machine. An unchanged rebuild is instant. |
 | **Small setup** | ~800 MB of tooling, downloaded automatically. The NDK is not required. |
 | **Testable** | Your whole app runs and is unit-testable on a desktop, with no emulator. |
 | **Optional app dependencies** | Pure-Python PyPI wheels can be declared and bundled into the APK; the framework itself needs only the standard library on device. |
@@ -205,16 +226,21 @@ startup smoke check, **not** yet by running the APK on an Android device.
 
 The framework itself runs on CPython 3.10 and newer, including the 3.16
 pre-releases. Verified by hand against **3.16.0a1**, built from python.org: the
-whole suite passes (1673 passed, 8 skipped), `ruff` and `mypy` are clean, and
-`pymobile init` / `preview` / `check-ui` / `build` work under it. CI runs a
-separate, allowed-to-fail job on 3.15 and 3.16 pre-releases so a future alpha
-cannot break the framework unnoticed. (The *phone* runtime is a fixed 3.14 build
+whole suite passes (2189 passed and 36 skipped on a machine without a display or
+the Android SDK; 2214 passed and 11 skipped with a virtual display), `ruff` and `mypy`
+are clean, and `pymobile init` / `preview` / `check-ui` / `build` work under it. CI runs
+a separate, allowed-to-fail job on the 3.15 pre-release. There is no CI job for 3.16
+yet; 3.16.0a1 was checked by hand. (The *phone* runtime is a fixed 3.14 build
 bundled by the compiler — that is the interpreter inside the APK, not the one
 you run the framework with.)
 
 ```bash
 pip install pymobile-framework
 ```
+
+Optional extras: `[qr]` adds `segno` for QR codes, `[icons]` adds Pillow for
+image icons, and `[dev]` adds the test and lint tools. For example,
+`pip install "pymobile-framework[qr]"`.
 
 > The distribution is named **`pymobile-framework`** because `pymobile` on PyPI belongs
 > to an unrelated 2014 project. The import name and the CLI command are still
@@ -226,9 +252,9 @@ Then install the Android toolchain, once per machine:
 pymobile setup-sdk
 ```
 
-This downloads JDK 17 and the Android SDK (~900 MB) into `~/.andro`, including
+This downloads JDK 17 and the Android SDK (~800 MB) into `~/.andro`, including
 `adb` for connected-device installs. The NDK is **not** downloaded: a prebuilt
-native bridge (22 KB) ships inside the package. It is byte-identical for every
+native bridge (about 45 KB) ships inside the package. It is byte-identical for every
 application, so there is nothing to compile. If you want to rebuild it from C
 source anyway:
 
@@ -257,10 +283,13 @@ SDK, and finally `~/.andro/sdk`, `~/Android/Sdk`, `~/Library/Android/sdk` and
 | --- | --- | --- |
 | `ANDROID_HOME` | Android SDK root (build-tools, platforms, `adb`) | You have your own SDK, for example from Android Studio |
 | `ANDROID_SDK_ROOT` | Same as `ANDROID_HOME`, read only when that is unset | Your tools already use this name |
-| `JAVA_HOME` | JDK 17 or newer for the build tools | You use your own JDK. `setup-sdk` installs one |
-| `PYMOBILE_SDK_HOME` | Where `setup-sdk` installs the toolchain (default `~/.andro`) | You want the install somewhere else |
+| `JAVA_HOME` | JDK 17 or newer for the build tools. PyMobile does not check the version yet, so an older JDK found on `PATH` is used without a warning | You use your own JDK. `setup-sdk` installs one, but see [Troubleshooting](#troubleshooting-the-build) if the build cannot find it |
+| `PYMOBILE_SDK_HOME` | Where `setup-sdk` installs the toolchain (default `~/.andro`). The JDK installed there is found only through `JAVA_HOME` | You want the install somewhere else |
 | `PYMOBILE_KEYSTORE_DIR` | Folder for the per-app debug keystores (default `~/.pymobile/keystores`) | You share the debug key between machines or CI runs |
 | `PYMOBILE_KS_PASS`, `PYMOBILE_KEY_PASS` | Passwords for a release keystore | You make release builds. Passing them on the command line (`--ks-pass`) still works but prints a warning |
+| `PYMOBILE_CACHE` | Folder for the downloaded CPython runtime (default `~/.cache/pymobile/runtimes`) | You want the cache on another disk, or in a CI cache directory |
+| `PYMOBILE_BUILD_JAVA` | Set to `0` to use the prebuilt framework `classes.dex` instead of compiling the framework's Java sources. Ignored when the project has its own `java/` renderers | You do not change the framework's Java code and want to skip compiling it |
+| `PYMOBILE_FORCE_PLATFORM` | Overrides platform detection: `android` or `desktop` | You test the Android code path on a desktop |
 
 ### If the `pymobile` command is not found
 
@@ -370,11 +399,12 @@ print(app.platform)      # 'desktop' or 'android'
 print(app.bridge.name)   # 'stub' or 'android'
 ```
 
-**The build pipeline** runs twelve independent, individually timed stages:
+**The build pipeline** runs individually timed stages (`pymobile build --native -v` prints them).
+`dependencies` runs only when you declare third-party packages:
 
 ```
-validate → collect → compile → icons → toolchain → runtime
-        → jni → dex → resources → assets → sign → verify
+validate → collect → syntax → [dependencies] → startup → compile → icons
+        → toolchain → runtime → jni → dex → resources → assets → sign → verify
 ```
 
 ---
@@ -515,9 +545,10 @@ slider = Slider(value=50, minimum=0, maximum=100,
                 on_change=lambda v: print(v))
 ```
 
-`min=` / `max=` still work as **deprecated** aliases of `minimum=` / `maximum=`
-(on `Slider`, `Stepper`, `ProgressBar`, `ProgressText` and `RatingBar`); they
-warn and are removed in 1.0.
+`max=` still works as a **deprecated** alias of `maximum=` on `Slider`, `Stepper`,
+`ProgressBar`, `ProgressText` and `RatingBar`, and `min=` as an alias of `minimum=` on
+`Slider` and `Stepper`. They warn and are removed in 1.0. `min=` on the other three
+raises `TypeError`.
 
 With `step=`, interior values snap to the nearest step, while both endpoints
 stay reachable even when `maximum` is not on the grid:
@@ -568,8 +599,9 @@ dropdown = Dropdown(
 Widgets that *choose one of several options* (`Dropdown`, `SegmentedButtons`,
 `BottomNavigation`, `RadioGroup`) report it with `on_select`; widgets that hold
 a *value* (`TextInput`, `Slider`, `Stepper`, `RatingBar`) use `on_change`. The
-old `on_change=` on the selection widgets is a **deprecated** alias of
-`on_select=`.
+old `on_change=` is a **deprecated** alias of `on_select=` on `Dropdown`,
+`SegmentedButtons` and `BottomNavigation`. `RadioGroup` never accepted `on_change=`:
+it raises `TypeError`.
 
 ### SearchBar
 
@@ -957,6 +989,195 @@ Spacer(16)     # 16 dp of empty space
 Divider()                       # hairline between sections
 Divider(inset=16, thickness=2)
 ```
+
+### QRCode
+
+A QR code for a piece of text, drawn as dark squares on a light background.
+It is a `Canvas`, so it renders the same on the phone, in the browser preview
+and in the desktop window.
+
+```python
+QRCode("https://github.com/Maksum867/PyMobile", size=240, ecc="M")
+```
+
+- `text` must be a non-empty string. Make a new `QRCode` when the text changes:
+  a canvas cannot be redrawn in place. Use `Screen.refresh()` only for widgets
+  you can rebuild without losing state, and push a new screen otherwise.
+- `ecc` is the error-correction level: `"L"`, `"M"` (default), `"Q"` or `"H"`.
+  A higher level survives more damage and holds less text. If the text does not
+  fit, the widget raises `ValueError` with the level in the message.
+- `size` is the largest side in logical units. The module (one dark square) is a
+  whole number of units, so the drawn code can be a few units smaller. The real
+  size is the widget's `width` and `height`, and `module_size` gives one module.
+- `dark` and `light` are `#RRGGBB` or `#AARRGGBB`. `quiet_zone` is the blank
+  border in modules, 4 by default, which scanners need.
+
+The matrix comes from the pure-Python [`segno`](https://pypi.org/project/segno/)
+package. Install it for desktop runs with `pip install "pymobile-framework[qr]"`. For the
+phone, list it in `pymobile.toml` so it is bundled into the APK:
+
+```toml
+[app]
+dependencies = ["segno==1.6.6"]
+```
+
+Without `segno`, creating a `QRCode` raises a `PyMobileError` that says how to
+install it.
+
+### TagInput
+
+A text field whose entries become removable tags. The user types a tag, presses
+**Add** and taps a tag to remove it. Duplicates and blank tags are ignored.
+
+```python
+self.tags = TagInput(["python"], max_tags=6, on_change=self.on_tags_changed)
+
+def on_tags_changed(self, tags: list[str]) -> None:
+    self.summary.text = ", ".join(tags) or "No tags"
+```
+
+- `tags` (constructor argument and property) is a sequence of strings. Spaces
+  inside a tag are collapsed, so `"b   c"` becomes `"b c"`.
+- `max_tags` caps the number of tags. Adding past the cap is ignored.
+- `on_change` receives the full list after each add, remove or clear. Tags passed
+  to the constructor do not trigger it.
+- From code: `add_tag(text)` and `remove_tag(text)` return `True` when the list
+  changed, and `clear_tags()` removes everything. `tags` returns a tuple.
+
+`TagInput` is built from a `TextInput`, a `Button` and `Chip`s, so it needs no
+Java code.
+
+### Countdown
+
+Shows the time left as `mm:ss`, or `h:mm:ss` from one hour up. It counts down on
+a background timer and updates on the UI thread.
+
+```python
+self.timer = Countdown(90, on_finish=self.on_time_up)
+
+def on_start(self) -> None:
+    self.timer.start()
+
+def on_time_up(self) -> None:
+    self.app.vibrate(200)
+```
+
+- `seconds` must be positive. The widget starts at that value.
+- `start()` begins or resumes the count. It needs the widget to be on a screen,
+  so call it from a handler, not from `build()`. Calling it when the countdown
+  is already running does nothing.
+- `stop()` pauses, keeping the time left. `reset()` stops and returns to the full
+  time.
+- `remaining` gives the seconds left and `running` tells whether it is counting.
+- `on_finish` runs once, when the time reaches zero, on the UI thread.
+
+A countdown keeps running while another screen covers its own. Call `stop()` in
+`on_hide` if the timer should pause when the user leaves the screen.
+
+### MarkdownText
+
+Renders a small subset of Markdown as native text. It is useful for release
+notes, help text and descriptions that you keep as strings.
+
+```python
+MarkdownText("""
+# Release notes
+
+Version **0.14** adds five widgets. See [the docs](https://example.com).
+
+- Works offline
+- Pure Python for QR codes
+
+1. Build with `pymobile build --native`
+2. Install the APK
+""", font_size=15)
+```
+
+Supported:
+
+- `#`, `##` and `###` headings, shown larger and bold.
+- Paragraphs. Consecutive lines join into one paragraph.
+- `-`, `*` or `+` bullet lists and `1.` numbered lists.
+- Fenced code blocks between ```` ``` ```` lines, shown in a smaller size.
+
+Inline `**bold**`, `__bold__`, `` `code` `` and `[links](url)` keep their text
+but not their styling, because one `Label` has one style. The link target is not
+opened. Images, tables, nested lists and HTML are not supported; the text is
+shown as written. `font_size` sets the body size, and headings grow from it.
+
+### SignaturePad
+
+A box where the user draws with a finger, for signatures and simple sketches.
+Unlike the other widgets it has its own Android renderer, which receives touch
+events, so it works on the phone only. The desktop previews show a placeholder.
+
+```python
+self.pad = SignaturePad(height=200, on_change=self.on_strokes)
+
+def on_strokes(self, strokes: list) -> None:
+    self.status.text = f"{len(strokes)} stroke(s)"
+
+def on_clear(self) -> None:
+    self.pad.clear()
+```
+
+- Strokes are reported with **0..1 coordinates** relative to the pad, so the
+  same data works at any size. `strokes` returns a copy: a list of strokes,
+  each a list of `(x, y)` points.
+- `on_change` runs when the user lifts the finger, with all strokes so far. It
+  does not run for `clear()`, so update your own state there.
+- `clear()` erases the drawing from Python. `is_empty` tells whether anything is
+  drawn.
+- `height` is in dp. `stroke_color` and `background` are `#RRGGBB` or
+  `#AARRGGBB`. `stroke_width` is in dp and must be positive.
+
+To keep the signature, save the strokes on the Python side as well (for example,
+in a `Storage` value), because the pad does not restore them after a restart.
+
+
+### Bluetooth widgets
+
+Four widgets show Bluetooth data the app already has: signal strength, battery
+level, a proximity radar and connection status. They do not scan or connect by
+themselves. Read your device data, then pass the numbers in with the widget's
+`set_*` method, which redraws the widget in place.
+
+```python
+self.signal = SignalStrength(-67)
+self.battery = BatteryLevel(72, charging=True)
+self.radar = Radar([("Sensor", -55), ("Lamp", -80)], range_m=10)
+self.link = ConnectionStatus("connecting")
+
+def on_reading(self, rssi: int) -> None:
+    self.signal.set_rssi(rssi)
+
+def on_connected(self) -> None:
+    self.link.set_state("connected")
+```
+
+- **`SignalStrength(rssi=None)`**: four bars and the value in dBm. Stronger
+  signals are closer to zero: four bars from `-60` dBm up, three from `-70`,
+  two from `-80`, one from `-90`, and none below that. `None` shows "No signal". Valid values are integers from `-127` to
+  `20`. `set_rssi(rssi)` updates it.
+- **`BatteryLevel(percent=None, charging=False)`**: a battery icon with the
+  charge from `0` to `100`. The fill is amber below 50 % and red below 20 %.
+  `None` shows "--". `set_level(percent, charging=False)` updates it.
+- **`Radar(devices=(), range_m=10.0, size=240)`**: the phone is in the centre,
+  and each device is a dot on a ring at its estimated distance. `devices` is a
+  list of `(name, rssi)` pairs, at most 12. `set_devices(devices)` updates it.
+  RSSI gives distance but not direction, so devices are spread around the
+  circle strongest first, and their angles mean nothing. Distances are rough:
+  the model assumes a transmit power of -59 dBm at 1 m and a path-loss
+  exponent of 2. Walls and bodies change the result a lot.
+- **`ConnectionStatus(state="disconnected")`**: a coloured dot and a word. The
+  states are `"disconnected"`, `"connecting"`, `"connected"` and `"error"`, and
+  `set_state(state)` changes it. It is a row, so it fits in any layout.
+
+Each widget checks its input when it is built and when you call a `set_*`
+method, and raises `ValueError` for a value out of range.
+
+These widgets are built from a `Canvas`, a `Row` and a `Label`, so they need no
+Java code and render the same on the phone and in the desktop preview.
 
 ---
 
@@ -1933,7 +2154,9 @@ has it:
 1. `Validator(..., messages={...})` — for one validator. The key is a rule id
    (`"required"`) or `"field.rule"` for a single field (`"email.required"`); the
    value is a `str.format` template, or a callable that receives the rule's
-   parameters as keyword arguments (handy for plural forms).
+   parameters as keyword arguments (handy for plural forms). The callable must accept
+   every parameter the rule passes, even ones it does not use: `min_length` also passes
+   `maximum=None`, so write `lambda minimum, **_: …`.
 2. the translation catalogue, under `validation.<rule id>` — **one** translation
    for every validator in the app, looked up when the message is produced, so a
    language switch at run time is followed.
@@ -2227,6 +2450,41 @@ denial. PyMobile detects this and opens the app's settings page with an
 explanation, instead of failing mutely.
 
 ---
+
+### Bluetooth
+
+Bluetooth needs permissions that depend on the Android version. Android 12 and
+newer ask at runtime for `BLUETOOTH_SCAN` and `BLUETOOTH_CONNECT`. Older
+versions grant `BLUETOOTH` and `BLUETOOTH_ADMIN` when the app is installed, and
+scanning on them also needs `ACCESS_FINE_LOCATION`.
+
+Declare all of them in `pymobile.toml`:
+
+```toml
+permissions = [
+    "android.permission.BLUETOOTH",
+    "android.permission.BLUETOOTH_ADMIN",
+    "android.permission.BLUETOOTH_SCAN",
+    "android.permission.BLUETOOTH_CONNECT",
+    "android.permission.ACCESS_FINE_LOCATION",
+]
+```
+
+Then request the runtime ones before you use Bluetooth:
+
+```python
+from pymobile import Permission
+
+results = self.app.permissions.request(
+    Permission.BLUETOOTH_SCAN, Permission.BLUETOOTH_CONNECT
+)
+if not all(results.values()):
+    self.app.toast("Bluetooth permission is needed")
+```
+
+`BLUETOOTH_SCAN` and `BLUETOOTH_CONNECT` are runtime permissions, so the
+system asks the user. The build warns when the code uses a `Permission.X` that
+is not declared in `pymobile.toml`.
 
 ## HTTP requests
 
@@ -2609,8 +2867,12 @@ exclude_only = false                    # true = use exclude as written
 | `output_dir` | `apk` | where the APK is written (used to be `build`; the build warns when an older APK is still sitting there) |
 | `optimize` | `false` | package `.pyc` when enabled; for `--native` the bytecode must match the device's Python 3.14 — the build uses the running interpreter when it is 3.14, or a `python3.14`/`PYMOBILE_PYTHON` interpreter when the host differs, and only falls back to sources with a warning when neither exists (which is why the `init` template ships `optimize = false`) |
 | `strip_debug` | `true` | compile with `-OO` |
-| `exclude` | *(none)* | glob patterns to skip, **added to** the built-in list (`**/__pycache__/**`, `**/*.pyc`, `**/tests/**`, `tests/**`, `**/test_*.py`, `.git/**`, `.venv/**`, `venv/**`, `build/**`, `dist/**`, `apk/**`) |
+| `exclude` | *(none)* | glob patterns to skip, **added to** the built-in list below |
 | `exclude_only` | `false` | `true` = `exclude` replaces the built-in list (advanced; the build then warns if `output_dir` would ship itself) |
+| `asset_suffixes` | `[]` | extra file extensions to package, for example `[".csv", ".db"]`; the defaults cover `.py`, `.json`, `.txt`, `.toml`, images and fonts |
+| `dependencies` | `[]` | pure-Python PyPI packages bundled into the APK; see [Third-party Python packages](#third-party-python-packages-experimental) |
+| `minimal_stdlib` | `false` | drop desktop-only stdlib packages (`pydoc`, `unittest`, `venv`, `pdb`, `xmlrpc`); saves about 0.5 MB |
+| `no_ssl` | `false` | leave OpenSSL, `ssl.py` and the CA bundle out; saves about 4.4 MB, **and HTTPS stops working** |
 
 Every value is validated **before** the build starts, and each error carries a
 fix:
@@ -2624,7 +2886,15 @@ fix:
 never drops the `build/**` rule, so the output directory (and the previous APK
 inside it) is not packaged. The default `apk/` is excluded for the same reason. `exclude_only = true` turns that off and the build
 then warns when it can see that `output_dir` would ship itself. The defaults are
-exported as `pymobile.core.config.DEFAULT_EXCLUDE`.
+exported as `pymobile.core.config.DEFAULT_EXCLUDE`. The 29 built-in patterns are:
+
+- caches and build output: `**/__pycache__/**`, `**/*.pyc`, `**/*.pyo`, `build/**`, `dist/**`, `apk/**`, `.venv/**`, `venv/**`
+- tests: `**/tests/**`, `tests/**`, `**/test_*.py`
+- version control and editor folders: `.git/**`, `.github/**`, `.idea/**`, `.vscode/**`
+- documentation: `*.md`, so a `README.md` in the project is not packaged
+- secret-like files: `.env`, `.env.*`, `*.jks`, `*.keystore`, `*.pem`, `*.key`, `id_rsa`, `id_rsa.*`, `secrets/**`, `secrets.json`, `secrets.*.json`, `credentials.json`, `credentials.*.json`
+
+If your app really needs one of these files, set `exclude_only = true` and write the patterns you want yourself.
 
 Inspect the resolved configuration with `pymobile info` or
 `pymobile info --json`. In Python, `load_config()` reads the configuration from
@@ -2691,7 +2961,7 @@ pymobile build --native --abi x86_64       # for the emulator
 After startup validation, a build with unchanged inputs can reuse its APK:
 
 ```
-✓ up to date: my-app-1.0.0.apk (16.6 MB)
+✓ up to date: my-app-1.0.0.apk (16.2 MB)
 ```
 
 The cache tracks application sources, configuration, icons, project-local Java
@@ -2717,9 +2987,11 @@ META-INF/                    signature (v2+v3)
 Builds are reproducible: identical inputs produce an identical APK payload.
 Every zip entry carries a fixed timestamp, so the archive does not change with
 the clock; the signature block itself (`META-INF/*.RSA`) is produced by
-`apksigner` and is the one part that may differ between two runs. The file is
-written to a temporary path and moved into place, so an interrupted build never
-leaves a corrupt artifact.
+`apksigner` and is the one part that may differ between two runs. The structural
+package is written to a temporary path and moved into place, so an interrupted
+structural build never leaves a corrupt file. A native build signs the APK in place in
+`apk/`, so a build killed during signing can leave a truncated APK there. Run the build
+again: it replaces the file.
 
 ### Running on the emulator (x86_64)
 
@@ -2733,7 +3005,8 @@ pymobile install --abi x86_64              # uses adb; auto-selects the only con
 ```
 
 `--abi` overrides `abis` from `pymobile.toml` for one build. The emulator APK
-gets an `-x86_64` suffix so it never overwrites the phone build. The minimal
+gets an `-x86_64` suffix so it never overwrites the phone build. `--clean` deletes the APKs of both ABIs from the
+output directory. The minimal
 SDK install includes `adb` but not a virtual device. To use PyMobile's optional
 emulator instead of Android Studio, install its multi-GB image (still no NDK),
 then start the default AVD:
@@ -2763,8 +3036,12 @@ installed app.
 `~/.pymobile/keystores/<package>-debug.jks` — outside `build/`, so
 `pymobile clean` and `build --clean` keep the signature. Set
 `PYMOBILE_KEYSTORE_DIR` to share the key between machines or CI runs (store it
-as a CI secret). A key left in `build/` by pymobile ≤ 0.7.3 is adopted
-automatically.
+as a CI secret). An app built by pymobile ≤ 0.7.3 kept its key in
+`build/pymobile-debug.jks`. That key is adopted automatically only when
+`output_dir = "build"`. With the default `apk` the old key is ignored, a new key is
+created, and the new APK cannot update the installed one. To keep updating such an app,
+copy `build/pymobile-debug.jks` to `<keystore folder>/<package>-debug.jks`, where the
+keystore folder is `~/.pymobile/keystores` or `PYMOBILE_KEYSTORE_DIR`.
 
 **Release builds** use your own keystore. Pass the passwords through the
 environment, not the command line (arguments end up in shell history and
@@ -2779,9 +3056,12 @@ pymobile build --native --keystore release.jks --key-alias upload
 `--ks-pass` / `--key-pass` still work but print a warning. Keep the keystore
 and its passwords backed up: without them you cannot publish updates.
 
+`apksigner` also writes `<name>.apk.idsig` (the v4 signature) next to each APK. Distribute
+only the `.apk`.
+
 ### Size
 
-A hello-world APK is **16.6 MB**, down from 21.6 MB in 0.2.0. The official
+A hello-world APK is **16.2 MB** in 0.14.0, down from 21.6 MB in 0.2.0 and 16.6 MB in 0.3.0. The official
 CPython Android runtime ships every support library twice — `libcrypto.so`
 and `libcrypto_python.so` are byte-identical, and only the `_python` names are
 actually linked — so 5 MB of each APK was the same three libraries repeated.
@@ -2791,10 +3071,10 @@ Two opt-in flags trim further:
 
 | Flag | Saves | Cost |
 | --- | --- | --- |
-| `--minimal-stdlib` | ~1.7 MB | no `pydoc`, `unittest`, `venv`, `pdb`, `xmlrpc` on device |
-| `--no-ssl` | ~4.7 MB | no HTTPS at all — `HttpClient` over TLS stops working |
+| `--minimal-stdlib` | ~0.5 MB | no `pydoc`, `unittest`, `venv`, `pdb`, `xmlrpc` on device |
+| `--no-ssl` | ~4.4 MB | no HTTPS at all — `HttpClient` over TLS stops working |
 
-With both, the same app is **11.7 MB**. `--no-ssl` only makes sense for an app
+With both, the same app is **11.4 MB**. `--no-ssl` only makes sense for an app
 that talks to nothing, or over plain HTTP on a local network.
 
 ```
@@ -2809,10 +3089,11 @@ that talks to nothing, or over plain HTTP on a local network.
 | --- | --- | --- |
 | `Icon not found: assets/nope.png` | `icon` in `pymobile.toml` points at a missing file. Paths are relative to the project folder | Correct the path. `pymobile check` now reports the same error before you build |
 | `main.py:53:29: error: syntax error: expected ':'` | Python syntax error at file, line and column | Fix the line shown. `pymobile check` reports it without building |
-| `pymobile.toml:20: unknown configuration key 'min_sdkk'` with a "did you mean" hint | Misspelled key | Use the suggested key |
+| `pymobile.toml:20: unknown configuration key 'min_sdkk'` with a "did you mean" hint | Misspelled key | Use the suggested key. `pymobile check` shows the line and the hint; `build` only names the key |
 | `start.py: entry point not found` | The entry point in `pymobile.toml` does not exist in the project | Add the file or correct the entry point |
 | `pymobile: command not found` | pip's scripts folder is not on `PATH` | Run `python -m pymobile build --native` |
 | The Android SDK or JDK is not found | No SDK or JDK where PyMobile looks | Run `pymobile setup-sdk`, or set `ANDROID_HOME` and `JAVA_HOME` (see [Environment variables](#environment-variables)), then run `pymobile doctor` |
+| `No Java Development Kit found` although `PYMOBILE_SDK_HOME` is set and `setup-sdk` reported success | `setup-sdk` installs the JDK into `PYMOBILE_SDK_HOME`, but the build looks for a JDK only in `JAVA_HOME`, `~/.andro`, `<sdk>/../jbr` and on `PATH` | Point `JAVA_HOME` at the installed JDK, for example `JAVA_HOME=$PYMOBILE_SDK_HOME/jdk-17.0.13+11`, then run the build again |
 | An installed app refuses the new APK because the signatures differ | The new build uses a different key than the installed app | Use the same keystore, or uninstall the old app first, which deletes its data. See [Signing](#signing) |
 
 ---
@@ -2824,16 +3105,17 @@ icon = "assets/icon.png"
 ```
 
 Provide a square PNG, JPG or WebP — 512×512 works best. It is resized into all
-five densities (48, 72, 96, 144 and 192 px). Install the `icons` extra for
-high-quality resampling:
+five densities (48, 72, 96, 144 and 192 px), which needs Pillow. Install the `icons`
+extra:
 
 ```bash
 pip install "pymobile-framework[icons]"
 ```
 
-Without it the icon is copied unscaled; the build still succeeds. With no icon
-configured, a bundled default is used, so a build never fails over a missing
-asset:
+Without Pillow a PNG icon is copied unscaled and the build still succeeds, but a JPG
+or WebP icon fails the build with `aapt2 compile failed … file does not start with PNG
+signature`. With no icon configured, a bundled default is used, so a build never fails
+over a missing asset:
 
 <p align="center">
   <img src="docs/assets/icon.png" alt="The bundled PyMobile launcher icon" width="128">
@@ -2944,7 +3226,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.13.1", "platform": "android",
+# {"framework_version": "0.14.0", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 
@@ -3231,7 +3513,7 @@ image = render_mockup(screen.root)       # without a path: a PIL.Image
 
 The text PNG (`--text`) uses the first Unicode TrueType face it finds on the system, so
 Cyrillic, Greek and accented text render as text rather than boxes. Point
-`PYMOBILE_PREVIEW_FONT` at a `.ttf` to choose your own. The canvas is measured
+`PYMOBILE_PREVIEW_FONT` at a `.ttf` to choose your own (and `PYMOBILE_PREVIEW_FONT_BOLD` at its bold variant). The canvas is measured
 with the real glyph advances of that face, so long lines are never clipped.
 Glyphs the chosen face lacks (emoji on a bare Linux container, for instance)
 are patched in from a symbol face such as Symbola or Segoe UI Symbol when one
@@ -3398,7 +3680,7 @@ pymobile init myapp --list-templates # print the choices and exit
 
 | Template | What it shows |
 | --- | --- |
-| `basic` (default) | a counter with one button |
+| `basic` (default) | a counter with a button, and a button that shows a notification |
 | `list` | a `List` you add rows to and delete them from |
 | `form` | a `TextInput` and a save button |
 
@@ -3550,7 +3832,7 @@ renderers (the Android `ViewBuilder` facade and its collaborators, `web.py`,
 - **Two ABIs: arm64-v8a (phones) and x86_64 (the emulator)**, one per APK —
   `pymobile build --native --abi x86_64`. 32-bit devices are not supported,
   and there is no iOS backend.
-- **APK size is about 16.6 MB** (11.7 MB with `--minimal-stdlib --no-ssl`),
+- **APK size is about 16 MB** (11.4 MB with `--minimal-stdlib --no-ssl`),
   dominated by the interpreter and standard library.
 - **Android 7.0 (API 24) minimum.** The python.org build of CPython 3.14
   requires it (earlier pymobile releases declared API 21, but the app could
@@ -3566,8 +3848,12 @@ renderers (the Android `ViewBuilder` facade and its collaborators, `web.py`,
 - Desktop startup validation is not Android execution. Android-only startup can
   need a guard or an explicit, warned bypass; successful validation and APK
   signing do not replace installing and exercising the app on Android.
-- Translation catalogues are flat: `"stats.balance"` is one key, and nested
-  JSON sections need `flatten=True` (see [Languages](#languages)).
+- **Bluetooth:** the framework declares the Bluetooth permissions and provides
+  widgets for Bluetooth data, but it does not scan for or connect to devices
+  yet. The Bluetooth widgets draw the values your app passes in.
+- Translation catalogues are flat: `"stats.balance"` is one key. Nested JSON sections
+  are expanded into such keys automatically; `flatten=False` turns that off (see
+  [Languages](#languages)).
 
 ---
 
@@ -3782,7 +4068,7 @@ dependencies`, as an experimental feature. Packages with native extensions
 [Third-party Python packages](#third-party-python-packages-experimental).
 
 **Why is my APK so big?**
-The base APK is about 16.6 MB, mostly the Python interpreter and standard library.
+The base APK is about 16 MB, mostly the Python interpreter and standard library.
 Use `pymobile size <file.apk>` to see where the size goes. The
 [Size](#size) section lists the options to reduce it.
 
@@ -3839,7 +4125,7 @@ cache reuse and v2/v3 signatures (POSIX shell):
 PYMOBILE_NATIVE_TESTS=1 python -m pytest pymobile/tests/test_remaining_p_fixes.py
 ```
 
-For an actual release, follow [maintenance/release gates](docs/CONTRIBUTING.md),
+For an actual release, follow [maintenance/release gates](https://github.com/Maksum867/PyMobile/blob/main/docs/CONTRIBUTING.md),
 including an Android install/runtime test. A successful compile, signature or
 SDK-free test suite must not be reported as a passed device test.
 
@@ -3879,13 +4165,13 @@ Issues and pull requests are welcome.
 
 ## Documentation
 
-- **[CHANGELOG.md](CHANGELOG.md)** — release history
+- **[CHANGELOG.md](https://github.com/Maksum867/PyMobile/blob/main/CHANGELOG.md)** — release history
 - **[Versioning and deprecation policy](#versioning-and-deprecation-policy)** — what may change, and how much notice you get
-- **[Maintenance and release gates](docs/CONTRIBUTING.md)** — validation and maintainer handover
-- **[Code of Conduct](docs/CODE_OF_CONDUCT.md)** — expectations for project participation and reporting concerns
-- **[Security Policy](docs/SECURITY.md)** — supported versions and private vulnerability reporting
-- **[Accessibility](docs/ACCESSIBILITY.md)** — accessibility goals, current tools and how to report barriers
+- **[Maintenance and release gates](https://github.com/Maksum867/PyMobile/blob/main/docs/CONTRIBUTING.md)** — validation and maintainer handover
+- **[Code of Conduct](https://github.com/Maksum867/PyMobile/blob/main/docs/CODE_OF_CONDUCT.md)** — expectations for project participation and reporting concerns
+- **[Security Policy](https://github.com/Maksum867/PyMobile/blob/main/docs/SECURITY.md)** — supported versions and private vulnerability reporting
+- **[Accessibility](https://github.com/Maksum867/PyMobile/blob/main/docs/ACCESSIBILITY.md)** — accessibility goals, current tools and how to report barriers
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/Maksum867/PyMobile/blob/main/LICENSE).

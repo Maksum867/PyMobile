@@ -3,6 +3,78 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.14.0] — 2026-11-11
+
+### Added
+
+- **Widgets:**
+  - `QRCode(text, size=240, ecc="M", dark=..., light=..., quiet_zone=4)` draws a
+    QR code from the pure-Python `segno` package. Install it with
+    `pip install "pymobile-framework[qr]"` for desktop runs, and list
+    `segno` in `pymobile.toml` `dependencies` to bundle it into the APK. The
+    module size is a whole number of units so every edge lands on the pixel grid.
+  - `TagInput(tags=(), max_tags=None, on_change=...)` is a text field whose
+    entries become removable chips. It has `add_tag`, `remove_tag` and `clear_tags`.
+  - `Countdown(seconds, on_finish=...)` shows `mm:ss` (or `h:mm:ss`) and counts
+    down on a background timer. It has `start`, `stop`, `reset`, `remaining` and
+    `running`.
+  - `MarkdownText(text, font_size=16)` renders headings, paragraphs, bullet and
+    numbered lists and fenced code blocks as native text. Inline styles keep
+    their text but not their styling.
+  - `SignaturePad(height=200, stroke_color, stroke_width, background, on_change=...)`
+    is a touch drawing area with its own Android renderer,
+    `SignaturePadRenderer`. It reports strokes as 0..1 coordinates after each
+    stroke, and `clear()` erases the drawing.
+- **Bluetooth widgets:**
+  - `SignalStrength(rssi)` shows four bars and the value in dBm, with `set_rssi`.
+  - `BatteryLevel(percent, charging=False)` shows a battery icon and its charge,
+    with `set_level`.
+  - `Radar(devices, range_m=10.0, size=240)` places devices on rings by estimated
+    distance, with `set_devices`. It shows at most 12 devices.
+  - `ConnectionStatus(state)` shows a coloured dot and a label for `disconnected`,
+    `connecting`, `connected` or `error`, with `set_state`.
+  - These widgets draw the values the app passes in. They do not scan for or
+    connect to devices.
+- **Permissions:** `Permission.BLUETOOTH`, `Permission.BLUETOOTH_ADMIN`,
+  `Permission.BLUETOOTH_SCAN` and `Permission.BLUETOOTH_CONNECT`. The scan and
+  connect permissions are runtime permissions on Android 12 and newer.
+- **Documentation:** a section for each new widget under UI components, a
+  Bluetooth permissions section under Permissions, and a Bluetooth limitation.
+- **Tests:** 72 checks in `pymobile/tests/test_new_widgets.py` and
+  `pymobile/tests/test_bluetooth_widgets.py`. They cover the QR matrix against
+  `segno`, decoding with OpenCV when installed, the widget state, the callbacks
+  and the permission flags.
+
+### Changed
+
+- The bundled Android `classes.dex` is rebuilt to include `SignaturePadRenderer`.
+  `classes.sources.json` records the new source hashes.
+- The Android renderer list in the native build includes `SignaturePadRenderer.java`.
+- `pymobile` exports the new widgets from the package root.
+- The version is 0.14.0 in `pyproject.toml`, in `pymobile.__version__` and in the
+  documentation.
+
+### Fixed
+
+- README statements that did not match the code or the measured builds. For
+  example, `min=` on `ProgressBar`, `ProgressText` and `RatingBar` raises
+  `TypeError`, and the APK size figures were measured again.
+- Comments in `pymobile/core/config.py` that described the stdlib trimming
+  sizes incorrectly.
+
+### Known limitations
+
+- The framework does not scan for or connect to Bluetooth devices yet. Bluetooth
+  widgets show values the app provides, and the scanner in the test app is
+  simulated.
+- `SignaturePad` and the Bluetooth permission flow are tested by code and unit
+  checks only. They still need a run on a physical device.
+- `QRCode` may draw a few units smaller than the requested `size`.
+- `Radar` distances are estimates from RSSI. Walls and bodies change them a lot,
+  and the angles of devices carry no meaning.
+- `MarkdownText` supports a subset of Markdown: no images, tables, nested lists or
+  HTML.
+
 ## [0.13.1] — 2026-11-07
 
 ### Added

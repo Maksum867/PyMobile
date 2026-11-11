@@ -719,6 +719,7 @@ else:
             "MainActivity.java",
             "WidgetRenderer.java",
             "CustomWidgetRegistry.java",
+            "SignaturePadRenderer.java",
         )
         for name in framework_sources:
             shutil.copy2(resource_path("android", "java", name), src / name)
