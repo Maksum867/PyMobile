@@ -12,7 +12,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Maksum867/PyMobile/blob/main/LICENSE)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Maksum867/PyMobile/7f84471b5fa010db106c95b0ef54cef65613b6ef/docs/assets/demo.gif"
+  <img src="https://raw.githubusercontent.com/Maksum867/PyMobile/899da04b7a0b2424fa9352149f38a72b16c8c496/docs/assets/demo.gif"
        alt="PyMobile demo: from pip install to a native Android app" width="800">
 </p>
 
