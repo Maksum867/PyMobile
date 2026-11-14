@@ -64,6 +64,12 @@ public class MainActivity extends Activity {
     private Configuration lastConfiguration;
     /** OnBackInvokedCallback on API 33+ (typed Object so older ART never loads it). */
     private Object backCallback;
+    /** Whether Python reported a screen to go back to (frame ``can_go_back``). */
+    private boolean canGoBack;
+    /** Last system light/dark state, sent to Python as a "theme" event. */
+    private boolean lastDark;
+    /** Whether the keyboard is up (a WindowInsets event already reported). */
+    private boolean keyboardVisible;
 
     /**
      * Released once the activity reaches the resumed state.
@@ -84,14 +90,39 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         instance = this;
 
-        container = new FrameLayout(this);
-        container.setBackgroundColor(Color.WHITE);
+        container = new FrameLayout(this) {
+            @Override
+            public android.view.WindowInsets onApplyWindowInsets(android.view.WindowInsets insets) {
+                // Applying the padding here (and not returning CONSUMED) keeps
+                // the insets flowing to children, so SafeArea still sees them.
+                applySystemInsets(insets);
+                return super.onApplyWindowInsets(insets);
+            }
+        };
+        container.setBackgroundColor(startupBackground());
+        container.setFitsSystemWindows(true);
         setContentView(container);
+        // Edge-to-edge is the default on Android 15+ (targetSdk 35 and up):
+        // every frame is drawn behind the status and navigation bars, and the
+        // keyboard is not accounted for either. The padding below is what keeps
+        // content out of both. `adjustResize` makes the window shrink for the
+        // IME; without it the keyboard simply covered the focused field.
+        getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         builder = new ViewBuilder(this);
         lastConfiguration = new Configuration(getResources().getConfiguration());
-        registerBackCallback();
 
         showPlaceholder("Starting Python…");
+        lastDark = systemIsDark();
+
+        if (PythonRuntime.isRunning()) {
+            // The process outlived its Activity (the usual "back, then open
+            // again" and a configuration change that is not in configChanges).
+            // Python is still alive with the whole application state in it, so
+            // the only correct thing to do is hand it the new window — restart
+            // it and every counter, screen and job is lost.
+            Native.dispatchEvent("", "__lifecycle__", "resume");
+            return;
+        }
 
         new Thread(new Runnable() {
             @Override
@@ -131,6 +162,11 @@ public class MainActivity extends Activity {
                             setTaskDescription(new ActivityManager.TaskDescription(
                                     requestedTitle, (Bitmap) null));
                         }
+                    }
+
+                    JSONObject chrome = root.optJSONObject("chrome");
+                    if (chrome != null) {
+                        setCanGoBack(chrome.optBoolean("can_go_back", false));
                     }
 
                     // Colours are baked into views when they are built, so a
@@ -237,6 +273,52 @@ public class MainActivity extends Activity {
             return true;
         }
 
+        if ("fade_through".equals(kind)) {
+            // Material's "fade through": the old screen fades out and shrinks
+            // slightly, the new one fades in and grows. Two beats, not one
+            // cross-fade, which is what makes it read as a change of context.
+            int first = Math.max(1, duration / 2);
+            incoming.setAlpha(0f);
+            incoming.setScaleX(0.92f);
+            incoming.setScaleY(0.92f);
+            incoming.setVisibility(View.INVISIBLE);
+            incoming.setPivotX(incoming.getWidth() / 2f);
+            incoming.setPivotY(incoming.getHeight() / 2f);
+            outgoing.animate().alpha(0f).scaleX(0.92f).scaleY(0.92f)
+                    .setDuration(first).withEndAction(new Runnable() {
+                        @Override
+                        public void run() {
+                            incoming.setVisibility(View.VISIBLE);
+                            incoming.animate().alpha(1f).scaleX(1f).scaleY(1f)
+                                    .setDuration(duration - first).start();
+                            container.removeView(outgoing);
+                            outgoing.setAlpha(1f);
+                            outgoing.setScaleX(1f);
+                            outgoing.setScaleY(1f);
+                        }
+                    }).start();
+            return true;
+        }
+
+        if ("slide_up".equals(kind) || "slide_down".equals(kind)) {
+            // A detail screen rises from the bottom; going back sends it down.
+            float height = Math.max(1, container.getHeight());
+            boolean down = "slide_down".equals(kind) || reverse;
+            incoming.setTranslationY(down ? -height / 6f : height);
+            incoming.setAlpha(1f);
+            incoming.animate().translationY(0f).setDuration(duration).start();
+            outgoing.animate().alpha(0f).setDuration(duration)
+                    .withEndAction(new Runnable() {
+                        @Override
+                        public void run() {
+                            container.removeView(outgoing);
+                            incoming.setTranslationY(0f);
+                            outgoing.setAlpha(1f);
+                        }
+                    }).start();
+            return true;
+        }
+
         if ("scale".equals(kind)) {
             incoming.setPivotX(incoming.getWidth() / 2f);
             incoming.setPivotY(incoming.getHeight() / 2f);
@@ -282,10 +364,68 @@ public class MainActivity extends Activity {
     }
 
     /** Replace the content with a plain message (startup and error states). */
+    /**
+     * Keep content inside the system bars and above the keyboard.
+     *
+     * On API 30+ ``getInsets`` covers status, navigation, cutout and IME in one
+     * call; older releases fall back to the deprecated system-window insets,
+     * which is why ``SafeArea`` alone used to be the only thing that helped.
+     */
+    private void applySystemInsets(android.view.WindowInsets insets) {
+        int left;
+        int top;
+        int right;
+        int bottom;
+        if (Build.VERSION.SDK_INT >= 30) {
+            android.graphics.Insets bars = insets.getInsets(
+                    android.view.WindowInsets.Type.systemBars()
+                            | android.view.WindowInsets.Type.displayCutout());
+            android.graphics.Insets ime = insets.getInsets(android.view.WindowInsets.Type.ime());
+            left = bars.left;
+            top = bars.top;
+            right = bars.right;
+            bottom = Math.max(bars.bottom, ime.bottom);
+        } else {
+            left = insets.getSystemWindowInsetLeft();
+            top = insets.getSystemWindowInsetTop();
+            right = insets.getSystemWindowInsetRight();
+            bottom = Math.max(insets.getSystemWindowInsetBottom(), 0);
+        }
+        if (container.getPaddingLeft() == left && container.getPaddingTop() == top
+                && container.getPaddingRight() == right && container.getPaddingBottom() == bottom) {
+            return;
+        }
+        container.setPadding(left, top, right, bottom);
+        // The IME is a separate question from the bars: tell Python so a screen
+        // can scroll the focused field into view without guessing the height.
+        boolean keyboardUp = Build.VERSION.SDK_INT >= 30
+                && insets.isVisible(android.view.WindowInsets.Type.ime());
+        if (keyboardUp != keyboardVisible) {
+            keyboardVisible = keyboardUp;
+            Native.dispatchEvent("", "insets", String.valueOf(bottom));
+        }
+    }
+
+    /** Light or dark, following the system: no white flash in dark mode. */
+    private boolean systemIsDark() {
+        int mode = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+        return mode == Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    /** The colour under "Starting Python…", taken from the current system theme. */
+    private int startupBackground() {
+        return systemIsDark() ? Color.parseColor("#121212") : Color.WHITE;
+    }
+
+    /** Placeholder text colour that stays readable in both themes. */
+    private int placeholderTextColor() {
+        return systemIsDark() ? Color.parseColor("#E0E0E0") : Color.parseColor("#444444");
+    }
+
     private void showPlaceholder(String message) {
         TextView text = new TextView(this);
         text.setText(message);
-        text.setTextColor(Color.parseColor("#444444"));
+        text.setTextColor(placeholderTextColor());
         text.setPadding(48, 64, 48, 48);
         container.removeAllViews();
         container.addView(text);
@@ -385,6 +525,13 @@ public class MainActivity extends Activity {
         if ((changes & ActivityInfoCompat.CONFIG_LOCALE) != 0) {
             Native.dispatchEvent("", "locale", currentLanguage(newConfig));
         }
+        // uiMode is in configChanges, so the activity survives a light/dark
+        // switch — which used to mean Python never heard about it at all and
+        // the app stayed light inside a dark system.
+        if ((changes & ActivityInfoCompat.CONFIG_UI_MODE) != 0) {
+            container.setBackgroundColor(startupBackground());
+            Native.dispatchEvent("", "theme", systemIsDark() ? "dark" : "light");
+        }
     }
 
     @SuppressWarnings("deprecation")
@@ -400,6 +547,7 @@ public class MainActivity extends Activity {
         static final int CONFIG_LOCALE = android.content.pm.ActivityInfo.CONFIG_LOCALE;
         static final int CONFIG_DENSITY = android.content.pm.ActivityInfo.CONFIG_DENSITY;
         static final int CONFIG_FONT_SCALE = android.content.pm.ActivityInfo.CONFIG_FONT_SCALE;
+        static final int CONFIG_UI_MODE = android.content.pm.ActivityInfo.CONFIG_UI_MODE;
     }
 
     @Override
@@ -415,24 +563,49 @@ public class MainActivity extends Activity {
      * back is enabled (android:enableOnBackInvokedCallback="true", mandatory
      * with targetSdk 36), so an OnBackInvokedCallback is registered there;
      * older releases keep using onBackPressed().
+     *
+     * The callback is registered only while the app has a screen to go back to.
+     * A permanently registered callback swallows the gesture on the root
+     * screen too, so the system's own "leave the app" animation never played
+     * and back looked like a no-op. When Python reports ``can_go_back: false``
+     * the callback is removed and the platform handles the gesture.
      */
     private void registerBackCallback() {
-        if (Build.VERSION.SDK_INT >= 33) {
-            android.window.OnBackInvokedCallback callback = new android.window.OnBackInvokedCallback() {
-                @Override
-                public void onBackInvoked() {
-                    Native.dispatchEvent("", "back", "");
-                }
-            };
-            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
-                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback);
-            backCallback = callback;
+        if (Build.VERSION.SDK_INT < 33 || backCallback != null) {
+            return;
+        }
+        android.window.OnBackInvokedCallback callback = new android.window.OnBackInvokedCallback() {
+            @Override
+            public void onBackInvoked() {
+                Native.dispatchEvent("", "back", "");
+            }
+        };
+        getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback);
+        backCallback = callback;
+    }
+
+    /** Register or drop the back callback to match the reported depth. */
+    private void setCanGoBack(boolean value) {
+        canGoBack = value;
+        if (value) {
+            registerBackCallback();
+        } else if (Build.VERSION.SDK_INT >= 33 && backCallback != null) {
+            getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(
+                    (android.window.OnBackInvokedCallback) backCallback);
+            backCallback = null;
         }
     }
 
     @SuppressWarnings("deprecation")
     @Override
     public void onBackPressed() {
+        // On the root screen the platform's default (finish the task) is the
+        // right answer; intercepting it made back appear to do nothing.
+        if (!canGoBack) {
+            super.onBackPressed();
+            return;
+        }
         Native.dispatchEvent("", "back", "");
     }
 
@@ -458,6 +631,21 @@ public class MainActivity extends Activity {
         // Just ensure the activity is in the foreground.
     }
 
+    /**
+     * Tear the window down without tearing the interpreter down.
+     *
+     * This used to stop Python (and the native side then called Py_Finalize),
+     * which meant every Activity recreation — back on the root screen, a
+     * process that survived in the background, "Don't keep activities", a
+     * configuration change outside configChanges — discarded all application
+     * state and re-ran the app from main.py.
+     *
+     * Now the interpreter is told to stop *handling input* for this window and
+     * save what it needs (``on_stop`` → ``App.save_state``), and stays alive:
+     * the next onCreate() resumes it. ``finishApp()`` (the app's own exit) and
+     * a task that leaves the process with nothing to keep are the only cases
+     * where Python is not needed any more.
+     */
     @Override
     protected void onDestroy() {
         if (Build.VERSION.SDK_INT >= 33 && backCallback != null) {
@@ -469,6 +657,12 @@ public class MainActivity extends Activity {
         if (instance == this) {
             instance = null;
         }
-        Native.stopEventLoop();
+        // An activity that is finishing is not coming back to this process:
+        // stop the interpreter, otherwise a background thread of a finished app
+        // keeps it awake for no one. A pure configuration change is *not* a
+        // finish, and the process stays warm on purpose.
+        if (!isChangingConfigurations()) {
+            PythonRuntime.stopForRecreate();
+        }
     }
 }

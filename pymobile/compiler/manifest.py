@@ -33,10 +33,15 @@ class ManifestBuilder:
         *,
         activity: str = "org.kivy.android.PythonActivity",
         app_name: str | None = None,
+        debuggable: bool = False,
     ):
         self.config = config
         self.activity = activity
         self.app_name = app_name if app_name is not None else config.name
+        #: ``android:debuggable="true"``. Off unless the build asked for it: a
+        #: debuggable APK lets any holder of the (public, well-known) debug
+        #: certificate attach a debugger and run ``adb shell`` as the app.
+        self.debuggable = debuggable
 
     def _attr(self, element: ET.Element, name: str, value: str) -> None:
         """Set an ``android:`` namespaced attribute."""
@@ -63,7 +68,12 @@ class ManifestBuilder:
 
         application = ET.SubElement(manifest, "application")
         self._attr(application, "label", self.app_name)
-        self._attr(application, "icon", "@mipmap/icon")
+        # The adaptive icon file name. Android prefers `@mipmap/ic_launcher`
+        # whenever it is present (mipmap-anydpi-v26), and falls back to the
+        # legacy `icon.png` squares on Android 7 only through the same name —
+        # so the packaged legacy squares are written as `ic_launcher.png` too.
+        self._attr(application, "icon", "@mipmap/ic_launcher")
+        self._attr(application, "roundIcon", "@mipmap/ic_launcher_round")
         # Backups copy the private store (tokens, personal data) off the
         # device; opt in with `allow_backup = true`.
         self._attr(application, "allowBackup", "true" if config.allow_backup else "false")
@@ -71,6 +81,25 @@ class ManifestBuilder:
         # Back gestures arrive through OnBackInvokedCallback (API 33+);
         # onBackPressed() is deprecated and ignored with predictive back.
         self._attr(application, "enableOnBackInvokedCallback", "true")
+        # Without this the framework never mirrors the layout for Arabic or
+        # Hebrew, however the margins are expressed (they are start/end now).
+        self._attr(application, "supportsRtl", "true")
+        # `adb shell run-as`, Layout Inspector and the Android Studio debugger
+        # all refuse to attach to a non-debuggable app — including one signed
+        # with the debug certificate, which is what a plain `build --native`
+        # produces. Opt in with `build --native --debug`.
+        if self.debuggable:
+            self._attr(application, "debuggable", "true")
+
+        # -- certificate pinning (S7) --------------------------------------
+        # Android honours <network-security-config> only through a meta-data
+        # reference; the file itself is a resource, written by the native
+        # backend. Only the domains listed are pinned, everything else keeps
+        # the system trust store.
+        if config.network_pins:
+            meta = ET.SubElement(application, "meta-data")
+            self._attr(meta, "name", "android.security.networkSecurityConfig")
+            self._attr(meta, "resource", "@xml/network_security_config")
 
         activity = ET.SubElement(application, "activity")
         self._attr(activity, "name", self.activity)
@@ -108,15 +137,55 @@ class ManifestBuilder:
         return "\n".join(lines) + "\n"
 
 
+def _xml_escape(text: str) -> str:
+    """Escape a value for an XML text node or attribute."""
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def network_security_config(pins: dict[str, list[str]]) -> str:
+    """The ``res/xml/network_security_config.xml`` for a pinned build (S7).
+
+    Each listed domain trusts *only* the given certificates. ``cleartextTraffic``
+    stays denied, exactly as it is without a config, so this cannot accidentally
+    re-enable plain HTTP.
+    """
+    lines = [
+        '<?xml version="1.0" encoding="utf-8"?>',
+        "<network-security-config>",
+        '    <base-config cleartextTrafficPermitted="false" />',
+    ]
+    for domain in sorted(pins):
+        lines.append('    <domain-config cleartextTrafficPermitted="false">')
+        lines.append(f'        <domain includeSubdomains="true">{_xml_escape(domain)}</domain>')
+        lines.append("        <pin-set>")
+        for pin in pins[domain]:
+            digest = pin[len("sha256/") :] if pin.startswith("sha256/") else pin
+            lines.append(f'            <pin digest="SHA-256">{_xml_escape(digest)}</pin>')
+        lines.append("        </pin-set>")
+        lines.append("    </domain-config>")
+    lines.append("</network-security-config>")
+    return "\n".join(lines) + "\n"
+
+
 def build_manifest(
     config: ProjectConfig,
     *,
     pretty: bool = True,
     activity: str = "org.kivy.android.PythonActivity",
     app_name: str | None = None,
+    debuggable: bool = False,
 ) -> str:
     """Convenience wrapper around :class:`ManifestBuilder`.
 
     ``activity`` selects the launcher class; the native backend passes its own.
+    ``debuggable`` adds ``android:debuggable="true"`` for a ``--debug`` build.
     """
-    return ManifestBuilder(config, activity=activity, app_name=app_name).to_xml(pretty=pretty)
+    return ManifestBuilder(
+        config, activity=activity, app_name=app_name, debuggable=debuggable
+    ).to_xml(pretty=pretty)

@@ -1,4 +1,5 @@
 """Tests for the 0.7.0 shell widgets: bottom tabs, dialogs, pickers."""
+
 from __future__ import annotations
 
 import pytest
@@ -53,8 +54,8 @@ def test_confirm_dialog_closes_before_callback() -> None:
     dlg = ConfirmDialog("Sure?", "msg", on_confirm=lambda: order.append(("cb", dlg.shown)))
     dlg.open()
     assert dlg.shown is True
-    row = dlg.children[1]          # Row(cancel, confirm)
-    row.children[1].press()        # the confirm button
+    row = dlg.children[1]  # Row(cancel, confirm)
+    row.children[1].press()  # the confirm button
     assert order == [("cb", False)]  # the handler saw an already-closed dialog
 
 
@@ -125,6 +126,7 @@ def test_browser_url_points_at_loopback_for_wildcard_binds() -> None:
     assert browser_url("127.0.0.1", 9000) == "http://127.0.0.1:9000"
     assert browser_url("192.168.0.7", 9000) == "http://192.168.0.7:9000"
 
+
 def test_pickers_are_silent_while_building() -> None:
     """A value set in build() must not fire on_change — Slider/Switch do not either."""
     from pymobile import Screen, Widget
@@ -135,7 +137,7 @@ def test_pickers_are_silent_while_building() -> None:
         def build(self) -> Widget:
             self.date = DatePicker("2026-06-01", on_change=seen.append)
             self.time = TimePicker("09:00", on_change=seen.append)
-            self.date.value = "2026-07-01"       # inside build(): no callback
+            self.date.value = "2026-07-01"  # inside build(): no callback
             self.time.value = "10:30"
             return Column(self.date, self.time)
 
@@ -143,7 +145,7 @@ def test_pickers_are_silent_while_building() -> None:
     assert seen == []
 
     picker = DatePicker("2026-06-01", on_change=seen.append)
-    picker.value = "2026-08-01"              # outside build(): the listener runs
+    picker.value = "2026-08-01"  # outside build(): the listener runs
     assert seen == ["2026-08-01"]
 
 
@@ -156,14 +158,14 @@ def test_tab_bar_is_silent_while_building() -> None:
     class Shell(Screen):
         def build(self) -> Widget:
             self.tabs = BottomNavigation(["Home", "Stats"], on_select=seen.append)
-            self.tabs.value = "Stats"            # inside build(): no callback
+            self.tabs.value = "Stats"  # inside build(): no callback
             return Column(self.tabs)
 
     Shell().root
     assert seen == []
 
     tabs = BottomNavigation(["Home", "Stats"], on_select=seen.append)
-    tabs.select("Stats")                     # outside build(): the listener runs
+    tabs.select("Stats")  # outside build(): the listener runs
     assert seen == ["Stats"]
 
 
@@ -177,12 +179,12 @@ def test_radio_group_is_silent_while_building() -> None:
             self.group = RadioGroup(
                 RadioButton("A"), RadioButton("B"), value="A", on_select=seen.append
             )
-            self.group.select("B")               # inside build(): no callback
+            self.group.select("B")  # inside build(): no callback
             return Column(self.group)
 
     Form().root
     assert seen == []
 
     group = RadioGroup(RadioButton("A"), RadioButton("B"), value="A", on_select=seen.append)
-    group.select("B")                        # outside build(): the listener runs
+    group.select("B")  # outside build(): the listener runs
     assert seen == ["B"]

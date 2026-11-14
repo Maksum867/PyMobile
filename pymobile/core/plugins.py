@@ -35,7 +35,7 @@ _log = get_logger("plugins")
 
 
 class Plugin:
-    """    Subclasses set ``name`` and may implement ``activate(app)`` plus optional
+    """Subclasses set ``name`` and may implement ``activate(app)`` plus optional
     ``on_app_start(app)`` / ``on_app_stop(app)`` hooks. ``activate`` runs **once
     per (plugin, app) pair** — for every application the plugin is activated
     against, including a second app created later in the same process, and

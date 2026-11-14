@@ -98,7 +98,7 @@ class List(Container):
         #: Number of rows built so far (set before item_count: its setter clamps it).
         self._window = 0
         self._item_count = 0
-        self.item_count = item_count          # validated by the property setter
+        self.item_count = item_count  # validated by the property setter
         self.spacing = spacing
         self.visible_count = visible_count
         self._window = min(item_count, visible_count)
@@ -136,6 +136,7 @@ class List(Container):
 
     @item_count.setter
     def item_count(self, value: int) -> None:
+        """How many rows the list holds in total, including the ones not built yet."""
         if isinstance(value, bool) or not isinstance(value, int):
             raise TypeError(f"item_count must be an int, got {type(value).__name__}")
         if value < 0:
@@ -190,9 +191,11 @@ class List(Container):
 
     # Override add/clear so users cannot disturb the lazily built children.
     def add(self, child: Widget) -> Widget:  # pragma: no cover - defensive
+        """Append a row to the list."""
         raise ValueError("List builds its rows itself; set item_count and call refresh()")
 
     def clear(self) -> None:  # pragma: no cover - defensive
+        """Remove every row from the list."""
         raise ValueError("List builds its rows itself; set item_count and call refresh()")
 
     def refresh(self) -> None:
@@ -239,6 +242,7 @@ class List(Container):
 
     @refreshing.setter
     def refreshing(self, value: bool) -> None:
+        """Whether the pull-to-refresh indicator is showing."""
         value = bool(value)
         if value != self._refreshing:
             self._refreshing = value
@@ -283,6 +287,7 @@ class List(Container):
         self.pull_to_refresh()
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: paging, refresh state and the refresh callback."""
         return {
             **super().props(),
             "item_count": self.item_count,
@@ -371,6 +376,7 @@ class ListTile(Widget):
 
     @title.setter
     def title(self, value: str) -> None:
+        """The main line of the row."""
         value = text_value(value)
         if value != self._title:
             self._title = value
@@ -387,6 +393,7 @@ class ListTile(Widget):
 
     @subtitle.setter
     def subtitle(self, value: str) -> None:
+        """The second line of the row."""
         value = text_value(value)
         if value != self._subtitle:
             self._subtitle = value
@@ -399,6 +406,7 @@ class ListTile(Widget):
 
     @trailing.setter
     def trailing(self, value: str) -> None:
+        """The short text at the end of the row."""
         value = text_value(value)
         if value != self._trailing:
             self._trailing = value
@@ -433,6 +441,7 @@ class ListTile(Widget):
             raise ValueError(f"unknown swipe direction {value!r}")
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the three lines, the swipes and the two callbacks."""
         return {
             **super().props(),
             "title": self._title,

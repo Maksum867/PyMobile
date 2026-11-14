@@ -32,7 +32,7 @@ _log = get_logger("compiler.sdk")
 def _safe_extract_zip(zf: zipfile.ZipFile, destination: Path) -> None:
     """Extract a ZIP verifying no member escapes the destination directory.
 
-    П-20: mirrors tarfile's ``filter="data"`` behaviour for zip, so bandit's
+    Mirrors tarfile's ``filter="data"`` behaviour for zip, so bandit's
     B202 warning is not a false positive. SHA-256 is verified *before*
     extraction already; this is a belt-and-braces defence against a path
     traversal entry (``../../etc/passwd`` or an absolute Windows path).
@@ -64,7 +64,7 @@ def chmod_launchers(tools_bin: Path) -> None:
     extraction leaves ``sdkmanager``/``avdmanager`` with mode 644. Only
     ``sdkmanager`` used to be repaired, and only on the first download —
     an ``avdmanager`` without the executable bit made
-    ``pymobile emulator create`` die with "Permission denied" (PM-09), and a
+    ``pymobile emulator create`` die with "Permission denied", and a
     cache unpacked by an older release stayed broken for ever. This runs on
     every install: fresh extraction or existing cache, same repair.
     """
@@ -77,9 +77,20 @@ def chmod_launchers(tools_bin: Path) -> None:
             with suppress(OSError):
                 entry.chmod(entry.stat().st_mode | 0o755)
 
+
+#: Android platform the toolchain installs; the build compiles against it.
+#: ``target_sdk`` above this asks Android for behaviour of a newer release while
+#: the APK never gets compiled against it — see ``build``'s warning.
+#:
+#: This is what Google Play requires as of 31 August 2026: new apps and updates
+#: must target API 36. Compiling against 36 is the whole point — a manifest that
+#: claims 36 while the classes and resources were built against 35 is the state
+#: that got rejected and that silently skipped API 36 behaviour switches.
+SDK_PLATFORM = 36
+
 #: Everything needed to build an APK using the prebuilt JNI bridge (~450 MB).
 MINIMAL_PACKAGES = (
-    "platforms;android-35",
+    f"platforms;android-{SDK_PLATFORM}",
     "build-tools;35.0.0",
     "platform-tools",  # adb for installing/debugging APKs on a phone or emulator
 )

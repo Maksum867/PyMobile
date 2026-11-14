@@ -170,7 +170,7 @@ class AudioPlayer:
             raise TypeError("position_ms must be a number")
         target = max(0, int(position_ms))
         if not self.duration and self._handle is not None:
-            # The cached zero may just mean "not prepared yet" (PM-12).
+            # The cached zero may just mean "not prepared yet".
             with contextlib.suppress(Exception):
                 self.duration = max(0, int(self._handle.duration()))
         if self.duration:
@@ -216,6 +216,7 @@ class AudioPlayer:
 
     @volume.setter
     def volume(self, value: float) -> None:
+        """Playback volume from 0.0 to 1.0, clamped and forwarded to the bridge."""
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise TypeError("volume must be a number from 0.0 to 1.0")
         if not 0.0 <= float(value) <= 1.0:
@@ -306,7 +307,7 @@ class AudioPlayer:
                 # The platform prepares asynchronously: duration() answers 0
                 # until the file is ready. Refresh instead of caching that
                 # zero for the whole playback and silently losing the end
-                # detection that depends on it (PM-12).
+                # detection that depends on it.
                 with contextlib.suppress(Exception):
                     self.duration = max(0, int(self._handle.duration()))
         except Exception:  # pragma: no cover - defensive
@@ -338,7 +339,8 @@ class AudioPlayer:
             elif now - self._not_playing_since >= _PREPARE_TIMEOUT_S:
                 _log.warning(
                     "audio %s did not start playing within %.0f s; stopping the watcher",
-                    self._source, _PREPARE_TIMEOUT_S,
+                    self._source,
+                    _PREPARE_TIMEOUT_S,
                 )
                 self._stop_polling()
             return

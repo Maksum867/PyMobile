@@ -120,6 +120,7 @@ class _Element(Widget):
         raise NotImplementedError
 
     def props(self) -> dict[str, Any]:
+        """The serialised props shared by every canvas element."""
         return {
             **super().props(),
             "element": type(self).__name__,
@@ -164,6 +165,7 @@ class Line(_Element):
         return self._points
 
     def primitives(self, default: str) -> list[dict[str, Any]]:
+        """The element as paint primitives the previews can draw."""
         return [
             {
                 "type": "line",
@@ -191,6 +193,7 @@ class Path(Line):
         super().__init__(*points, **kwargs)
 
     def primitives(self, default: str) -> list[dict[str, Any]]:
+        """The element as paint primitives, one per segment."""
         points = list(self._points)
         if self.closed and len(points) > 2:
             points.append(points[0])
@@ -261,6 +264,7 @@ class Shape(_Element):
         self.align = align
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: which shape it is and, for text, the caption."""
         return {
             **super().props(),
             "kind": self.kind,
@@ -271,6 +275,7 @@ class Shape(_Element):
         }
 
     def primitives(self, default: str) -> list[dict[str, Any]]:
+        """The element as paint primitives for its shape kind."""
         colour = self._paint(default)
         geometry = self._geometry
         if self.kind == "rect":
@@ -412,6 +417,7 @@ class Canvas(Widget):
         # Elements without a colour of their own follow the theme's text colour,
         # like a Label does; the resolution happens here so a theme change
         # repaints the drawing instead of freezing the colour it was born with.
+        """The serialised props: the drawing, its label and its size."""
         default_colour = theme_color(self, "TEXT")
         return {
             **super().props(),
@@ -423,6 +429,7 @@ class Canvas(Widget):
         }
 
     def to_dict(self) -> WidgetNode:
+        """The serialised canvas, sized to the drawing it holds."""
         node = super().to_dict()
         # The renderers size the surface from the style/height like a Chart does.
         node["style"] = {"height": self.height, **node.get("style", {})}

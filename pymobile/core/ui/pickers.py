@@ -49,7 +49,7 @@ def _parse_time(value: str) -> _dt.time:
     # as a defence-in-depth fallback for older interpreters.
     if text.startswith("24:"):
         raise ValueError(f"{value!r} is not a valid wall-clock time (hour 24)")
-    if len(text) == 4 and text[1] == ":":      # "7:05" -> "07:05"
+    if len(text) == 4 and text[1] == ":":  # "7:05" -> "07:05"
         text = f"0{text}"
     try:
         parsed = _dt.time.fromisoformat(text)
@@ -95,6 +95,7 @@ class DatePicker(Widget):
 
     @value.setter
     def value(self, value: str) -> None:
+        """The chosen date as ``YYYY-MM-DD``; assigning it behaves like picking one."""
         self.set_value(value)
 
     def _normalise(self, value: str) -> str:
@@ -113,11 +114,12 @@ class DatePicker(Widget):
             self.invalidate()
             # A value set while the tree is being built (build()) stays silent,
             # exactly like Slider/Switch/Checkbox/Dropdown: the handler would
-            # otherwise run against widgets that do not exist yet (BUG-25).
+            # otherwise run against widgets that do not exist yet.
             if self.on_change is not None and not in_build_scope():
                 self.on_change(text)
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the date plus the allowed range and the callback."""
         return {
             **super().props(),
             "value": self._value,
@@ -152,12 +154,14 @@ class TimePicker(Widget):
 
     @value.setter
     def value(self, value: str) -> None:
+        """The chosen time as ``HH:MM``; assigning it behaves like picking one."""
         self.set_value(value)
 
     def _normalise(self, value: str) -> str:
         return _parse_time(value).strftime("%H:%M")
 
     def set_value(self, value: str) -> None:
+        """Choose ``value``, normalised to ``HH:MM``, and notify ``on_change``."""
         text = self._normalise(value)
         if text != self._value:
             self._value = text
@@ -167,6 +171,7 @@ class TimePicker(Widget):
                 self.on_change(text)
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the time and the change callback."""
         return {
             **super().props(),
             "value": self._value,

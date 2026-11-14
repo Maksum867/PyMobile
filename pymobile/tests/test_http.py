@@ -162,7 +162,11 @@ class TestClientBehaviour:
             HttpClient().get("ftp://example.com/file")
 
     def test_unreachable_host(self) -> None:
-        with pytest.raises(NetworkError, match="Could not reach"):
+        # Port 1 on loopback is normally refused at once ("Could not reach"),
+        # but a runner that drops it instead turns the same call into a
+        # timeout. Both are the same failure for the caller, so accept either
+        # rather than fail on which of the two the network stack chose.
+        with pytest.raises(NetworkError, match=r"Could not reach|timed out"):
             HttpClient(timeout=2).get("http://127.0.0.1:1/nothing")
 
     def test_retry_then_fail(self) -> None:

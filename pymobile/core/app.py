@@ -44,6 +44,9 @@ from .ui.widget import Widget
 
 #: Event kind the device bridge uses to wake the event loop for UI calls.
 WAKE_EVENT = "__wake__"
+#: The platform telling the app that its window is going away (or arriving).
+#: The value is ``"stop"`` or ``"resume"``; see :meth:`App.save_state`.
+LIFECYCLE_EVENT = "__lifecycle__"
 
 #: Event the application emits when the data behind its screens changed.
 #: Subscribing to it is optional — :meth:`App.notify_data_changed` emits it and
@@ -66,6 +69,7 @@ _INTERACTIVE_EVENT_KINDS = frozenset(
         "select",
         "toggle",
         "search",
+        "submit",
         "increment",
         "decrement",
         "swipe",
@@ -78,16 +82,31 @@ _INTERACTIVE_EVENT_KINDS = frozenset(
 #: ``"3:button-1"`` — and come back the same way. The token is what lets an
 #: event from a screen that is no longer displayed be recognised and dropped:
 #: automatic ids restart per screen, so the Delete button of a dialog and the
-#: Open button of the menu it replaced are both ``button-1`` (PM-14).
+#: Open button of the menu it replaced are both ``button-1``.
 _WIRE_ID = re.compile(r"^(?P<generation>\d+):(?P<widget>.*)$")
 
 __all__ = ["App"]
+
+#: Screen transitions the Android renderer can play. ``fade`` cross-dissolves,
+#: ``fade_through`` fades out then in (Material's change of context), ``slide``
+#: moves horizontally, ``slide_up`` rises from the bottom, ``scale`` grows the
+#: incoming screen. Anything unknown falls back to a fade on the device.
+SCREEN_TRANSITIONS = (
+    "none",
+    "fade",
+    "fade_through",
+    "slide",
+    "slide_up",
+    "slide_down",
+    "scale",
+)
 
 _log = get_logger("app")
 
 
 def _noop() -> None:
     return None
+
 
 #: The application started most recently, or None. Developer tooling (the
 #: interactive preview, the reloader) needs a handle on the running app
@@ -145,7 +164,7 @@ _sandbox_warned: set[str] = set()
 def _sandboxed_storage_for_tests(package: str) -> str | None:
     """Return a sandbox storage path when we detect a test runner.
 
-    П-08: without this, a test that instantiates ``App(...)`` silently writes
+    Without this, a test that instantiates ``App(...)`` silently writes
     to ``~/.pymobile/<package>.json`` and can wipe the developer's real data.
     When pytest or unittest is in ``sys.modules`` *and* the user did not set
     ``PYMOBILE_STORAGE_DIR``, we isolate the store under ``$TMPDIR/pymobile-test/``
@@ -266,10 +285,30 @@ class _WidgetScreen(Screen):
         self._widget = widget
 
     def build(self) -> Widget:
+        """The single widget this screen shows."""
         return self._widget
 
     def on_unmount(self) -> None:
+        """Detach the widget tree when the screen goes away."""
         self._detach_tree()
+
+
+def _remote_image_sources(tree: dict[str, Any]) -> list[str]:
+    """Image sources the Android renderer cannot load (A19)."""
+    found: list[str] = []
+    stack: list[Any] = [tree]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            if node.get("type") == "Image":
+                props = node.get("props")
+                source = str(props.get("source", "")) if isinstance(props, dict) else ""
+                if source.startswith(("http://", "https://", "data:")):
+                    found.append(source)
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return found
 
 
 class App:
@@ -302,6 +341,7 @@ class App:
         log_file: str | None = None,
         transition: str | None = "fade",
         transition_duration_ms: int = 220,
+        follow_system_theme: bool = False,
     ) -> None:
         if dark_theme is not None and not isinstance(dark_theme, Theme):
             raise TypeError("dark_theme must be a Theme")
@@ -309,8 +349,8 @@ class App:
             raise ValueError("dark_theme must be named 'dark' so renderers recognize it")
         if isinstance(theme, Theme) and theme.is_dark and dark_theme is not None:
             raise ValueError("pass a dark theme as either theme or dark_theme, not both")
-        if transition not in (None, "none", "fade", "slide", "scale"):
-            raise ValueError("transition must be one of: none, fade, slide, scale")
+        if transition not in (None, *SCREEN_TRANSITIONS):
+            raise ValueError("transition must be one of: " + ", ".join(SCREEN_TRANSITIONS))
         if (
             isinstance(transition_duration_ms, bool)
             or not isinstance(transition_duration_ms, int)
@@ -318,6 +358,12 @@ class App:
         ):
             raise ValueError("transition_duration_ms must be an int from 0 to 2000")
         self.name = name
+        #: Switch between the light palette and its dark counterpart when the
+        #: system does. On Android that used to be invisible: ``uiMode`` is in
+        #: ``configChanges``, so the activity survives the switch and nothing
+        #: told Python. Default off keeps the palette the app chose.
+        self.follow_system_theme = bool(follow_system_theme)
+        self._system_dark: bool | None = None
         self.transition = "none" if transition is None else transition
         self.transition_duration_ms = transition_duration_ms
         self.version = version or "0.1.0"
@@ -333,7 +379,7 @@ class App:
         self.vibration = Vibration(self.bridge)
         self.permissions = PermissionManager(self.bridge)
         self.http = HttpClient(base_url=base_url, deliver=self._deliver)
-        # П-08: a script/test that builds its own App(...) without
+        # A script/test that builds its own App(...) without
         # ``storage_path`` must not clobber the real app's data on disk.
         # When pytest (or unittest) is running and the caller did not point at
         # a store explicitly, sandbox the storage under a temp directory and
@@ -360,10 +406,15 @@ class App:
         #: True once stop() ran; stop() releases resources for good, so such an
         #: app cannot be started again (see run()).
         self._stopped = False
+        #: Widget state read from the store, waiting for the widgets to exist.
+        self._restore_pending: dict[str, Any] = {}
+        #: True between a ``__lifecycle__``/stop and the next resume: the window
+        #: is gone, the interpreter is not.
+        self._window_stopped = False
         #: Bumped every time a different screen is shown. Widget ids are
         #: qualified with it on the way out and checked on the way in, so an
         #: event that was queued by the previous screen cannot act on a widget
-        #: of the current one (PM-14).
+        #: of the current one.
         self._generation = 0
         #: Metadata for the next native screen swap; consumed by one render only.
         self._pending_navigation: dict[str, Any] | None = None
@@ -379,7 +430,8 @@ class App:
         self._warned_render_loop = False
         #: Widget types already reported as having no native renderer.
         self._warned_unknown_types: set[str] = set()
-        # П-10: screens popped during a UI dispatch land here so their
+        self._warned_remote_images: set[str] = set()
+        # Screens popped during a UI dispatch land here so their
         # ``_app`` reference can be cleared after the handler returns (see
         # Navigator._discard / Screen.app).
         self._in_ui_dispatch = 0
@@ -460,6 +512,22 @@ class App:
             "package": self.package,
             "platform": self.platform,
         }
+
+    @property
+    def system_is_dark(self) -> bool | None:
+        """The system's light/dark choice, or ``None`` before Android says."""
+        return self._system_dark
+
+    def _apply_system_theme(self, dark: bool) -> None:
+        """Follow the system palette, if the app asked to."""
+        target = "dark" if dark else "light"
+        if self._theme.name == target:
+            return
+        try:
+            self.set_theme(target)
+        except (KeyError, ValueError):
+            # No counterpart registered: the app's own palette stays.
+            _log.debug("no %s palette registered; keeping %s", target, self._theme.name)
 
     def set_theme(self, theme: str | Theme) -> None:
         """Switch to a registered light/dark palette or install a Theme and redraw.
@@ -553,9 +621,124 @@ class App:
         _plugin_registry.on_app_start(self)
         self.events.emit("app:start", source=self.name)
         self.navigator.reset(screen)
+        # A window that is adopting an interpreter which outlived the previous
+        # one gets its typed-in values back before the first frame.
+        self.restore_state()
 
         if hasattr(self.bridge, "next_event"):
             self._event_loop()
+
+    # -- window lifecycle --------------------------------------------------
+    def save_state(self) -> None:
+        """Write the state that must survive the window being destroyed.
+
+        Called automatically when the platform reports that the Activity is
+        going away and the app stays in memory; call it in ``Screen.on_stop``
+        for the application's own data. Two things happen:
+
+        * every screen on the navigator stack gets ``on_stop()`` once, so a
+          screen can pause a timer or stash a draft;
+        * the widget state the framework tracks — a field's text, a switch's
+          position, a dropdown's choice — is written to the app store under
+          ``__ui_state__``, keyed by widget id.
+
+        The write goes through :class:`~pymobile.core.api.storage.Storage`, so
+        it is a normal, atomic store write, and it is a no-op when ``storage``
+        was never touched and nothing is tracked.
+        """
+        tracked = self._tracked_widget_state()
+        if tracked:
+            try:
+                self._ui_state_store().set("state", tracked)
+            except Exception:  # a full disk must not take the window down
+                _log.exception("could not save the widget state")
+        for screen in self.navigator.stack:
+            try:
+                screen.on_stop()
+            except Exception:
+                _log.exception("Screen.on_stop failed for %r", screen)
+
+    def _ui_state_store(self) -> Storage:
+        """A namespaced view of the app store for the framework's own state.
+
+        ``pymobile`` as the namespace keeps ``__ui_state__`` out of the app's
+        own keys, so iterating ``app.storage`` never shows framework bookkeeping.
+        """
+        return Storage(self.storage.path, namespace="pymobile")
+
+    def _tracked_widget_state(self) -> dict[str, Any]:
+        """Widget values worth restoring, by the screen that holds them.
+
+        The same snapshot a rebuild uses (:meth:`Screen._snapshot_state`), so
+        a field keeps what the user typed across a window being destroyed for
+        exactly the reasons it keeps it across ``Screen.rebuild()`` — one code
+        path, one set of widget ``capture_state`` implementations.
+        """
+        state: dict[str, Any] = {}
+        for index, screen in enumerate(self.navigator.stack):
+            try:
+                snapshot = screen._snapshot_state()
+            except Exception:  # a screen that never built anything
+                continue
+            if snapshot:
+                state[str(index)] = snapshot
+        return state
+
+    def restore_state(self) -> None:
+        """Apply what :meth:`save_state` wrote, before the first frame.
+
+        Widgets created with an id the store knows get their value back after
+        the screen is built, so a relaunch after the window was destroyed
+        shows the half-typed form rather than an empty one.
+        """
+        try:
+            stored = self._ui_state_store().get("state", None)
+        except Exception:
+            _log.exception("could not read the saved widget state")
+            return
+        if not isinstance(stored, dict):
+            return
+        self._restore_pending = dict(stored)
+        self._apply_saved_state()
+
+    def _apply_saved_state(self) -> None:
+        pending = self._restore_pending
+        if not pending:
+            return
+        for index, screen in enumerate(self.navigator.stack):
+            snapshot = pending.get(str(index))
+            if not isinstance(snapshot, dict):
+                continue
+            try:
+                screen._restore_state(snapshot)
+            except Exception:
+                _log.exception("could not restore the state of %r", screen)
+        self._restore_pending = {}
+
+    def _lifecycle(self, phase: str) -> None:
+        """Handle ``__lifecycle__``: the window left, or a new one adopted us."""
+        if phase == "stop":
+            _log.info("window stopped; saving state (Python keeps running)")
+            self.save_state()
+            self._window_stopped = True
+            return
+        if phase == "resume":
+            _log.info("window resumed on the live interpreter")
+            self._window_stopped = False
+            self._apply_saved_state()
+            for screen in self.navigator.stack:
+                try:
+                    screen.on_start()
+                except Exception:
+                    _log.exception("Screen.on_start failed for %r", screen)
+            # A visible window needs a frame: the tree may have been patched
+            # while nothing was drawn.
+            current = self.navigator.current
+            if current is not None:
+                try:
+                    current.refresh()
+                except Exception:
+                    _log.exception("could not redraw after resume")
 
     def _event_loop(self) -> None:
         """Dispatch UI events until the platform asks us to stop.
@@ -575,6 +758,8 @@ class App:
                 try:
                     if kind == WAKE_EVENT:
                         self._run_ui_calls()
+                    elif kind == LIFECYCLE_EVENT:
+                        self._lifecycle(value)
                     else:
                         self.handle_ui_event(widget_id, kind, value)
                 except Exception:
@@ -647,9 +832,16 @@ class App:
         preview — funnels through here, so the batching lives inside rather
         than being something each caller has to remember to wrap.
         """
-        # П-10: track UI-event depth so Navigator._discard can defer clearing
+        # Track UI-event depth so Navigator._discard can defer clearing
         # a popped screen's ``_app`` until the current handler returns. Then
         # code like ``self.app.pop(); self.app.theme`` still works.
+        if self._window_stopped and kind not in (WAKE_EVENT, LIFECYCLE_EVENT):
+            # The window is gone but the interpreter is not: a tap that arrives
+            # behind the stop belongs to whatever the user is looking at now.
+            # Dropping it here covers every front end; the device also refuses
+            # to queue one, which is the cheaper of the two.
+            _log.debug("ignoring %s on %s: the window is stopped", kind, widget_id)
+            return
         self._in_ui_dispatch += 1
         try:
             with self._ui_lock, self.batch():
@@ -678,6 +870,30 @@ class App:
             # activity is no longer recreated for it). Apps that follow the
             # device language react with: app.on("app:locale", ...).
             self.events.emit("app:locale", source=value)
+            return
+        if kind == "insets":
+            # The keyboard opened or closed (the window handles the system bars
+            # itself). Apps that want to react — scroll to the field being
+            # typed into, hide a bottom bar — listen on "app:insets".
+            try:
+                height = int(str(value).strip() or "0")
+            except ValueError:
+                height = 0
+            # ``source`` is typed as str on the bus; the height travels as a
+            # string and listeners can int() it, or read ``event.value``.
+            self.events.emit("app:insets", source=str(height))
+            return
+        if kind == "theme":
+            # The system switched light/dark. ``uiMode`` is in configChanges, so
+            # the activity survives and this event is the only thing that tells
+            # Python; an app that picks its palette by hand listens on
+            # "app:system-theme", one that set ``follow_system_theme`` switches
+            # by itself.
+            dark = str(value).strip().lower() == "dark"
+            self._system_dark = dark
+            if self.follow_system_theme:
+                self._apply_system_theme(dark)
+            self.events.emit("app:system-theme", source="dark" if dark else "light")
             return
 
         screen = self.navigator.current
@@ -731,6 +947,10 @@ class App:
                 widget.increment()
             elif kind == "decrement" and hasattr(widget, "decrement"):
                 widget.decrement()
+            elif kind == "submit" and hasattr(widget, "submit"):
+                # The keyboard's action key (Enter, "Go", "Done"). TextInput.submit
+                # takes no value: the field already holds what was typed.
+                widget.submit()
             elif kind == "search" and hasattr(widget, "submit"):
                 widget.submit()
             elif kind == "load_more" and hasattr(widget, "_ui_load_more"):
@@ -766,7 +986,7 @@ class App:
         """Null out the ``_app`` reference of screens popped during dispatch.
 
         Runs at the end of :meth:`handle_ui_event` once the outermost handler
-        has returned (П-10).
+        has returned.
         """
         import contextlib
 
@@ -793,6 +1013,33 @@ class App:
                 _log.exception("finish_app failed")
         self.stop()
 
+    # -- secrets -----------------------------------------------------------
+    def save_secret(self, name: str, value: str) -> bool:
+        """Store ``value`` behind the platform keystore (Android) or in memory.
+
+        A ``Storage`` file is plain JSON: an API token written there sits in the
+        app's data directory in the clear, inside every backup. This keeps it
+        encrypted with a key the Android keystore holds, so only this app on
+        this device can read it back.
+        """
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("secret name must be a non-empty string")
+        if not isinstance(value, str):
+            raise TypeError("secret value must be a string")
+        return bool(self.bridge.store_secret(name, value))
+
+    def load_secret(self, name: str) -> str | None:
+        """The secret stored under ``name``, or ``None``."""
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("secret name must be a non-empty string")
+        return self.bridge.load_secret(name)
+
+    def delete_secret(self, name: str) -> bool:
+        """Forget ``name``; ``False`` when it was not there."""
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("secret name must be a non-empty string")
+        return bool(self.bridge.delete_secret(name))
+
     def stop(self) -> None:
         """Shut the app down and release subscriptions.
 
@@ -809,6 +1056,9 @@ class App:
         # (app.repeat_job() before run()), and those used to survive stop()
         # because the early return below skipped this line.
         self.jobs.shutdown()
+        # Idle keep-alive sockets: leaving them open after stop() would keep
+        # the process's fds alive and confuse a restart in the same process.
+        self.http.close()
         self._stopped = True
         if not self._running:
             return
@@ -835,7 +1085,7 @@ class App:
                 finally:
                     self.events.clear()
                 _log.info("stopped %s", self.name)
-        # П-10: drop any deferred screen references at shutdown.
+        # Drop any deferred screen references at shutdown.
         self._in_ui_dispatch = 0
         self._flush_detach_queue()
 
@@ -947,9 +1197,7 @@ class App:
             if bar is not None and bar.visible:
                 tree["snackbar"] = bar.to_dict()
             native_navigation = (
-                self._pending_navigation
-                if getattr(self.bridge, "native_widgets", False)
-                else None
+                self._pending_navigation if getattr(self.bridge, "native_widgets", False) else None
             )
             self._check_widget_types(tree)
             # Qualify the ids the front end will echo back (see _resolve_wire_id).
@@ -998,6 +1246,20 @@ class App:
         """
         if not getattr(self.bridge, "native_widgets", False):
             return
+        # A19: the Android renderer draws local files only. An http(s) or data
+        # source is accepted by Image() and drawn by every desktop preview, so
+        # the phone showed an empty box and the log line was the only clue.
+        for source in _remote_image_sources(tree):
+            if source in self._warned_remote_images:
+                continue
+            self._warned_remote_images.add(source)
+            shown = source[:64] + ("…" if len(source) > 64 else "")
+            _log.warning(
+                "Image(source=%r) cannot be drawn on Android: the device renderer "
+                "loads local files only. Download it to the app's files directory "
+                "and pass that path, or keep it as a bundled asset.",
+                shown,
+            )
         for name in sorted(unknown_types(tree, renderer="android")):
             if name in self._warned_unknown_types:
                 continue

@@ -1,0 +1,30 @@
+version: 2
+
+# Actions pinned by SHA in `.github/workflows/` are updated by the
+# `github-actions` group; the comment next to each pin names the release it
+# came from, so a diff shows "v4.1.7 → v4.2.1" and not a bare hash.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+    labels: ["dependencies", "ci"]
+
+  # Runtime and test dependencies. `[dev]` extras carry pytest, ruff and mypy,
+  # so a broken release of one of them arrives as a PR instead of as a red
+  # build on main.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    labels: ["dependencies"]

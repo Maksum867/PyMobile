@@ -183,3 +183,42 @@ def test_logs_follow_uses_pid_filter(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert main(["-c", str(tmp_path), "logs", "--follow"]) == 0
     assert commands[-1][-4:] == ["logcat", "--pid=42", "-v", "threadtime"]
+
+
+def test_the_disk_check_measures_the_sdk_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil as real_shutil
+
+    import pymobile.cli  # noqa: F401  (cli_tools imports cli; order matters)
+    from pymobile import cli_tools
+    from pymobile.compiler import sdk_installer
+
+    home = tmp_path / "andro"
+    home.mkdir()
+    monkeypatch.setenv("PYMOBILE_SDK_HOME", str(home))
+    measured: list[Path] = []
+    real_disk_usage = real_shutil.disk_usage
+
+    def spy(path: object) -> object:
+        measured.append(Path(str(path)))
+        return real_disk_usage(str(home))
+
+    monkeypatch.setattr(sdk_installer, "default_sdk_home", lambda: home)
+    monkeypatch.setattr(real_shutil, "disk_usage", spy)
+    monkeypatch.setattr(cli_tools.shutil, "disk_usage", spy)
+
+    cli_tools._check_install_space()
+    assert measured and measured[0] == home
+
+
+def test_the_disk_check_walks_up_to_an_existing_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pymobile.cli  # noqa: F401
+    from pymobile import cli_tools
+    from pymobile.compiler import sdk_installer
+
+    missing = tmp_path / "not-yet" / "andro"
+    monkeypatch.setattr(sdk_installer, "default_sdk_home", lambda: missing)
+    cli_tools._check_install_space()  # must not raise on a missing directory

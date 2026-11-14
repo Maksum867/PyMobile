@@ -23,6 +23,7 @@ class _ChromeLayout(_MockupContext):
         pt.arc(x + b.w / 2, y + b.h / 2, 10, -90, 200, self.p["PRIMARY"], 3)
 
     def paint_chrome(self, pt: _Painter, width: float, title: str, *, back: bool = False) -> None:
+        """Draw the status bar and the app bar above the screen content."""
         primary = self.p["PRIMARY"]
         status = _mix(primary, (0, 0, 0, 255), 0.2)
         white = _rgba(_readable_on("#{:02X}{:02X}{:02X}".format(*status[:3])))
@@ -50,6 +51,7 @@ class _ChromeLayout(_MockupContext):
     def paint_dialog(
         self, pt: _Painter, node: dict[str, Any], screen: tuple[float, float, float, float]
     ) -> None:
+        """Draw a dialog over the dimmed screen content."""
         sx, sy, sw, sh = screen
         props = node.get("props") or {}
         sheet = bool(props.get("sheet"))
@@ -84,6 +86,7 @@ class _ChromeLayout(_MockupContext):
     def paint_snackbar(
         self, pt: _Painter, data: dict[str, Any], screen: tuple[float, float, float, float]
     ) -> None:
+        """Draw the snackbar at the bottom of the screen."""
         sx, sy, sw, sh = screen
         dark = self.p["dark"]
         bg = (0xE6, 0xE6, 0xE6, 255) if dark else (0x32, 0x32, 0x32, 255)

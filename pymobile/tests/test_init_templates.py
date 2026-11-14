@@ -24,8 +24,9 @@ def test_every_template_generates_a_project(tmp_path: Path, template: str) -> No
 
 def test_templates_produce_different_main_files(tmp_path: Path) -> None:
     texts = {
-        name: (create_project(tmp_path / name, "Demo", template=name).directory / "main.py")
-        .read_text(encoding="utf-8")
+        name: (
+            create_project(tmp_path / name, "Demo", template=name).directory / "main.py"
+        ).read_text(encoding="utf-8")
         for name in TEMPLATES
     }
     assert len(set(texts.values())) == len(TEMPLATES)

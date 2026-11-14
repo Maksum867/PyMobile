@@ -8,7 +8,9 @@ build fails with a clear message instead of a broken APK.
 
 from __future__ import annotations
 
+import base64
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
@@ -51,7 +53,7 @@ RUNTIME_MIN_SDK = 24
 #: scaffolded ``README.md`` out of the APK so a fresh project builds with no
 #: "not packaged" warning.
 #:
-#: Secret-like filenames are excluded by default (П-03): shipping keystores,
+#: Secret-like filenames are excluded by default: shipping keystores,
 #: private keys or env files inside an APK leaks credentials the moment the
 #: APK is unzipped.  ``google-services.json`` is intentionally **not** here —
 #: it is a Firebase config that must ship; projects that name a file
@@ -76,7 +78,7 @@ DEFAULT_EXCLUDE: tuple[str, ...] = (
     # the default output_dir; a project that keeps the default must not ship
     # the previous APK (see BuildPipeline._warn_unexcluded_output)
     "apk/**",
-    # secret-like files (П-03)
+    # secret-like files
     ".env",
     ".env.*",
     "*.jks",
@@ -90,11 +92,23 @@ DEFAULT_EXCLUDE: tuple[str, ...] = (
     "secrets.*.json",
     "credentials.json",
     "credentials.*.json",
+    # A folder is matched by name, not only the exact `secrets/` one: projects
+    # keep credentials in `secret/`, `config/private/`, `.aws/`. S6 in the 3.1
+    # audit was a plain `secret/notes.txt` inside an APK.
+    "secret/**",
+    ".aws/**",
+    ".ssh/**",
+    "*.p12",
+    "*.pfx",
+    "*.ovpn",
+    "token.json",
+    "tokens.json",
+    "auth.json",
 )
 
 #: File basenames that look like secrets (used to emit a warning when a
 #: matching file is **not** covered by an exclude pattern, so the user notices
-#: before shipping).  П-03.
+#: before shipping).
 SECRET_LIKE_BASENAMES: frozenset[str] = frozenset(
     {
         ".env",
@@ -151,8 +165,9 @@ class ProjectConfig:
     #: Projects created before 0.8.0 say ``min_sdk = 21``; that still loads,
     #: but the APK declares :attr:`effective_min_sdk` and the build warns.
     min_sdk: int = RUNTIME_MIN_SDK
-    #: Android API level the app is tested against.
-    target_sdk: int = 35
+    #: Android API level the app is tested against. 36 is what Google Play
+    #: requires for new apps and updates from 31 August 2026.
+    target_sdk: int = 36
     #: Screen orientation, for example "portrait" or "landscape".
     orientation: str = "portrait"
     #: Android permissions the app asks for, for example android.permission.CAMERA.
@@ -162,6 +177,14 @@ class ProjectConfig:
     #: Let Android back up the app's private data (cloud backup, adb backup).
     #: Off by default: the store often holds tokens and personal data.
     allow_backup: bool = False
+    #: Trust only these certificates for the listed domains, ignoring the
+    #: device's user-installed roots (a corporate proxy, a "Wi-Fi inspector"
+    #: app, a malware profile with a CA). TOML:
+    #: ``[network.pins] "api.example.com" = ["sha256/AAAA…="]`` — a pin is a
+    #: base64 SHA-256 of the certificate's SubjectPublicKeyInfo, the same string
+    #: ``openssl`` prints. Only domains listed are pinned; the rest of the app
+    #: keeps the system trust store.
+    network_pins: dict[str, list[str]] = field(default_factory=dict)
 
     # -- build -------------------------------------------------------------
     #: CPU architectures to build for: arm64-v8a for phones, x86_64 for the emulator.
@@ -204,7 +227,7 @@ class ProjectConfig:
 
     # -- validation --------------------------------------------------------
     def __post_init__(self) -> None:
-        # П-05: coerce path-like scalars to strings early so a Path value
+        # Coerce path-like scalars to strings early so a Path value
         # (e.g. passed from the API) round-trips cleanly, then validate()
         # runs the type gates before any range/path arithmetic.
         self.root = Path(self.root).resolve()
@@ -212,7 +235,7 @@ class ProjectConfig:
             self.source_dir = str(self.source_dir)
         if isinstance(self.output_dir, Path):
             self.output_dir = str(self.output_dir)
-        # П-04: "no"/"yes"/"true"/"false" strings are a common TOML typo.
+        # "no"/"yes"/"true"/"false" strings are a common TOML typo: refuse them.
         for bool_field in (
             "allow_backup",
             "optimize",
@@ -229,7 +252,7 @@ class ProjectConfig:
                 elif low in ("false", "no", "off", "0", ""):
                     setattr(self, bool_field, False)
                 # leave other strings for the type gate in validate()
-        # П-01/П-02: normalize list fields defensively.
+        # Normalise list fields defensively: a bare string is one entry, not characters.
         for list_field in ("permissions", "abis", "asset_suffixes", "dependencies"):
             value = getattr(self, list_field)
             if value is None:
@@ -254,7 +277,7 @@ class ProjectConfig:
 
     def validate(self) -> None:
         """Raise :class:`ConfigError` if any field is invalid."""
-        # ---- type gates (П-01, П-02, П-04, П-05, П-15) -------------------
+        # ---- type gates ---------------------------------------------------
         # These come first so a wrong type gives a helpful message instead
         # of a raw ``TypeError`` from a downstream range/path comparison.
         self._check_type("name", self.name, str)
@@ -369,7 +392,7 @@ class ProjectConfig:
 
         # Normalise permissions now so every caller (manifest, info --json,
         # warnings) sees the fully-qualified form that actually ends up in
-        # the APK. П-23.
+        # the APK.
         from ..core.api.permissions import normalize as _norm_perm
 
         self.permissions = [_norm_perm(p) for p in self.permissions]
@@ -380,6 +403,37 @@ class ProjectConfig:
                     f"Invalid asset suffix {suffix!r}",
                     hint="Write extensions with a leading dot, e.g. asset_suffixes = ['.csv'].",
                 )
+        if not isinstance(self.network_pins, Mapping):
+            raise ConfigError("`network_pins` must map a domain to a list of pins")
+        for domain, pins in self.network_pins.items():
+            if not isinstance(domain, str) or not domain.strip() or "/" in domain:
+                raise ConfigError(
+                    f"`network_pins` key {domain!r} is not a domain "
+                    "(use `api.example.com`, without a scheme or a path)"
+                )
+            if isinstance(pins, str) or not isinstance(pins, Sequence) or not pins:
+                raise ConfigError(f"`network_pins[{domain!r}]` must be a non-empty list of pins")
+            for pin in pins:
+                if not isinstance(pin, str) or not pin:
+                    raise ConfigError(
+                        f"`network_pins[{domain!r}]` entry {pin!r} is not a pin: "
+                        'a pin looks like "sha256/<base64 of the SPKI digest>"'
+                    )
+                # Both forms are accepted: the one openssl prints with the
+                # algorithm prefix, and the bare base64 Android's XML wants.
+                encoded = pin[len("sha256/") :] if pin.startswith("sha256/") else pin
+                try:
+                    raw = base64.b64decode(encoded, validate=True)
+                except Exception as error:
+                    raise ConfigError(
+                        f"`network_pins[{domain!r}]` entry {pin!r} is not valid base64: {error}"
+                    ) from error
+                if len(raw) != 32:
+                    raise ConfigError(
+                        f"`network_pins[{domain!r}]` entry {pin!r} is {len(raw)} bytes, "
+                        "expected 32 (SHA-256)"
+                    )
+
         unknown_abis = [abi for abi in self.abis if abi not in _ABI_CHOICES]
         if unknown_abis:
             raise ConfigError(
@@ -430,13 +484,34 @@ class ProjectConfig:
 
     @property
     def apk_name(self) -> str:
-        """File name of the produced APK.
+        """File name of the installable (native) APK.
 
         Names written in a non-Latin script strip to nothing under the ASCII
         filter — and so do names whose Latin residue is digits only,
         ``Нотатки 2`` (com.example.notes) strips to ``2`` — so the last
         package segment is used instead of a generic or digit-only file name:
         both yield ``notes-0.1.0.apk``.
+
+        Use :meth:`apk_name_for` when the build mode is known: a structural
+        package gets its own name instead of overwriting this one.
+        """
+        return self.apk_name_for("native")
+
+    def apk_name_for(self, mode: str | None = None) -> str:
+        """File name of the APK a build in ``mode`` produces.
+
+        ``mode`` is :meth:`pymobile.compiler.pipeline.BuildPipeline.build_mode`
+        — ``native``, ``native+java``, ``structural`` and their variants. A
+        structural build is not installable, so its artifact is named
+        ``…-debug.apk``, the usual Android convention, and a following
+        ``build --native`` cannot mistake it for its own output. The two used to
+        share one name, so a quick structural build silently left an
+        uninstallable file where ``pymobile install`` looked for the APK — and
+        the install then failed with a signature error that said nothing about
+        the real cause.
+
+        An unknown mode is treated as native: the plain name belongs to the
+        installable artifact.
         """
         safe = re.sub(r"[^A-Za-z0-9._-]+", "-", self.name).strip("-.").lower()
         if not re.search(r"[a-z]", safe):
@@ -445,6 +520,8 @@ class ProjectConfig:
         # APK: it is suffixed with its ABI. The arm64 name is unchanged.
         abi = self.abis[0] if self.abis else "arm64-v8a"
         suffix = "" if abi == "arm64-v8a" else f"-{abi}"
+        if mode is not None and not str(mode).startswith("native"):
+            suffix += "-debug"
         return f"{safe}-{self.version}{suffix}.apk"
 
     # -- serialisation -----------------------------------------------------
@@ -533,6 +610,16 @@ def load_config(path: str | Path | None = None) -> ProjectConfig:
                     ) from exc
         if isinstance(project, dict) and "dependencies" in project:
             values["dependencies"] = project["dependencies"]
+    # `[network.pins] "host" = ["sha256/…"]` nests under a TOML table, because
+    # a domain key with dots in it (`api.example.com`) cannot be written flat.
+    # A single flat `network_pins = { … }` value is accepted as well.
+    network = raw.get("network")
+    if isinstance(network, dict):
+        # `[network.pins]` is a TOML table (a dotted host key cannot be a flat
+        # key), and `[network]` must not reach ProjectConfig as an unknown key.
+        values.pop("network", None)
+        if isinstance(network.get("pins"), dict):
+            values.setdefault("network_pins", dict(network["pins"]))
     return ProjectConfig.from_dict(values, root=candidate.parent)
 
 

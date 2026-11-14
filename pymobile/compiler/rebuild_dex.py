@@ -84,6 +84,7 @@ def rebuild(output: Path | None = None) -> Path:
 
 
 def main() -> int:
+    """Rebuild or check the bundled dex; ``--check`` verifies the recorded hashes."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="check bundled dex source provenance")
     parser.add_argument("--output", type=Path, help="write a separate dex and provenance manifest")

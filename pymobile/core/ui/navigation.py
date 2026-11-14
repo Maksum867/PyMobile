@@ -32,7 +32,7 @@ class BottomNavigation(Widget):
         )
 
     Options may also be ``(value, label)`` pairs for stable identifiers with
-    localised labels (П-11).
+    localised labels.
     """
 
     type_name = "BottomNavigation"
@@ -64,6 +64,7 @@ class BottomNavigation(Widget):
 
     @value.setter
     def value(self, value: str) -> None:
+        """The key of the selected tab; assigning it behaves like tapping it."""
         self.select(value)
 
     @property
@@ -85,7 +86,7 @@ class BottomNavigation(Widget):
             self._value = value
             self.invalidate()
             # Picking the initial tab while build() assembles the shell must not
-            # call the handler: it is the trap BUG-25 removed everywhere else.
+            # call the handler: the same trap that is closed everywhere else.
             if self.on_select is not None and not in_build_scope():
                 self.on_select(value)
 
@@ -94,6 +95,7 @@ class BottomNavigation(Widget):
         self.select(value)
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the tabs, their labels, the selection and the callback."""
         return {
             **super().props(),
             "options": list(self.options),

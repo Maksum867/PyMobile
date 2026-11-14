@@ -501,7 +501,7 @@ class TestRunGui:
         assert build_parser().parse_args(["run", "--gui"]).gui is True
 
     def test_web_host_defaults_to_loopback(self) -> None:
-        """The preview is a private window by default (PM-28).
+        """The preview is a private window by default.
 
         It was bound to 0.0.0.0 out of the box — readable and clickable by
         anything that could reach the port, with no authentication. Serving

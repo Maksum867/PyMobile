@@ -49,6 +49,9 @@ class StubBridge(Bridge):
         self.clipboard = ""
         #: Every :meth:`share` call, in order.
         self.shared: list[dict[str, str]] = []
+        #: Secrets written through :meth:`store_secret`; a desktop run keeps
+        #: them in memory only, which is the honest answer to "no keystore".
+        self.secrets: dict[str, str] = {}
         #: Players and recorders created through this bridge, for assertions.
         self.players: list[StubAudioPlayer] = []
         self.recordings: list[StubAudioRecorder] = []
@@ -77,10 +80,12 @@ class StubBridge(Bridge):
         self.recordings.clear()
 
     def is_available(self) -> bool:
+        """The stub answers every call, so it is always available."""
         return True
 
     # -- notifications -----------------------------------------------------
     def ensure_channel(self, channel_id: str, channel_name: str, importance: int) -> None:
+        """Record the notification channel request; nothing is created."""
         self._record(
             "ensure_channel",
             channel_id=channel_id,
@@ -89,28 +94,35 @@ class StubBridge(Bridge):
         )
 
     def notify(self, spec: NotificationSpec) -> None:
+        """Store the notification and record the call."""
         self.notifications[spec.notification_id] = spec
         self._record("notify", id=spec.notification_id, title=spec.title, body=spec.body)
 
     def cancel_notification(self, notification_id: int) -> None:
+        """Drop the stored notification and record the call."""
         self.notifications.pop(notification_id, None)
         self._record("cancel_notification", id=notification_id)
 
     # -- vibration ---------------------------------------------------------
     def vibrate(self, milliseconds: int, amplitude: int) -> None:
+        """Record a one-shot vibration; no device is touched."""
         self._record("vibrate", milliseconds=milliseconds, amplitude=amplitude)
 
     def vibrate_pattern(self, pattern: list[int], repeat: int) -> None:
+        """Record a vibration pattern; no device is touched."""
         self._record("vibrate_pattern", pattern=list(pattern), repeat=repeat)
 
     def cancel_vibration(self) -> None:
+        """Record that any vibration should stop."""
         self._record("cancel_vibration")
 
     # -- permissions -------------------------------------------------------
     def has_permission(self, permission: str) -> bool:
+        """Whether the permission was granted to this stub."""
         return permission in self.granted
 
     def request_permissions(self, permissions: list[str]) -> dict[str, bool]:
+        """Grant the permissions this stub was told to grant and report the outcome."""
         self._record("request_permissions", permissions=list(permissions))
         result: dict[str, bool] = {}
         for permission in permissions:
@@ -122,32 +134,39 @@ class StubBridge(Bridge):
 
     # -- ui ----------------------------------------------------------------
     def toast(self, message: str, long: bool = False) -> None:
+        """Record a toast message."""
         self._record("toast", message=message, long=long)
 
     def render(self, tree: dict[str, Any]) -> None:
+        """Remember the latest tree and record how big it was."""
         self.last_tree = tree
         self._record("render", root=tree.get("type"), children=len(tree.get("children", ())))
 
     # -- files -------------------------------------------------------------
     def pick_file(self, accept: str = "*/*", *, multiple: bool = False) -> list[PickedFile]:
+        """Return the file picks this stub was given, filtered by nothing."""
         self._record("pick_file", accept=accept, multiple=multiple)
         return [PickedFile(path) for path in self.file_picks]
 
     def pick_image(self) -> list[PickedFile]:
+        """Return the file picks this stub was given."""
         self._record("pick_image")
         return [PickedFile(path) for path in self.file_picks]
 
     # -- clipboard ---------------------------------------------------------
     def copy_to_clipboard(self, text: str) -> bool:
+        """Keep the text where :meth:`clipboard_text` can read it back."""
         self.clipboard = text
         self._record("copy_to_clipboard", text=text)
         return True
 
     def clipboard_text(self) -> str:
+        """The text last copied, or an empty string."""
         return self.clipboard
 
     # -- share sheet -------------------------------------------------------
     def share(self, text: str = "", url: str = "", subject: str = "") -> bool:
+        """Record what was shared and report success."""
         self.shared.append({"text": text, "url": url, "subject": subject})
         self._record("share", text=text, url=url, subject=subject)
         return True
@@ -161,13 +180,34 @@ class StubBridge(Bridge):
         return player
 
     def audio_recorder(self, *, directory: str = "") -> Any:
+        """A recorder that writes a small file instead of recording sound."""
         recorder = StubAudioRecorder(Path(self.recordings_dir or directory or "."))
         self.recordings.append(recorder)
         self._record("audio_recorder", directory=str(recorder.directory))
         return recorder
 
     # -- locale ------------------------------------------------------------
+    # -- secrets -----------------------------------------------------------
+    def store_secret(self, name: str, value: str) -> bool:
+        # The value is deliberately not recorded: a call log that quotes a
+        # secret is exactly what this API exists to avoid.
+        """Keep the secret in memory and record the call without the value."""
+        self._record("store_secret", secret=name)
+        self.secrets[name] = value
+        return True
+
+    def load_secret(self, name: str) -> str | None:
+        """The secret stored under ``name``, or an empty string."""
+        self._record("load_secret", secret=name)
+        return self.secrets.get(name)
+
+    def delete_secret(self, name: str) -> bool:
+        """Forget the secret and report whether it was there."""
+        self._record("delete_secret", secret=name)
+        return self.secrets.pop(name, None) is not None
+
     def device_language(self) -> str:
+        """The language tag this stub was configured for."""
         return self.language
 
 
@@ -204,33 +244,43 @@ class StubAudioPlayer:
         return self.offset + int((time.monotonic() - self.started_at) * 1000)
 
     def play(self) -> None:
+        """Start the fake clock: time advances, but nothing is heard."""
         self.started_at = time.monotonic()
 
     def pause(self) -> None:
+        """Freeze the clock and remember the position."""
         self.offset = self._now()
 
     def stop(self) -> None:
+        """Freeze the clock and rewind to the start."""
         self.offset = 0
 
     def seek(self, position_ms: int) -> None:
+        """Move the position to ``position_ms``, clamped to the clip."""
         self.offset = max(0, int(position_ms))
 
     def position(self) -> int:
+        """How far the clip has played, from the fake clock."""
         return self._now()
 
     def duration(self) -> int:
+        """The length of the clip, as the stub was told it."""
         return self.duration_ms
 
     def is_playing(self) -> bool:
+        """Whether the fake clock is running."""
         return not self.released and self._now() < self.duration_ms
 
     def set_looping(self, looping: bool) -> None:
+        """Remember whether playback should repeat."""
         self.looping = bool(looping)
 
     def set_volume(self, volume: float) -> None:
+        """Remember the volume, clamped to 0.0..1.0."""
         self.volume = float(volume)
 
     def release(self) -> None:
+        """Stop playback and free the fake player."""
         self.released = True
 
 
@@ -244,6 +294,7 @@ class StubAudioRecorder:
         self.target: Path | None = None
 
     def start(self) -> None:
+        """Create an empty file in place of a recording and start the clock."""
         self.started_at = time.monotonic()
         self.active = True
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -251,18 +302,22 @@ class StubAudioRecorder:
         self.target.write_bytes(b"pymobile-stub-recording")
 
     def is_recording(self) -> bool:
+        """Whether the fake recorder has been started and not stopped."""
         return self.active
 
     def elapsed_ms(self) -> int:
+        """How long the fake recording has been running."""
         if not self.active:
             return 0
         return int((time.monotonic() - self.started_at) * 1000)
 
     def stop(self) -> str:
+        """Stop the clock and return the path of the empty file."""
         self.active = False
         return str(self.target) if self.target is not None else ""
 
     def cancel(self) -> None:
+        """Stop the clock and delete the empty file."""
         self.active = False
         if self.target is not None:
             self.target.unlink(missing_ok=True)

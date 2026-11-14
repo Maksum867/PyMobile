@@ -100,6 +100,10 @@ def _has_name(kind: str, props: Mapping[str, Any]) -> bool:
         "IconButton": "label",
         "FloatingActionButton": "label",
         "Link": "text",
+        # A check box carries its own label, but it was missing from this table:
+        # check-ui reported the most ordinary `Checkbox(text="Remember me")` as
+        # an unnamed control.
+        "Checkbox": "text",
         "RadioButton": "text",
         "RangeSlider": "label",
         "ListTile": "title",
@@ -141,8 +145,10 @@ def _natural_width(node: Mapping[str, Any], available: float) -> float | None:
     elif kind == "Dropdown":
         estimate = max(112.0, _text_width(props.get("value", ""), style.get("font_size"), 32.0))
     elif kind in {"Switch", "Checkbox", "RadioButton"}:
-        estimate = 48.0 if kind != "RadioButton" else max(
-            80.0, _text_width(props.get("text", ""), style.get("font_size"), 48.0)
+        estimate = (
+            48.0
+            if kind != "RadioButton"
+            else max(80.0, _text_width(props.get("text", ""), style.get("font_size"), 48.0))
         )
     elif kind in {"Slider", "RangeSlider"}:
         estimate = 160.0
@@ -372,9 +378,7 @@ def audit_ui(
         if not isinstance(children, (list, tuple)):
             return
         visible = [
-            child
-            for child in children
-            if isinstance(child, Mapping) and child.get("visible", True)
+            child for child in children if isinstance(child, Mapping) and child.get("visible", True)
         ]
         own_width = fixed_width if fixed_width is not None else limit
         content_width = max(0.0, own_width - padding[0] - padding[2])
@@ -384,8 +388,7 @@ def audit_ui(
             widths = [
                 _natural_width(child, content_width)
                 for child in visible
-                if child.get("type") not in {"Expanded", "Flexible"}
-                and not _has_weight(child)
+                if child.get("type") not in {"Expanded", "Flexible"} and not _has_weight(child)
             ]
             if all(value is not None for value in widths):
                 total = sum(value or 0.0 for value in widths) + spacing * max(0, len(visible) - 1)

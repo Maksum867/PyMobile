@@ -836,7 +836,9 @@ class TestScreensAsTabs:
         assert capsys.readouterr().err.count("nothing displays it") == 1
 
     def test_refresh_on_a_stacked_screen_is_quiet(
-        self, bridge, capsys: pytest.CaptureFixture[str]  # type: ignore[no-untyped-def]
+        self,
+        bridge,
+        capsys: pytest.CaptureFixture[str],  # type: ignore[no-untyped-def]
     ) -> None:
         """A hidden screen keeps its rebuilt tree for when it comes back."""
         from pymobile.logging import configure
@@ -912,7 +914,9 @@ class TestScreensAsTabs:
         assert len(bridge.calls_named("render")) >= 1
 
     def test_a_tree_that_redraws_on_every_frame_is_stopped(
-        self, bridge, capsys: pytest.CaptureFixture[str]  # type: ignore[no-untyped-def]
+        self,
+        bridge,
+        capsys: pytest.CaptureFixture[str],  # type: ignore[no-untyped-def]
     ) -> None:
         from pymobile.logging import configure
 

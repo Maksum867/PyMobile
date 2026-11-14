@@ -103,6 +103,41 @@ def cmd_complete(args: argparse.Namespace) -> int:
     return 0
 
 
+def _check_install_space() -> None:
+    """Report free space where the SDK gets installed, not where the project lives.
+
+    ``build --native`` writes the SDK, build-tools and the Gradle caches into
+    ``PYMOBILE_SDK_HOME`` (``~/.andro`` by default) — a few GiB. The check used
+    to measure ``config.root``, so a project on a large disk and a home
+    directory on a small one passed the check and then failed mid-download with
+    ``No space left on device``; the reverse — a small project disk under a big
+    home — produced a warning that could not be acted on.
+    """
+    _out = cli._out
+    from .compiler import sdk_installer
+    from .compiler.toolchain import _sdk_root
+
+    install = sdk_installer.default_sdk_home()
+    try:
+        probe = install
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        free = shutil.disk_usage(probe).free
+    except OSError as exc:
+        _out.warn(f"could not check disk space for {install}: {exc}")
+        return
+    sdk = _sdk_root()
+    where = f"{install}" + (f" (SDK at {sdk})" if sdk and sdk.is_relative_to(install) else "")
+    if free < 1024**3:
+        _out.warn(f"only {free / 1024**3:.1f} GiB free in {where}; native setup needs ~1 GiB")
+        _out.hint(
+            "Point PYMOBILE_SDK_HOME at a larger disk, or free space, "
+            f"then run `{cli._invocation()} setup-sdk`."
+        )
+    else:
+        _out.ok(f"disk space: {free / 1024**3:.1f} GiB free in {where}")
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Check the environment and configuration."""
     _out, _load, _invocation = cli._out, cli._load, cli._invocation
@@ -160,15 +195,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         _out.warn("Desktop preview: not ready — the entry point is missing")
 
     _out.info("Native APK — project and toolchain checks")
-    try:
-        free = shutil.disk_usage(config.root).free
-        if free < 1024**3:
-            _out.warn(f"only {free / 1024**3:.1f} GiB free; native setup needs ~1 GiB")
-            _out.hint("Free disk space or choose another setup location with setup-sdk --path.")
-        else:
-            _out.ok(f"disk space: {free / 1024**3:.1f} GiB free")
-    except OSError as exc:
-        _out.warn(f"could not check disk space: {exc}")
+    _check_install_space()
 
     from .compiler.toolchain import ToolchainError, find_toolchain
 

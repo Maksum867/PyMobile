@@ -20,7 +20,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 
 > ### ⚠️ Alpha software — known bugs, actively being fixed
 >
-> PyMobile is at **0.14.x** and is still in alpha. It builds and signs real,
+> PyMobile is at **0.15.x** and is still in alpha. It builds and signs real,
 > installable APKs today, but the API can change between minor releases and
 > there are known bugs. I am actively working on them: fixes ship in
 > every release — see the
@@ -30,7 +30,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.14.0`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.15.0`) and read the
 > changelog before upgrading. What may change, and how much notice you get, is
 > written down in the
 > [versioning and deprecation policy](#versioning-and-deprecation-policy). Bug
@@ -82,7 +82,6 @@ the JDK for you.
 
 ## Table of contents
 
-- [What's new in 0.14.0](#whats-new-in-0140)
 - [Why PyMobile](#why-pymobile)
 - [Build diagnostics and APK size](#build-diagnostics-and-apk-size)
 - [Third-party Python packages (experimental)](#third-party-python-packages-experimental)
@@ -110,6 +109,7 @@ the JDK for you.
 - [Files, audio, the clipboard and sharing](#files-audio-the-clipboard-and-sharing)
 - [Permissions](#permissions)
 - [HTTP requests](#http-requests)
+- [Secrets](#secrets)
 - [Languages](#languages)
 - [Events](#events)
 - [Timers](#timers)
@@ -130,24 +130,6 @@ the JDK for you.
 - [Contributing](#contributing)
 - [Documentation](#documentation)
 - [License](#license)
-
----
-
-## What's new in 0.14.0
-
-Version 0.14.0 adds widgets for QR codes, tags, countdowns, Markdown, drawing
-and Bluetooth data, plus the Bluetooth permissions. The full list is in the
-[changelog](https://github.com/Maksum867/PyMobile/blob/main/CHANGELOG.md#0140--2026-11-11).
-
-- **New widgets:** [`QRCode`](#qrcode), [`TagInput`](#taginput),
-  [`Countdown`](#countdown), [`MarkdownText`](#markdowntext) and
-  [`SignaturePad`](#signaturepad).
-- **Bluetooth widgets:** [`SignalStrength`, `BatteryLevel`, `Radar` and
-  `ConnectionStatus`](#bluetooth-widgets). They show values your app provides;
-  the framework does not scan for devices yet.
-- **Bluetooth permissions:** `BLUETOOTH`, `BLUETOOTH_ADMIN`, `BLUETOOTH_SCAN` and
-  `BLUETOOTH_CONNECT`. See [Bluetooth](#bluetooth) under Permissions.
-- **Install the QR extra** with `pip install "pymobile-framework[qr]"`.
 
 ---
 
@@ -1372,6 +1354,60 @@ Style(
 CSS and `EdgeInsets.symmetric` read it in opposite orders, so write
 `EdgeInsets.symmetric(horizontal=16, vertical=8)` instead.
 
+### Borders, gradients and opacity
+
+```python
+Style(
+    border=Border(width=2, color="#C62828", sides="bottom"),   # a rule under a row
+    gradient=Gradient("#3F51B5", "#1A237E", direction="to_bottom_right"),
+    opacity=0.6,                                              # 0 invisible, 1 opaque
+    corner_radius=12,
+)
+```
+
+`Border` draws **inside** the widget's box, the way Android's
+`GradientDrawable.setStroke` does, so adding one never shifts a layout.
+`Border(color="#E0E0E0")` is a hairline; `sides="top right"` restricts the
+stroke to a subset. `Border(width=0)` removes it.
+
+`Gradient` takes a start and an end colour, an optional middle one
+(`Gradient("#FFFFFF", "#3F51B5", "#E8EAF6")`), or the full control of
+`stops=((0.0, "#FFFFFF"), (0.6, "#E8EAF6"), (1.0, "#3F51B5"))`. Stops must
+reach 0 and 1 — a ramp that stops halfway is stretched, which hides the
+mistake. `direction` is one of `to_bottom` (the default, and what Android draws
+when told nothing), `to_top`, `to_left`, `to_right`, `to_bottom_right`,
+`to_top_right`, `to_bottom_left`, `to_top_left`. When a style carries both a
+`background` and a `gradient`, the gradient is what is drawn; the flat colour
+is the fallback for renderers that cannot draw a ramp.
+
+`opacity` dims the widget **and its children**, like `View.setAlpha()` on the
+device. `0` on a screen-sized container means "no background of my own", so a
+themed parent shows through.
+
+### Typography
+
+```python
+Style(
+    font_size=TextScale.body,
+    font_family="Georgia, serif",   # or "serif", "monospace", "DejaVu Sans"
+    line_height=6,                  # extra dp between lines, not a multiplier
+    letter_spacing=0.5,             # extra dp between letters (may be negative)
+    text_transform="uppercase",     # or "lowercase", "capitalize"
+    max_lines=2,                    # implies text_overflow="ellipsis"
+    text_overflow="ellipsis",       # or "clip"
+    underline=False,
+    strikethrough=False,
+)
+```
+
+`line_height` is **dp, not a multiplier**: every other number in a `Style` is
+dp, and a value of `1.4` read as a multiplier would be 1.4 dp. `font_family`
+takes a font name or a comma-separated list; the phone uses the first name the
+device actually has and falls back to its default face, the PNG mockup resolves
+the same list against the fonts installed, and the desktop window checks Tk's
+family list before using it. `text_transform` is applied when the text is drawn,
+so the widget's `text` stays exactly what the app set.
+
 ### Spacing between specific neighbours
 
 `spacing` on a container applies the same gap everywhere. When one gap must
@@ -1903,6 +1939,21 @@ replays them over data you have since saved. A load or migration that fails
 blocks every later operation on that store with the same error instead of
 serving or rewriting the data it rejected.
 
+**Batching writes.** Every `set` rewrites the whole JSON file — about 1 ms on a
+store with 5000 keys, so 4000 writes cost 12.9 s. A store created with
+`deferred=True` marks the state dirty and writes once, 50 ms later:
+
+```python
+store = Storage("cache.json", deferred=True)
+for row in rows:
+    store.set(row["id"], row)      # one file write, not one per row
+store.flush()                      # ... or save(), or leave the app: both write
+```
+
+`save()`, `flush()` and a `transaction()` block always write immediately, the
+pending write is also flushed when the interpreter exits, and the default
+(`deferred=False`) keeps the old behaviour of writing on every change.
+
 Data persists across app restarts. On Android it uses the app's private files
 directory; on desktop `~/.pymobile/<package>.json` with the dots replaced by
 dashes (`com.example.notes` → `com-example-notes.json`), so two projects open
@@ -2001,6 +2052,26 @@ Missing migration steps, malformed records and data written by a newer app
 raise `ModelStoreError` rather than erasing the stored value. Keep each migration
 with the model version that introduces it, and test upgrades from stored data.
 
+**Finding records.** `all()` and `get()` are not the only readers: `find`,
+`count` and `get_by` filter on the stored records and decode only the page they
+return.
+
+```python
+from pymobile import Q
+
+tasks.find({"done": False})                                  # every field must match
+tasks.find(Q("done", "==", False) & Q("priority", ">=", 2))  # and / or / ~
+tasks.find({"done": False}, order_by="priority", limit=20, offset=40)
+tasks.find(lambda task: task.priority == 3)                  # a predicate on the model
+tasks.count({"done": True})                                  # no decoding at all
+tasks.get_by(title="Ship it")                                # first match or None
+```
+
+`Q` compares one field with `==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `not in`,
+`contains`, `startswith` or `endswith`. Writes keep an id index, so 1000 `put`
+calls take about 1.3 s instead of 5.2 s; a store that outgrows a single JSON
+array (about a megabyte) logs a warning suggesting `sqlite3`.
+
 ---
 
 ## Background jobs
@@ -2021,11 +2092,32 @@ handle.cancel()            # stop when done
 
 `JobHandle` exposes `.done`, `.cancelled`, `.result`, `.error`.
 
+Jobs run on a small pool of worker threads — twice the CPU count by default,
+never one thread per job: 500 queued jobs used to mean 500 threads. Set the
+limit with `JobManager(max_workers=4)`, or read it back as
+`app.jobs.max_workers`. A repeating job keeps its own thread, so a slow interval
+never parks a worker.
+
 `then()` callbacks run on the UI side (see
 [Threads and the UI](#threads-and-the-ui)). If `on_success` raises, the
 error is logged with its traceback and passed to `on_error`; the job's own
-`result` is kept. `cancel()` suppresses the callbacks; Python cannot interrupt a
-function that is already running, so `done` turns true only when it returns.
+`result` is kept.
+
+**Cancelling is a request, not an interruption.** `cancel()` stops the
+callbacks (`on_success`, `then`) and marks the handle, but the function itself
+runs to its last line — Python has no way to stop a thread mid-call, and
+`JobHandle.cancel()` deliberately does not pretend otherwise. Two consequences
+worth designing around:
+
+- a job that writes must check for cancellation at a safe point of its own
+  (`if handle.cancelled: return`) instead of assuming the write never happens;
+- a cancelled job still holds its worker until it returns, so a job that can
+  block for minutes belongs on its own thread (`app.jobs.submit(..., repeating=True)`
+  is the wrong tool — use a dedicated `threading.Thread` the app stops itself).
+
+A screen that navigates away while a job runs keeps the job; if its
+`on_success` touches widgets that no longer exist, guard it with
+`if self.is_current:`.
 
 ---
 
@@ -2507,15 +2599,57 @@ client.put("/items/1", json={"name": "Updated"})
 client.delete("/items/1")
 ```
 
-`retries`, `backoff`, `cache`, `security`, `user_agent` and `base_url` are set
-once on `HttpClient(...)`. A request accepts `json`, `data`, `headers`, `timeout` and
-`retry_safe`; `get` also takes `params`. Passing a client option to a verb, as in
+`retries`, `backoff`, `cache`, `security`, `user_agent`, `base_url`,
+`timeout_budget`, `max_redirects` and `max_workers` are set once on
+`HttpClient(...)`. A request accepts `json`, `data`, `files`, `compress`,
+`headers`, `timeout`, `retry_safe` and `stream`; `get` also takes `params`. Passing a client option to a verb, as in
 `client.get("/items", retries=2)`, raises a `TypeError` that says where the
 option belongs.
 
 `retries` applies only to GET, HEAD and OPTIONS. POST, PUT and DELETE are not
 retried automatically, because a retry could repeat a side effect. Pass
 `retry_safe=True` on one request to opt in.
+
+`timeout` bounds **one attempt**; `timeout_budget` bounds the **whole call**,
+retries and backoff included. `timeout=2, retries=3` used to take 8.4 s to
+give up:
+
+```python
+client = HttpClient(timeout=2, retries=3, timeout_budget=5)   # five seconds, at most
+```
+
+**Connections are reused.** One socket (and one TLS handshake) serves every
+request to the same host until the server or the client closes it; `close()`
+drops the idle sockets and `with HttpClient() as client:` does it for you.
+`App.stop()` closes `app.http`.
+
+**Compressed bodies are decoded.** The client asks for `gzip, deflate` and
+unpacks the body when a server compresses anyway, so `response.text` is text —
+a hand-set `Accept-Encoding: identity` no longer means raw gzip bytes.
+
+**Uploads.** `files=` builds a `multipart/form-data` body — the boundary, the
+CRLFs and the terminating part are handled once, correctly:
+
+```python
+client.post("/upload",
+            data={"title": "Holiday"},
+            files={"photo": ("p.jpg", b"...", "image/jpeg")})   # or a Path
+client.post("/events", json=big_payload, compress=True)          # gzip the request
+```
+
+**Downloads.** `stream=True` returns as soon as the headers arrive and leaves
+the body on the socket; `iter_content()` reads it in chunks and releases the
+connection, so a 30 MB file is not held in memory three times over:
+
+```python
+with client.get("/big.zip", stream=True) as response:
+    for chunk in response.iter_content(64 * 1024):
+        handle.write(chunk)
+```
+
+**Secrets.** A URL logged at debug level no longer carries its token:
+`access_token`, `token`, `api_key`, `secret`, `password`, `sig` and friends are
+masked as `***` (`redact_url()`), because a debug log ends up in logcat.
 
 Synchronous verbs return a `Response`; `HttpFuture.get()` returns the same
 object for an asynchronous request:
@@ -2574,6 +2708,29 @@ case-insensitively. The default policy allows everything, for local
 development.
 
 Remember to list `android.permission.INTERNET` in your config.
+
+---
+
+## Secrets
+
+An API token written to `Storage` sits in a plain JSON file inside the app's
+data directory, and inside every backup of it. `app.save_secret()` keeps it
+encrypted with a key the Android keystore holds, so only this app on this
+device can read it back:
+
+```python
+app.save_secret("api_token", token)     # True when stored
+token = app.load_secret("api_token")    # None when absent
+app.delete_secret("api_token")
+```
+
+On Android the value is sealed with AES-GCM; the key never leaves the keystore.
+The desktop stub keeps secrets in memory for the run, which is the honest answer
+to "there is no keystore here", and a bridge with no support raises
+`NotImplementedError` instead of writing the secret in the clear.
+
+A secret read after a reinstall or a restored backup comes back as `None` — the
+old key is gone — and the app asks the user to sign in again.
 
 ---
 
@@ -2886,13 +3043,22 @@ fix:
 never drops the `build/**` rule, so the output directory (and the previous APK
 inside it) is not packaged. The default `apk/` is excluded for the same reason. `exclude_only = true` turns that off and the build
 then warns when it can see that `output_dir` would ship itself. The defaults are
-exported as `pymobile.core.config.DEFAULT_EXCLUDE`. The 29 built-in patterns are:
+exported as `pymobile.core.config.DEFAULT_EXCLUDE`. The 38 built-in patterns are:
 
 - caches and build output: `**/__pycache__/**`, `**/*.pyc`, `**/*.pyo`, `build/**`, `dist/**`, `apk/**`, `.venv/**`, `venv/**`
 - tests: `**/tests/**`, `tests/**`, `**/test_*.py`
 - version control and editor folders: `.git/**`, `.github/**`, `.idea/**`, `.vscode/**`
 - documentation: `*.md`, so a `README.md` in the project is not packaged
-- secret-like files: `.env`, `.env.*`, `*.jks`, `*.keystore`, `*.pem`, `*.key`, `id_rsa`, `id_rsa.*`, `secrets/**`, `secrets.json`, `secrets.*.json`, `credentials.json`, `credentials.*.json`
+- secret-like files: `.env`, `.env.*`, `*.jks`, `*.keystore`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.ovpn`, `id_rsa`, `id_rsa.*`, `secrets/**`, `secret/**`, `secrets.json`, `secrets.*.json`, `credentials.json`, `credentials.*.json`, `.aws/**`, `.ssh/**`, `token.json`, `tokens.json`, `auth.json`
+
+Two of those rules are backed by code, not only by the list above: a file that
+looks like a credential (`.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`,
+`known_hosts`, `local.properties`, `id_rsa*`, `credentials.*`, `secrets.*`, any
+`*.pem`/`*.key`/`*.p12`/`*.pfx`/`*.ovpn`) is skipped even if a project's own
+`exclude` would have let it through, and the build lists what it kept out:
+`! kept out of the APK as credentials: .netrc`. An APK is a public ZIP archive
+— anything inside can be extracted, so a secret belongs in
+`app.save_secret()`, not in the project folder.
 
 If your app really needs one of these files, set `exclude_only = true` and write the patterns you want yourself.
 
@@ -2909,6 +3075,30 @@ print(config.name, config.package, config.effective_min_sdk)
 ```
 
 ---
+
+## First fifteen minutes
+
+```bash
+pip install pymobile
+python -m pymobile init --name Counter my-counter
+cd my-counter && python -m pymobile run
+```
+
+A window opens with the app that is now in `main.py`. No SDK, no device, no
+Java. When you want an APK:
+
+```bash
+python -m pymobile setup-sdk && python -m pymobile build --native
+```
+
+- **[Tutorial](docs/TUTORIAL.md)** — from an empty project to an installable APK,
+  one step at a time.
+- **[The five mistakes everyone makes](docs/BEGINNER-MISTAKES.md)** —
+  `super().__init__()`, `on_press=self.save()`, a missing `refresh()`, a string
+  where a widget belongs, an API key in the APK.
+- **[A complete app in one screen](docs/TUTORIAL.md#step-3-a-screen-is-a-class-with-a-build)** —
+  the tutorial builds a note list with a store, a screen that redraws and a
+  delete confirmation, step by step, so there is no folder to keep in sync.
 
 ## Building an APK
 
@@ -2940,6 +3130,80 @@ overrides it; `None` uses the build-mode default. A failed check stops with a
 message such as `Startup check failed: The app rendered nothing.` and exit code
 1 rather than a success message for a non-starting APK.
 
+### What the phone tells your app
+
+Three system events reach Python while the app is running. All three are
+dropped into `App.handle_ui_event`, so they work the same on every front end
+that sends them, and both can be ignored.
+
+| Event | Sent when | Payload |
+| --- | --- | --- |
+| `app:system-theme` | the system switches light/dark (`uiMode` is in `configChanges`, so the activity survives and this is the only notification) | `"dark"` or `"light"` |
+| `app:insets` | the keyboard opens or closes | the covered height in px, as a string |
+| `app:locale` | the system language changes | BCP-47 tag |
+
+```python
+app = App("Photos", follow_system_theme=True)   # palette follows the system
+app.on("app:insets", lambda event: self.scroll_to_field(int(event.source)))
+```
+
+Android specifics: the root container applies the system-bar, display-cutout
+and IME insets itself, so content never sits under a bar or under the keyboard
+(`SafeArea` is still there for the screens that want the space back). The
+manifest sets `supportsRtl` and margins are start/end, so Arabic and Hebrew
+mirror. Images are decoded on a worker thread, scaled to the view and rotated by
+their EXIF orientation — a 48 MP camera photo no longer freezes a frame or
+exhausts the heap.
+
+### Certificate pinning
+
+```toml
+# pymobile.toml
+[network.pins]
+"api.example.com" = ["sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="]
+```
+
+A pinned domain trusts **only** the listed certificates — the device's
+user-installed roots stop being accepted for it, which is what a corporate proxy,
+a "Wi-Fi inspector" app or a malware profile relies on to read HTTPS traffic.
+Domains you do not list keep the system trust store, and cleartext stays denied.
+
+A pin is the base64 SHA-256 of the certificate's SubjectPublicKeyInfo. Print one
+from the live server (and pin **two**, a current and a backup key, or a routine
+certificate rotation locks every installed app out):
+
+```bash
+openssl s_client -connect api.example.com:443 -servername api.example.com </dev/null   | openssl x509 -pubkey -noout   | openssl pkey -pubin -outform der   | openssl dgst -sha256 -binary | openssl enc -base64
+```
+
+### State across a destroyed window
+
+Android destroys an Activity for reasons that have nothing to do with the user
+leaving the app: back on the root screen then re-open, a configuration change
+that is not in `configChanges`, a low-memory UI restart. PyMobile keeps the
+interpreter alive through that and hands the next window the same app:
+
+```python
+class Draft(Screen):
+    def __init__(self):
+        super().__init__()
+        self.body = TextInput(id="body")     # text survives on its own
+
+    def on_stop(self) -> None:
+        self.app.save_state()                # framework state + on_stop hooks
+
+    def on_start(self) -> None:
+        self.app.restore_state()             # after a restart in a new process
+```
+
+`on_stop` runs when the window goes away, `on_start` when a new window adopts
+the screen; in between the app is alive but no longer takes input. Widget state
+(a field's text, a switch, a dropdown) is written to
+`app.storage`, under the `pymobile` namespace and keyed by widget id, so a
+process that does die and comes back shows the half-typed form instead of an
+empty one. Nothing here is a substitute for `Storage` — it covers what the
+window itself held, not your domain data.
+
 ### Build commands
 
 ```bash
@@ -2953,15 +3217,46 @@ pymobile build --native --minimal-stdlib   # drop desktop-only stdlib
 pymobile build --check-startup             # also validate a structural build
 pymobile build --native --no-ssl           # drop OpenSSL (no HTTPS)
 pymobile build --native --abi x86_64       # for the emulator
+pymobile build --native                   # honours abis = [...] in the config
 ```
 
+`abis = ["arm64-v8a", "x86_64"]` puts both architectures in one APK: it installs
+everywhere, and it is the size of both together. `--abi` still builds one, which
+is what you want for a device you know.
+
+`--debug` marks the native APK `android:debuggable`, so `adb shell run-as`,
+Layout Inspector and the Android Studio debugger can attach to it; it is
+refused together with `--keystore`, and it changes the artifact name's mode, so
+a debug APK is never reused for a release build.
+
+```bash
+pymobile build --native --bundle            # APK + the .aab Google Play needs
+```
+
+`--bundle` writes `apk/my-app-1.0.0.aab` beside the APK from the same manifest,
+dex, assets and native libraries, then checks it with bundletool: `validate`
+reads the whole bundle, and `build-apks --mode=universal` produces
+`my-app-1.0.0-universal.apks`, an APK you can install to see exactly what a Play
+install would deliver. Both steps need a JDK and `bundletool-all.jar`
+(download it from [google/bundletool](https://github.com/google/bundletool/releases)
+into `~/.andro/bundletool.jar`, or set `PYMOBILE_BUNDLETOOL`). Without them the
+`.aab` is still written and the build says it was **not** verified — never
+upload that one blind.
+
+Uploading: Play requires `targetSdkVersion` 36 for new apps and updates from
+31 August 2026, which is also PyMobile's default, and `setup-sdk` installs
+`platforms;android-36` so the classes are compiled against the level the
+manifest declares.
+
 > Without `--native` you get a lightweight structural package used for quick
-> checks. **It does not install on a device.**
+> checks. **It does not install on a device.** It is written to
+> `apk/my-app-1.0.0-debug.apk`, so it never overwrites — and is never mistaken
+> for — the installable `apk/my-app-1.0.0.apk` of a native build.
 
 After startup validation, a build with unchanged inputs can reuse its APK:
 
 ```
-✓ up to date: my-app-1.0.0.apk (16.2 MB)
+✓ up to date: my-app-1.0.0.apk (16.4 MB)
 ```
 
 The cache tracks application sources, configuration, icons, project-local Java
@@ -3061,7 +3356,7 @@ only the `.apk`.
 
 ### Size
 
-A hello-world APK is **16.2 MB** in 0.14.0, down from 21.6 MB in 0.2.0 and 16.6 MB in 0.3.0. The official
+A hello-world APK is **16.4 MB** in 0.15.0, down from 21.6 MB in 0.2.0 and 16.6 MB in 0.3.0. The official
 CPython Android runtime ships every support library twice — `libcrypto.so`
 and `libcrypto_python.so` are byte-identical, and only the `_python` names are
 actually linked — so 5 MB of each APK was the same three libraries repeated.
@@ -3226,7 +3521,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.14.0", "platform": "android",
+# {"framework_version": "0.15.0", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 
@@ -3780,7 +4075,12 @@ build error, never a silent fallback to an older dex. The renderer implements
 
 For full control, implement `Widget` yourself and register the type; or use
 `pymobile widget-java TYPE` to print the older in-framework `ViewBuilder.java`
-branch guide. `pymobile widget add` is the recommended project-local path; the
+branch guide. Building a widget *into* the framework touches five places (the
+widget, the capability table, the web and Tk previews, the ASCII/PNG previews
+and the Java renderer); [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md#adding-a-widget-the-whole-list)
+lists them one by one, and
+`pymobile/tests/test_renderer_parity_between_python_and_java.py` fails, naming
+the missing piece, when one is skipped. `pymobile widget add` is the recommended project-local path; the
 branch guide is for framework contributors who intentionally change the shared
 renderer.
 
@@ -4094,7 +4394,7 @@ mypy pymobile           # strict type checking
 
 | Area | Implementation |
 | --- | --- |
-| CLI | `cli.py` facade/shared helpers; `cli_parser.py` grammar; `cli_preview.py` preview/dev/watch/audit; `cli_device.py` adb/emulator/install |
+| CLI | `cli.py` facade/shared helpers; `cli_parser.py` grammar; `cli_build.py` build; `cli_preview.py` preview/dev/watch/audit; `cli_device.py` adb/emulator/install; `cli_errors.py` user-code error locations |
 | Mockup | `mockup.py` facade; `_mockup_colors`, `_mockup_fonts`, `_mockup_paint`, `_mockup_layout`, `_mockup_widgets`, `_mockup_chrome`; typed `_mockup_context` contract |
 | Android renderer | `ViewBuilder.java` facade/state owner; `ViewContainers`, `ViewControls`, `ViewInputs`, `ViewLists`, `ViewGestures`, `ViewStyles`, `ViewOverlays`, `ViewUpdates`; `FlowViews` wrapping layout |
 
@@ -4122,7 +4422,7 @@ With the SDK/JDK available, also exercise source-built and prebuilt APKs,
 cache reuse and v2/v3 signatures (POSIX shell):
 
 ```bash
-PYMOBILE_NATIVE_TESTS=1 python -m pytest pymobile/tests/test_remaining_p_fixes.py
+PYMOBILE_NATIVE_TESTS=1 python -m pytest pymobile/tests/test_native_build_gates.py
 ```
 
 For an actual release, follow [maintenance/release gates](https://github.com/Maksum867/PyMobile/blob/main/docs/CONTRIBUTING.md),
@@ -4147,7 +4447,7 @@ pymobile build --native --clean
 
 When `pymobile_jni.c` changes, the prebuilt bridges must be rebuilt and
 committed together with it:
-`pytest pymobile/tests/test_prebuilt_api_audit.py` compares the method tables
+`pytest pymobile/tests/test_prebuilt_bridge_api.py` compares the method tables
 of the shipped binaries against the C source and fails when a prebuilt trails
 it (the drift that once left audio, clipboard, pickers, sharing and recording
 out of the wheel).

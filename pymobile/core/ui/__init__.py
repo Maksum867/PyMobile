@@ -92,7 +92,8 @@ from .registry import (
 )
 from .screen import Navigator, Screen
 from .snackbar import Snackbar
-from .style import Align, Color, EdgeInsets, Style
+from .state import Computed, Value
+from .style import Align, Border, Color, EdgeInsets, Gradient, Style
 from .theme import Space, TextScale, Theme
 from .widget import Container, Widget
 
@@ -143,7 +144,6 @@ __all__ = [
     "BarChart",
     "LineChart",
     "PieChart",
-
     "Widget",
     "Container",
     "Label",
@@ -197,6 +197,10 @@ __all__ = [
     "Color",
     "Align",
     "EdgeInsets",
+    "Border",
+    "Gradient",
+    "Value",
+    "Computed",
     "Theme",
     "WidgetCapability",
     "widget_types",

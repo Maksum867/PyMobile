@@ -14,6 +14,27 @@ from .contract import text_value
 from .theme import _readable_on
 
 
+def _transform(text: str, transform: object) -> str:
+    """Apply ``Style(text_transform=…)`` the way the device renderer does."""
+    if not transform:
+        return text
+    if transform == "uppercase":
+        return text.upper()
+    if transform == "lowercase":
+        return text.lower()
+    if transform == "capitalize":
+        return text.title()
+    return text
+
+
+def _font_path(layout: _MockupContext, style: dict[str, Any]) -> str | None:
+    """The font file a ``Style(font_family=…)`` resolves to, or ``None``."""
+    family = style.get("font_family")
+    if not isinstance(family, str) or not family.strip():
+        return None
+    return layout.fonts.family(family) or None
+
+
 class _WidgetLayout(_MockupContext):
     def _text_box(
         self,
@@ -36,6 +57,13 @@ class _WidgetLayout(_MockupContext):
         colour = _rgba(style.get("color"), colour) if style.get("color") else colour
         bold = bool(style.get("bold")) or bold
         align = str(style.get("align") or align)
+        # Typography from the Style: the picture has to agree with the phone,
+        # or a line that fits in the mockup overflows there.
+        text = _transform(text, style.get("text_transform"))
+        font_path = _font_path(self, style)
+        letter_spacing = float(style.get("letter_spacing") or 0)
+        line_height = float(style.get("line_height") or 0)
+        max_lines = int(style["max_lines"]) if style.get("max_lines") else 0
         pad = self._padding(style, pad)
         inner = max(1.0, w - pad[0] - pad[2])
 
@@ -45,8 +73,19 @@ class _WidgetLayout(_MockupContext):
             return self.fonts.wrap(text, size, bold, width)
 
         lines = wrap(inner)
-        text_w = max((self.fonts.width(line, size, bold) for line in lines), default=0.0)
-        text_h = len(lines) * size * _LINE
+        if max_lines and len(lines) > max_lines:
+            lines = lines[:max_lines]
+            if style.get("text_overflow") != "clip":
+                lines[-1] = self.fonts.ellipsize(lines[-1] + "…", size, bold, inner)
+        text_w = max(
+            (
+                self.fonts.width(line, size, bold, path=font_path)
+                + max(0, len(line) - 1) * letter_spacing
+                for line in lines
+            ),
+            default=0.0,
+        )
+        text_h = len(lines) * (size * _LINE + line_height)
         box_w = w if fill else min(w, max(min_w, text_w + pad[0] + pad[2]))
         box_h = max(min_h, text_h + pad[1] + pad[3])
 
@@ -55,11 +94,25 @@ class _WidgetLayout(_MockupContext):
                 background(p, x, y, b)
             inner_w = b.w - pad[0] - pad[2]
             wrapped = lines if inner_w >= inner - 0.5 else wrap(max(1.0, inner_w))
-            height = len(wrapped) * size * _LINE
+            height = len(wrapped) * (size * _LINE + line_height)
             top = (
                 y + pad[1] + max(0.0, (b.h - pad[1] - pad[3] - height) / 2) if min_h else y + pad[1]
             )
-            p.lines(x + pad[0], top, inner_w, wrapped, size, colour, bold=bold, align=align)
+            p.lines(
+                x + pad[0],
+                top,
+                inner_w,
+                wrapped,
+                size,
+                colour,
+                bold=bold,
+                align=align,
+                font_path=font_path,
+                letter_spacing=letter_spacing,
+                line_height=line_height,
+                underline=bool(style.get("underline")),
+                strikethrough=bool(style.get("strikethrough")),
+            )
 
         return _Box(box_w, box_h, paint)
 
@@ -493,7 +546,7 @@ class _WidgetLayout(_MockupContext):
 
     @staticmethod
     def _pairs(props: dict[str, Any]) -> list[tuple[str, str]]:
-        """П-11: zip option values with their (possibly localised) labels."""
+        """Zip option values with their (possibly localised) labels."""
         option_values = [str(o) for o in (props.get("options") or [])]
         option_labels = [str(lbl) for lbl in (props.get("labels") or option_values)]
         while len(option_labels) < len(option_values):

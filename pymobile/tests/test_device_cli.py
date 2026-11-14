@@ -22,31 +22,28 @@ class TestWidgetAddCommand:
     ) -> None:
         create_project(tmp_path, "Widget Scaffold")
 
-        assert main(
-            [
-                "-c",
-                str(tmp_path),
-                "widget",
-                "add",
-                "BarChart",
-                "-p",
-                "title",
-                "-p",
-                "value:int",
-                "-p",
-                "values:list",
-            ]
-        ) == 0
+        assert (
+            main(
+                [
+                    "-c",
+                    str(tmp_path),
+                    "widget",
+                    "add",
+                    "BarChart",
+                    "-p",
+                    "title",
+                    "-p",
+                    "value:int",
+                    "-p",
+                    "values:list",
+                ]
+            )
+            == 0
+        )
 
         python_file = tmp_path / "widgets" / "bar_chart.py"
         java_file = (
-            tmp_path
-            / "java"
-            / "org"
-            / "pymobile"
-            / "app"
-            / "widgets"
-            / "BarChartRenderer.java"
+            tmp_path / "java" / "org" / "pymobile" / "app" / "widgets" / "BarChartRenderer.java"
         )
         python_source = python_file.read_text(encoding="utf-8")
         java_source = java_file.read_text(encoding="utf-8")
@@ -243,8 +240,12 @@ def test_sdk_installer_adds_emulator_without_ndk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sdk = tmp_path / "android-home" / "sdk"
-    manager = sdk / "cmdline-tools" / "latest" / "bin" / (
-        "sdkmanager.bat" if os.name == "nt" else "sdkmanager"
+    manager = (
+        sdk
+        / "cmdline-tools"
+        / "latest"
+        / "bin"
+        / ("sdkmanager.bat" if os.name == "nt" else "sdkmanager")
     )
     manager.parent.mkdir(parents=True)
     manager.touch()
@@ -269,8 +270,12 @@ def test_sdk_installer_can_combine_emulator_and_ndk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sdk = tmp_path / "android-home" / "sdk"
-    manager = sdk / "cmdline-tools" / "latest" / "bin" / (
-        "sdkmanager.bat" if os.name == "nt" else "sdkmanager"
+    manager = (
+        sdk
+        / "cmdline-tools"
+        / "latest"
+        / "bin"
+        / ("sdkmanager.bat" if os.name == "nt" else "sdkmanager")
     )
     manager.parent.mkdir(parents=True)
     manager.touch()
@@ -284,9 +289,7 @@ def test_sdk_installer_can_combine_emulator_and_ndk(
         ),
     )
 
-    sdk_installer.install_sdk(
-        tmp_path / "android-home", with_ndk=True, with_emulator=True
-    )
+    sdk_installer.install_sdk(tmp_path / "android-home", with_ndk=True, with_emulator=True)
 
     packages = calls[-1][2:]
     assert packages == [*sdk_installer.REQUIRED_PACKAGES, *sdk_installer.EMULATOR_PACKAGES]

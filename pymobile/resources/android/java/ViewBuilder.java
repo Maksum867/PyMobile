@@ -49,7 +49,7 @@ final class ViewBuilder {
     private final ViewUpdates updates = new ViewUpdates(this);
     final ViewControls controls = new ViewControls(this);
     private final ViewInputs inputs = new ViewInputs(this);
-    private final ViewStyles styles = new ViewStyles(this);
+    final ViewStyles styles = new ViewStyles(this);
     private final ViewOverlays overlays = new ViewOverlays(this);
     private final ViewLists listRenderer = new ViewLists(this);
 
@@ -166,6 +166,11 @@ final class ViewBuilder {
     static final int PROGRESS_SCALE = 1000;
 
     int dp(int value) {
+        return Math.round(value * density);
+    }
+
+    /** Fractional dp: a letter spacing of 0.5 dp is a real value. */
+    int dp(float value) {
         return Math.round(value * density);
     }
 
@@ -359,7 +364,8 @@ final class ViewBuilder {
         }
         view.setVisibility(visible ? View.VISIBLE : View.GONE);
         JSONObject animation = node.optJSONObject("animation");
-        if (animation != null && "fade_scale".equals(animation.optString("visibility", ""))) {
+        String visibilityEffect = animation == null ? "" : animation.optString("visibility", "");
+        if (!visibilityEffect.isEmpty() && !"none".equals(visibilityEffect)) {
             animatedVisibilityTargets.put(view, visible);
         }
         applyStyle(view, style);
@@ -387,6 +393,12 @@ final class ViewBuilder {
     /** Fade and slightly scale a view when an opted-in widget changes visibility. */
     void animateVisibility(final View view, boolean visible, int duration) {
         updates.animateVisibility(view, visible, duration);
+    }
+
+    /** Animate a visibility change with the effect the widget asked for. */
+    void animateVisibility(
+            final View view, boolean visible, int duration, String effect) {
+        updates.animateVisibility(view, visible, duration, effect);
     }
 
     /**

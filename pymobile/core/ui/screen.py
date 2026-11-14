@@ -91,7 +91,7 @@ class Screen:
         #: cannot call ``build()`` again without recursing.
         self._building = False
         self._mounted = False
-        # П-10: set to True by Navigator._discard() once the screen has been
+        # Set to True by Navigator._discard() once the screen has been
         # popped. The ``app`` property raises for *new* accesses after the
         # stack settles, but stays usable from code that is mid-handler
         # (where the pop itself happened) so ``self.app.pop(); do(self.app)``
@@ -123,7 +123,7 @@ class Screen:
         application of a screen that no longer exists is a bug that used to
         fail three lines later with a cryptic ``AttributeError`` on ``None``.
         """
-        # П-10: during the UI dispatch that popped this screen we leave the
+        # During the UI dispatch that popped this screen we leave the
         # app reference intact so the handler can still use ``self.app``
         # after calling pop(). Once the dispatch finishes _app is nulled and
         # we raise again for any truly stale access.
@@ -156,6 +156,35 @@ class Screen:
         return self._is_current
 
     # -- construction ------------------------------------------------------
+    def __getattr__(self, name: str) -> Any:
+        """Explain a missing initialiser instead of naming a private attribute.
+
+        A screen whose ``__init__`` forgets ``super().__init__()`` reaches the
+        framework with no state, and the first thing it touches is ``_root``:
+        the developer saw ``'Home' object has no attribute '_root'``, a name
+        they never wrote. The attribute stays missing (nothing is invented at
+        access time), but the message names the real cause and the fix.
+        """
+        try:
+            object.__getattribute__(self, "_root")
+        except AttributeError:
+            pass
+        else:
+            # The screen was set up; this is an ordinary missing attribute
+            # (``self.titel``, a property that raised), not a missing super().
+            # Checked through ``object.__getattribute__``: ``hasattr`` inside
+            # ``__getattr__`` calls ``__getattr__`` again and recurses.
+            raise AttributeError(name) from None
+        raise AttributeError(
+            f"{type(self).__name__}.__init__() did not call super().__init__(), so this "
+            f"screen was never set up (the framework then looked for {name!r}, which it "
+            "creates in its own initialiser). Add the call first:\n\n"
+            f"    class {type(self).__name__}(Screen):\n"
+            "        def __init__(self):\n"
+            "            super().__init__()\n"
+            '            self.title = "..."\n'
+        ) from None
+
     def build(self) -> Widget:
         """Return the widget tree for this screen."""
         raise NotImplementedError(f"{type(self).__name__} must implement build()")
@@ -312,6 +341,40 @@ class Screen:
         """Whether the screen is currently attached to a navigator."""
         return self._mounted
 
+    def _snapshot_state(self) -> dict[str, dict[str, Any]]:
+        """Interactive state of the tree that is about to be retired.
+
+        Keyed by widget id, because the new tree is made of new objects: the
+        ids are what the two builds have in common. Only widgets that actually
+        changed something are recorded, so a form with ten empty fields keeps
+        no snapshot at all.
+        """
+        if self._root is None:
+            return {}
+        snapshot: dict[str, dict[str, Any]] = {}
+        for node in self._root.walk():
+            try:
+                state = node.capture_state()
+            except Exception:  # pragma: no cover - a user widget must not break a rebuild
+                _log.exception("capturing the state of %s failed", node.id)
+                continue
+            if state:
+                snapshot[node.id] = state
+        return snapshot
+
+    def _restore_state(self, snapshot: dict[str, dict[str, Any]]) -> None:
+        """Replay a snapshot onto the widgets the new build produced."""
+        if not snapshot or self._root is None:
+            return
+        for node in self._root.walk():
+            state = snapshot.get(node.id)
+            if not state:
+                continue
+            try:
+                node.restore_state(state)
+            except Exception:  # pragma: no cover - a user widget must not break a rebuild
+                _log.exception("restoring the state of %s failed", node.id)
+
     def _detach_tree(self) -> None:
         """Release the built tree so ``build()`` can attach its widgets again.
 
@@ -362,8 +425,13 @@ class Screen:
             # the retired tree is all that is left to do.
             self._detach_tree()
             return
+        # Take the state of the old tree before letting go of it, and hand it
+        # to the widgets that come back with the same id: text the user typed
+        # survives a refresh, a theme switch and a language switch.
+        snapshot = self._snapshot_state()
         self._detach_tree()
         self.root  # noqa: B018 - builds and validates the tree
+        self._restore_state(snapshot)
 
     def refresh(self) -> None:
         """Rebuild the tree from ``build()`` and re-render immediately.
@@ -539,8 +607,33 @@ class Screen:
     def on_hide(self) -> None:
         """Called when another screen covers this one."""
 
+    def on_start(self) -> None:
+        """Called when a new window adopts a screen that stayed in memory.
+
+        The counterpart of :meth:`on_stop`: the app was never restarted, so
+        this is where a paused timer resumes and a restored draft is applied.
+        """
+
     def on_unmount(self) -> None:
         """Called once when the screen is popped."""
+
+    def on_stop(self) -> None:
+        """Called when the window goes away but the app keeps running.
+
+        An Activity that is destroyed and recreated — back on the root screen
+        followed by a relaunch, a configuration change outside
+        ``configChanges``, a low-memory process restart — no longer restarts
+        the interpreter (Android 7.0+ keeps the process and PyMobile keeps
+        Python alive in it). The screen instead gets this call before the
+        window is torn down, and once more on ``on_start`` when a new window
+        adopts it.
+
+        Use it for what must survive the gap: a draft, a scroll position, a
+        timer that should not keep running while nothing is visible. The
+        framework already writes the widget state it tracks (a field's text, a
+        switch's position) through :meth:`App.save_state`; override this method
+        for the application's own data.
+        """
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<Screen {self.title!r}>"
@@ -632,7 +725,7 @@ class Navigator:
             screen.on_unmount()
         finally:
             screen._cancel_subscriptions()
-            # П-10: defer clearing ``screen._app`` until the currently
+            # Defer clearing ``screen._app`` until the currently
             # running UI event finishes. A button handler that calls
             # ``self.app.pop()`` and then reads ``self.app`` one more time
             # must not get ``PyMobileError("screen is no longer on the stack")``
@@ -751,7 +844,7 @@ class Navigator:
             except Exception:
                 _log.exception("on_hide of %s raised; disposing anyway", current.title)
         # Every screen is unmounted even when one hook raises: stopping the app
-        # must not stop at the first broken on_unmount (PM-12).
+        # must not stop at the first broken on_unmount.
         while self._stack:
             screen = self._stack.pop()
             try:

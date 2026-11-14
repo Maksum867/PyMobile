@@ -69,11 +69,7 @@ def test_animated_widget_visibility_is_serialized_and_expansion_panel_opts_in() 
 
 def test_android_activity_contains_the_native_transition_and_title_handlers() -> None:
     source_path = (
-        Path(__file__).resolve().parents[1]
-        / "resources"
-        / "android"
-        / "java"
-        / "MainActivity.java"
+        Path(__file__).resolve().parents[1] / "resources" / "android" / "java" / "MainActivity.java"
     )
     source = source_path.read_text(encoding="utf-8")
     assert "animateScreenChange" in source
@@ -81,3 +77,21 @@ def test_android_activity_contains_the_native_transition_and_title_handlers() ->
     assert 'root.remove("navigation")' in source
     assert 'root.optString("app_title", "")' in source
     assert "requestedTitle, (Bitmap) null" in source
+
+
+def test_visibility_effects_are_named_and_serialised() -> None:
+    widget = Label("x", animate_visibility=True, visibility_animation="slide")
+    assert widget.to_dict()["animation"] == {"visibility": "slide", "duration_ms": 220}
+
+    with pytest.raises(ValueError, match="invalid visibility_animation"):
+        Label("x", visibility_animation="explode")
+
+
+def test_the_screen_transitions_beyond_the_original_three_are_accepted() -> None:
+    for name in ("fade_through", "slide_up", "slide_down"):
+        app = App("Transitions", bridge=StubBridge(verbose=False), transition=name)
+        assert app.transition == name
+
+    # The error has to name the new transitions too, or nobody finds them.
+    with pytest.raises(ValueError, match="fade_through"):
+        App("Transitions", bridge=StubBridge(verbose=False), transition="zoom")

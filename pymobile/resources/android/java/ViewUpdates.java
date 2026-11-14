@@ -42,29 +42,64 @@ final class ViewUpdates {
 
     /** Fade and slightly scale a view when an opted-in widget changes visibility. */
     void animateVisibility(final View view, boolean visible, int duration) {
+        animateVisibility(view, visible, duration, "fade_scale");
+    }
+
+    /**
+     * Fade, slide or scale a view in or out, per ``Widget.animate_visibility``.
+     *
+     * ``animation.visibility`` names the effect: ``fade`` (opacity only),
+     * ``slide`` (in from the start edge, out the same way), ``scale`` (grow
+     * from 92 %) and ``fade_scale`` (the historical default, kept so existing
+     * apps animate exactly as they did).
+     */
+    void animateVisibility(final View view, boolean visible, int duration, String effect) {
         view.animate().cancel();
         int millis = Math.max(0, Math.min(duration, 5000));
         if (millis == 0) {
             view.setAlpha(1f);
+            view.setScaleX(1f);
             view.setScaleY(1f);
+            view.setTranslationX(0f);
             view.setVisibility(visible ? View.VISIBLE : View.GONE);
             return;
         }
-        view.setPivotY(0f);
+        String kind = effect == null || effect.isEmpty() ? "fade_scale" : effect;
+        boolean slide = "slide".equals(kind);
+        boolean scale = "scale".equals(kind) || "fade_scale".equals(kind);
+        boolean fade = !"slide".equals(kind) || true;  // every effect fades a little
+        float offset = slide ? Math.max(24f, view.getWidth() * 0.12f) : 0f;
+        // Slide from the reading start: LTR moves right, RTL moves left.
+        if (view.getLayoutDirection() == View.LAYOUT_DIRECTION_RTL) {
+            offset = -offset;
+        }
         if (visible) {
             view.setVisibility(View.VISIBLE);
-            view.setAlpha(0f);
-            view.setScaleY(0.96f);
-            view.animate().alpha(1f).scaleY(1f).setDuration(millis).start();
+            view.setAlpha(fade ? 0f : 1f);
+            if (offset != 0f) view.setTranslationX(offset);
+            if (scale) {
+                view.setPivotX(view.getWidth() / 2f);
+                view.setPivotY(view.getHeight() / 2f);
+                view.setScaleX(0.92f);
+                view.setScaleY(0.92f);
+            }
+            view.animate().alpha(1f).translationX(0f).scaleX(1f).scaleY(1f)
+                    .setDuration(millis).start();
         } else {
-            view.animate().alpha(0f).scaleY(0.96f).setDuration(millis).withEndAction(new Runnable() {
-                @Override
-                public void run() {
-                    view.setVisibility(View.GONE);
-                    view.setAlpha(1f);
-                    view.setScaleY(1f);
-                }
-            }).start();
+            view.animate().alpha(0f)
+                    .translationX(offset)
+                    .scaleX(scale ? 0.92f : 1f)
+                    .scaleY(scale ? 0.92f : 1f)
+                    .setDuration(millis).withEndAction(new Runnable() {
+                        @Override
+                        public void run() {
+                            view.setVisibility(View.GONE);
+                            view.setAlpha(1f);
+                            view.setScaleX(1f);
+                            view.setScaleY(1f);
+                            view.setTranslationX(0f);
+                        }
+                    }).start();
         }
     }
 
@@ -83,8 +118,8 @@ final class ViewUpdates {
         view.setEnabled(node.optBoolean("enabled", true));
         boolean visible = node.optBoolean("visible", true);
         JSONObject animation = node.optJSONObject("animation");
-        boolean animateVisibility = animation != null
-                && "fade_scale".equals(animation.optString("visibility", ""));
+        String effect = animation == null ? "" : animation.optString("visibility", "");
+        boolean animateVisibility = !effect.isEmpty() && !"none".equals(effect);
         if (animateVisibility) {
             Boolean target = owner.animatedVisibilityTargets.get(view);
             if (target == null) {
@@ -92,7 +127,8 @@ final class ViewUpdates {
                 view.setVisibility(visible ? View.VISIBLE : View.GONE);
             } else if (target.booleanValue() != visible) {
                 owner.animatedVisibilityTargets.put(view, visible);
-                owner.animateVisibility(view, visible, animation.optInt("duration_ms", 220));
+                owner.animateVisibility(
+                        view, visible, animation.optInt("duration_ms", 220), effect);
             }
         } else {
             owner.animatedVisibilityTargets.remove(view);

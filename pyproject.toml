@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pymobile-framework"
-version = "0.14.0"
+version = "0.15.0"
 description = "A small, fast and extensible Python framework for building Android applications."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -120,7 +120,7 @@ ignore = [
 "pymobile/compiler/scaffold.py" = ["RUF001"]
 # Month names, currency symbols and separators of real locales.
 "pymobile/core/formatting.py" = ["RUF001", "RUF002"]
-"pymobile/tests/test_features_080.py" = ["B018", "RUF001"]
+"pymobile/tests/test_typed_find_and_locale_formatting.py" = ["B018", "RUF001"]
 # Embedded browser JavaScript/HTML and typographic symbols of the preview renderers.
 "pymobile/core/ui/extras_preview.py" = ["E501", "RUF001"]
 

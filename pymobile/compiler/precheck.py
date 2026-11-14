@@ -161,6 +161,7 @@ def check_project(root: str | Path, *, run_app: bool = True) -> list[Finding]:
 
     name_findings = _import_findings(entry, tree)
     findings.extend(name_findings)
+    findings.extend(_handler_findings(entry, source, tree))
     findings.extend(_module_findings(root, entry))
     if findings or config is None or not run_app:
         return findings
@@ -271,6 +272,84 @@ def _import_findings(entry: Path, tree: ast.AST) -> list[Finding]:
     return findings
 
 
+#: Keyword arguments whose value is meant to be a handler, not a call.
+HANDLER_KEYWORDS = frozenset(
+    {
+        "on_press",
+        "on_click",
+        "on_change",
+        "on_toggle",
+        "on_select",
+        "on_submit",
+        "on_search",
+        "on_long_press",
+        "on_refresh",
+        "on_action",
+        "on_tap",
+        "on_end",
+        "on_error",
+        "on_tick",
+        "on_dismiss",
+        "on_open",
+        "on_close",
+        "on_retry",
+    }
+)
+
+#: Names that return a handler instead of calling one; their parentheses are fine.
+HANDLER_FACTORIES = frozenset(
+    {"functools.partial", "partial", "callback", "handler", "make_handler", "lambda"}
+)
+
+
+def _handler_findings(entry: Path, source: str, tree: ast.AST) -> list[Finding]:
+    """``on_press=self.tap()``: a handler written with parentheses.
+
+    The call runs once while the tree is built and passes its result, so the
+    button silently does nothing when tapped — no exception, no placeholder,
+    nothing to search for. The AST sees the shape, so `pymobile check` names the
+    line and the fix before the app is ever started.
+
+    Only a bare call counts: ``lambda: self.tap()``, ``partial(f, 1)`` and a
+    function returning a handler are correct and are left alone.
+    """
+    findings: list[Finding] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg not in HANDLER_KEYWORDS:
+                continue
+            value = keyword.value
+            if not isinstance(value, ast.Call):
+                continue
+            called = value.func
+            if isinstance(called, ast.Attribute):
+                name = called.attr
+            elif isinstance(called, ast.Name):
+                name = called.id
+            else:  # pragma: no cover - a subscript call is not a handler
+                continue
+            if name in HANDLER_FACTORIES or name.lstrip("_").startswith("lambda"):
+                continue
+            text = ast.get_source_segment(source, value) or f"{name}(…)"
+            keep = text[:-2] if text.endswith("()") else text
+            hint = (
+                f"drop the parentheses: {keyword.arg}={keep} — the call runs once"
+                " while the screen is built, so nothing is left to tap."
+            )
+            findings.append(
+                Finding(
+                    entry,
+                    f"{keyword.arg} is given the result of {text}, not a handler",
+                    value.lineno,
+                    value.col_offset + 1,
+                    hint,
+                )
+            )
+    return findings
+
+
 def _startup_findings(config: ProjectConfig, entry: Path) -> list[Finding]:
     """Start the app on the stub bridge; report where it fails in ``main.py``."""
     from ..cli import _execute  # lazy: ``cli`` imports this package
@@ -282,11 +361,16 @@ def _startup_findings(config: ProjectConfig, entry: Path) -> list[Finding]:
     try:
         _execute(config, entry)
     except Exception as exc:  # the app's own error is the finding
+        # ``_execute`` already names the file and line for a user error; take
+        # the line from it rather than from the traceback, which by then leads
+        # through the framework's own frames.
+        line = getattr(exc, "line", None) or _traceback_line(exc, entry)
+        message = str(exc) if isinstance(exc, PyMobileError) else f"{type(exc).__name__}: {exc}"
         return [
             Finding(
                 entry,
-                f"{type(exc).__name__}: {exc}",
-                _traceback_line(exc, entry),
+                message,
+                line,
                 hint="The app failed on the desktop stub; the phone would fail too.",
             )
         ]

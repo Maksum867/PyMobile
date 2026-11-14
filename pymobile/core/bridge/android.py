@@ -16,7 +16,7 @@ from typing import Any
 
 from ...errors import BridgeError
 from ...log import get_logger
-from .base import Bridge, NotificationSpec, PickedFile
+from .base import Bridge, NotificationSpec, PickedFile, _check_openable_url
 
 __all__ = [
     "AndroidBridge",
@@ -44,6 +44,10 @@ class AndroidBridge(Bridge):
 
     #: The device renderer draws its default colours from the app theme.
     accepts_theme = True
+    # ``chrome`` carries the screen title and ``can_go_back``; the window needs
+    # the second one to decide whether the back gesture belongs to the app or
+    # to the platform (A9: a permanently registered callback swallowed it).
+    accepts_chrome = True
 
     #: The tree goes to ``ViewBuilder.java``, which has one branch per built-in
     #: type and drops anything else. Apps are warned about unknown types (see
@@ -54,7 +58,16 @@ class AndroidBridge(Bridge):
         self._native = native_module()
         self._granted: set[str] = set()
 
+    @classmethod
+    def with_native(cls, native: Any) -> AndroidBridge:
+        """Build a bridge around an explicit native module (tests, custom runtimes)."""
+        bridge = cls.__new__(cls)
+        bridge._native = native
+        bridge._granted = set()
+        return bridge
+
     def is_available(self) -> bool:
+        """Whether the app is running inside the Android runtime."""
         return self._native is not None
 
     # -- ui ----------------------------------------------------------------
@@ -84,6 +97,7 @@ class AndroidBridge(Bridge):
             self._native.render(self.WAKE_PAYLOAD)
 
     def toast(self, message: str, long: bool = False) -> None:
+        """Show a short system message, or do nothing off the device."""
         if self._native is not None:
             self._native.toast(message, bool(long))
 
@@ -99,6 +113,7 @@ class AndroidBridge(Bridge):
             self._native.ensure_channel(channel_id, channel_name, int(importance))
 
     def notify(self, spec: NotificationSpec) -> None:
+        """Post the notification, falling back to the older native signature."""
         if self._native is None:
             return
         native = self._native
@@ -126,11 +141,13 @@ class AndroidBridge(Bridge):
             _log.exception("notify failed")
 
     def cancel_notification(self, notification_id: int) -> None:
+        """Remove the notification with ``notification_id``."""
         if self._native is not None:
             self._native.cancel_notification(notification_id)
 
     # -- vibration ---------------------------------------------------------
     def vibrate(self, milliseconds: int, amplitude: int = -1) -> None:
+        """Vibrate once for ``milliseconds`` at the given amplitude."""
         if self._native is None:
             return
         try:
@@ -140,15 +157,18 @@ class AndroidBridge(Bridge):
             self._native.vibrate(int(milliseconds))
 
     def vibrate_pattern(self, pattern: list[int], repeat: int = -1) -> None:
+        """Vibrate in the given on/off pattern, repeating it ``repeat`` times."""
         if self._native is not None:
             self._native.vibrate_pattern([int(v) for v in pattern], int(repeat))
 
     def cancel_vibration(self) -> None:
+        """Stop any vibration in progress."""
         if self._native is not None:
             self._native.cancel_vibration()
 
     # -- permissions -------------------------------------------------------
     def has_permission(self, permission: str) -> bool:
+        """Whether the runtime permission is currently granted."""
         if self._native is None:
             return False
         return bool(self._native.has_permission(permission))
@@ -173,7 +193,6 @@ class AndroidBridge(Bridge):
             results[permission] = granted or bool(self._native.has_permission(permission))
         return results
 
-
     # -- files -------------------------------------------------------------
     def pick_file(self, request: str = "*/*", *, multiple: bool = False) -> list[PickedFile]:
         """Open the system picker and copy the answer into the app's cache.
@@ -193,6 +212,7 @@ class AndroidBridge(Bridge):
         return [self._describe(path) for path in paths if path]
 
     def pick_image(self) -> list[PickedFile]:
+        """Ask the system picker for images and return what the user chose."""
         if self._native is None:
             return []
         picker = getattr(self._native, "pick_image", None)
@@ -215,6 +235,7 @@ class AndroidBridge(Bridge):
 
     # -- clipboard ---------------------------------------------------------
     def copy_to_clipboard(self, text: str) -> bool:
+        """Copy the text to the system clipboard and report success."""
         if self._native is None:
             return False
         copy = getattr(self._native, "copy_to_clipboard", None)
@@ -223,6 +244,7 @@ class AndroidBridge(Bridge):
         return bool(copy(text))
 
     def clipboard_text(self) -> str:
+        """The text on the system clipboard, or an empty string."""
         if self._native is None:
             return ""
         getter = getattr(self._native, "clipboard_text", None)
@@ -232,6 +254,7 @@ class AndroidBridge(Bridge):
 
     # -- share sheet -------------------------------------------------------
     def share(self, text: str = "", url: str = "", subject: str = "") -> bool:
+        """Open the system share sheet and report whether it was shown."""
         if self._native is None:
             return False
         share = getattr(self._native, "share", None)
@@ -250,6 +273,7 @@ class AndroidBridge(Bridge):
         return NativeAudioPlayer(self._native, source, **options)
 
     def audio_recorder(self, *, directory: str = "") -> Any:
+        """The on-device recorder, or an error when the runtime cannot record."""
         if self._native is None:
             raise BridgeError(
                 "the native recorder is not available in this runtime",
@@ -267,6 +291,53 @@ class AndroidBridge(Bridge):
             return ""
         return str(getter() or "")
 
+    # -- secrets -----------------------------------------------------------
+    def store_secret(self, name: str, value: str) -> bool:
+        """Encrypt ``value`` with the Android keystore and persist it."""
+        native = self._native
+        setter = getattr(native, "put_secret", None) if native is not None else None
+        if setter is None:
+            raise NotImplementedError(
+                "this device runtime has no put_secret; rebuild the APK with "
+                "the current framework (pymobile rebuild-dex)"
+            )
+        try:
+            return bool(setter(name, value))
+        except Exception:
+            _log.exception("put_secret(%r) failed", name)
+            return False
+
+    def load_secret(self, name: str) -> str | None:
+        """The stored secret, or ``None`` when absent (or the key is gone)."""
+        native = self._native
+        getter = getattr(native, "get_secret", None) if native is not None else None
+        if getter is None:
+            raise NotImplementedError(
+                "this device runtime has no get_secret; rebuild the APK with "
+                "the current framework (pymobile rebuild-dex)"
+            )
+        try:
+            value = getter(name)
+        except Exception:
+            _log.exception("get_secret(%r) failed", name)
+            return None
+        return None if value is None else str(value)
+
+    def delete_secret(self, name: str) -> bool:
+        """Remove a stored secret and report whether it existed."""
+        native = self._native
+        remover = getattr(native, "delete_secret", None) if native is not None else None
+        if remover is None:
+            raise NotImplementedError(
+                "this device runtime has no delete_secret; rebuild the APK with "
+                "the current framework (pymobile rebuild-dex)"
+            )
+        try:
+            return bool(remover(name))
+        except Exception:
+            _log.exception("delete_secret(%r) failed", name)
+            return False
+
     # -- external ----------------------------------------------------------
     def open_url(self, url: str) -> bool:
         """Open ``url`` in the system browser on Android.
@@ -274,6 +345,7 @@ class AndroidBridge(Bridge):
         Falls back to the native module when it exposes ``open_url``; otherwise
         returns ``False`` (no crash, the app keeps running).
         """
+        _check_openable_url(url)
         if self._native is not None and hasattr(self._native, "open_url"):
             try:
                 return bool(self._native.open_url(url))
@@ -338,33 +410,43 @@ class NativeAudioPlayer:
     # MediaPlayer has no end callback Python can safely re-enter, so the API
     # layer's polling detects the end; these are the plain transport calls.
     def play(self) -> None:
+        """Start or resume playback."""
         self._native.audio_play(self.handle)
 
     def pause(self) -> None:
+        """Pause playback, keeping the position."""
         self._native.audio_pause(self.handle)
 
     def stop(self) -> None:
+        """Stop playback and rewind to the start."""
         self._native.audio_stop(self.handle)
 
     def seek(self, position_ms: int) -> None:
+        """Jump to ``position_ms`` inside the clip."""
         self._native.audio_seek(self.handle, int(position_ms))
 
     def position(self) -> int:
+        """How far the clip has played, in milliseconds."""
         return int(self._native.audio_position(self.handle))
 
     def duration(self) -> int:
+        """The length of the clip, in milliseconds."""
         return int(self._native.audio_duration(self.handle))
 
     def is_playing(self) -> bool:
+        """Whether the clip is playing right now."""
         return bool(self._native.audio_is_playing(self.handle))
 
     def set_volume(self, level: float) -> None:
+        """Set the volume on a 0.0..1.0 scale."""
         self._native.audio_volume(self.handle, float(level))
 
     def set_looping(self, looping: bool) -> None:
+        """Choose whether playback repeats at the end."""
         self._native.audio_looping(self.handle, bool(looping))
 
     def release(self) -> None:
+        """Stop playback and release the native player handle."""
         if self.handle >= 0:
             self._native.audio_release(self.handle)
             self.handle = -1
@@ -379,6 +461,7 @@ class NativeAudioRecorder:
         self.handle = -1
 
     def start(self) -> None:
+        """Start recording, or raise when the microphone is unavailable."""
         starter = getattr(self._native, "recorder_start", None)
         if starter is None:  # pragma: no cover - older runtime
             raise BridgeError("this runtime cannot record audio")
@@ -390,6 +473,7 @@ class NativeAudioRecorder:
             )
 
     def stop(self) -> str:
+        """Stop recording and return the path of the file written."""
         if self.handle < 0:
             return ""
         path = str(self._native.recorder_stop(self.handle) or "")
@@ -397,6 +481,7 @@ class NativeAudioRecorder:
         return path
 
     def cancel(self) -> None:
+        """Stop recording and delete the partial file."""
         if self.handle >= 0:
             cancel = getattr(self._native, "recorder_cancel", None)
             if cancel is not None:
@@ -404,11 +489,13 @@ class NativeAudioRecorder:
             self.handle = -1
 
     def is_recording(self) -> bool:
+        """Whether the recorder is capturing sound right now."""
         if self.handle < 0:
             return False
         return bool(self._native.recorder_is_recording(self.handle))
 
     def elapsed_ms(self) -> int:
+        """How long the current recording has been running."""
         if self.handle < 0:
             return 0
         return int(self._native.recorder_elapsed(self.handle))

@@ -16,8 +16,10 @@ source_dir = "."
 # dependencies = ["requests==2.32.5"]
 
 # Android platform settings.
+# target_sdk 36 is what Google Play requires for new apps and updates from
+# 31 August 2026; `pymobile setup-sdk` installs the matching platform.
 min_sdk = 24
-target_sdk = 35
+target_sdk = 36
 orientation = "portrait"
 
 permissions = [

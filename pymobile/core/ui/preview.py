@@ -95,7 +95,7 @@ _SYMBOL_CANDIDATES = (
 
 #: A plane-16 noncharacter: no font may define it, so rendering it always
 #: yields the face's ``.notdef`` glyph — our probe for "has no glyph for ch".
-_NOTDEF_PROBE = "\U0010FFFE"
+_NOTDEF_PROBE = "\U0010fffe"
 
 _glyph_cache: dict[tuple[Any, Any, str], bool | bytes] = {}
 
@@ -286,7 +286,7 @@ def _as_node(widget_or_tree: Any) -> dict[str, Any]:
 
 
 def _zip_options_labels(props: dict[str, Any]) -> list[tuple[str, str]]:
-    """П-11: zip ``options`` (values) with ``labels`` (visible text)."""
+    """Zip ``options`` (values) with ``labels`` (visible text)."""
     option_values = [str(o) for o in (props.get("options") or [])]
     option_labels = [str(lbl) for lbl in (props.get("labels") or option_values)]
     while len(option_labels) < len(option_values):
@@ -564,7 +564,14 @@ def _leaf_lines(node: dict[str, Any], show_ids: bool = False) -> list[str]:
         return [f"[{''.join(slider_bar)}] {value:g}"]
 
     if node_type == "Checkbox":
-        return ["[✓] on" if props.get("checked") else "[ ] off"]
+        # The label is the point of a check box; the state is what it holds.
+        # This printed the literal word "off" for every unticked box and dropped
+        # `text=` entirely.
+        label = text_value(props.get("text", ""))
+        mark = "[✓]" if props.get("checked") else "[ ]"
+        # An unlabelled box has nothing else to say, so it falls back to the
+        # state word the preview always used ("off"/"on").
+        return [f"{mark} {label or ('on' if props.get('checked') else 'off')}"]
 
     if node_type == "RatingBar":
         rating = max(0.0, min(float(props.get("rating", 0)), int(props.get("maximum", 5))))
@@ -574,7 +581,7 @@ def _leaf_lines(node: dict[str, Any], show_ids: bool = False) -> list[str]:
         return [f"{rating_filled}{empty} {rating:g}/{maximum}"]
 
     if node_type == "Dropdown":
-        # П-11: show the currently selected *label*, not the internal value,
+        # Show the currently selected *label*, not the internal value,
         # so a localised dropdown reads as it does on device.
         option_values = [str(o) for o in (props.get("options") or [])]
         option_labels = [str(lbl) for lbl in (props.get("labels") or option_values)]

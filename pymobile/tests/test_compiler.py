@@ -38,7 +38,9 @@ class TestManifest:
         sdk = ET.fromstring(build_manifest(project)).find("uses-sdk")
         assert sdk is not None
         assert sdk.get(f"{ANDROID}minSdkVersion") == "24"
-        assert sdk.get(f"{ANDROID}targetSdkVersion") == "35"
+        # 36 is what Google Play requires for new apps and updates from
+        # 31 August 2026, and the toolchain now installs platform 36 to match.
+        assert sdk.get(f"{ANDROID}targetSdkVersion") == "36"
 
     def test_permissions_deduplicated(self, tmp_path: Path) -> None:
         config = ProjectConfig(
@@ -288,7 +290,9 @@ class TestPipeline:
     def test_build_produces_apk(self, project: ProjectConfig) -> None:
         result = build_apk(project)
         assert result.apk.exists()
-        assert result.apk.name == "demo-app-0.1.0.apk"
+        # A structural build is not installable, so it is named ``-debug`` and
+        # cannot be mistaken for the APK ``build --native`` produces.
+        assert result.apk.name == "demo-app-0.1.0-debug.apk"
         assert not result.cached
         assert result.size > 0
 
@@ -416,7 +420,7 @@ class TestPipeline:
         assert not build_apk(project).cached
 
     def test_syntax_error_fails_the_build(self, project: ProjectConfig) -> None:
-        # П-06: a Python syntax error anywhere in the sources fails the build
+        # A Python syntax error anywhere in the sources fails the build
         # with a clear message instead of producing an APK that crashes at
         # launch with ImportError.
         (project.root / "broken.py").write_text("def (:\n", encoding="utf-8")
@@ -454,9 +458,7 @@ class TestPipeline:
         result = build_apk(config)
         assert any("POST_NOTIFICATIONS" in warning for warning in result.warnings)
 
-    def test_no_notifications_warning_for_an_app_that_never_notifies(
-        self, tmp_path: Path
-    ) -> None:
+    def test_no_notifications_warning_for_an_app_that_never_notifies(self, tmp_path: Path) -> None:
         # The stock config targets SDK 35 without POST_NOTIFICATIONS; that is only
         # a problem for code that posts a notification.
         (tmp_path / "main.py").write_text("x = 1", encoding="utf-8")
@@ -478,7 +480,7 @@ class TestPipeline:
     def test_stage_callback_and_timings(self, project: ProjectConfig) -> None:
         stages: list[str] = []
         result = BuildPipeline(project, on_stage=stages.append).run()
-        # П-06 adds a "syntax" stage between collect and compile.
+        # The "syntax" stage runs between collect and compile.
         expected = ["validate", "collect", "syntax", "compile", "icons", "manifest", "package"]
         assert stages == expected
         assert len(result.timings) == 7

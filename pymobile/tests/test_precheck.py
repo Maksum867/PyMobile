@@ -32,9 +32,10 @@ def test_a_misspelled_pymobile_name_is_found_at_its_import(project: Path) -> Non
     assert len(findings) == 1
     finding = findings[0]
     assert finding.path.name == "main.py"
-    assert finding.line is not None and "Buton" in (project / "main.py").read_text().splitlines()[
-        finding.line - 1
-    ]
+    assert (
+        finding.line is not None
+        and "Buton" in (project / "main.py").read_text().splitlines()[finding.line - 1]
+    )
     assert finding.hint == "did you mean 'Button'?"
 
 
@@ -93,3 +94,43 @@ def test_format_shows_location_and_hint(project: Path) -> None:
     assert text.startswith("main.py:")
     assert "error:" in text
     assert "\n  hint: did you mean 'Button'?" in text
+
+
+def _handlers_project(tmp_path: Path) -> Path:
+    """A freshly scaffolded project, whose main.py wires two button handlers."""
+    create_project(tmp_path, "Handlers")
+    return tmp_path
+
+
+def _handlers_project(tmp_path: Path) -> Path:
+    create_project(tmp_path, "Handlers")
+    return tmp_path
+
+
+def test_a_called_handler_is_reported_at_its_line(tmp_path: Path) -> None:
+    root = _handlers_project(tmp_path)
+    main = root / "main.py"
+    text = main.read_text(encoding="utf-8")
+    assert "on_press=self.on_tap" in text
+    # ``on_press=self.on_tap()`` runs the handler while the tree is built and
+    # passes its result; the button then does nothing when tapped.
+    main.write_text(text.replace("on_press=self.on_tap", "on_press=self.on_tap()", 1), "utf-8")
+    findings = [f for f in check_project(root) if "on_press" in f.message]
+    assert findings, "the called handler was accepted silently"
+    finding = findings[0]
+    assert "self.on_tap()" in finding.message
+    assert finding.hint is not None and "drop the parentheses" in finding.hint
+    assert finding.line is not None
+
+
+def test_plain_handlers_are_left_alone(tmp_path: Path) -> None:
+    root = _handlers_project(tmp_path)
+    main = root / "main.py"
+    text = main.read_text(encoding="utf-8")
+    text = text.replace(
+        "Button(",
+        "Button(on_press=self.noop, on_click=lambda: self.noop(), ",
+        1,
+    )
+    main.write_text(text, encoding="utf-8")
+    assert not [f for f in check_project(root) if "on_press" in f.message]

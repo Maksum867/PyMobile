@@ -271,13 +271,23 @@ def find_toolchain(
     sdk: str | Path | None = None,
     *,
     build_tools_version: str | None = None,
-    platform_api: int = 34,
+    platform_api: int | None = None,
 ) -> Toolchain:
     """Discover the Android toolchain.
 
     The newest installed build-tools and the newest platform at or above
-    ``platform_api`` are chosen unless pinned explicitly.
+    ``platform_api`` are chosen unless pinned explicitly. The default is
+    :data:`~pymobile.compiler.sdk_installer.SDK_PLATFORM` — the API level the
+    build actually compiles against, *not* ``target_sdk``: a project that
+    declares target 36 while the classes were compiled against android-35 has
+    the manifest of one release and the behaviour of another.
+
+    Imported inside the function because ``sdk_installer`` imports this module.
     """
+    if platform_api is None:
+        from .sdk_installer import SDK_PLATFORM
+
+        platform_api = SDK_PLATFORM
     root = _sdk_root(sdk)
     if root is None or not root.exists():
         raise ToolchainError(

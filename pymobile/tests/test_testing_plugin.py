@@ -299,18 +299,14 @@ class TestPngSnapshotChecker:
             self.checker(tmp_path, tolerance=0)(Button("Go", id="go"))
 
     def test_nothing_rendered_yet_is_explained(self, tmp_path: Path) -> None:
-        check = PngSnapshotChecker(
-            tmp_path / "t.py", "t", StubBridge(verbose=False), update=True
-        )
+        check = PngSnapshotChecker(tmp_path / "t.py", "t", StubBridge(verbose=False), update=True)
         with pytest.raises(AssertionError, match="nothing has been rendered yet"):
             check()
 
     def test_it_uses_the_last_frame_or_an_explicit_widget(self, tmp_path: Path) -> None:
         with app_session(tmp_path) as session:
             session.start(Home())
-            check = PngSnapshotChecker(
-                tmp_path / "t.py", "t", session.bridge, update=True
-            )
+            check = PngSnapshotChecker(tmp_path / "t.py", "t", session.bridge, update=True)
             from_last_frame = check()  # the screen the app drew
             explicit = check(Home(), "screen")
         assert from_last_frame.exists() and explicit.exists()

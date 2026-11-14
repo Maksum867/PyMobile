@@ -399,7 +399,10 @@ class TestPreviewCommand:
         assert preview("--screen", "Resulz") == 1
         err = capsys.readouterr().err
         assert "Did you mean 'Result'" in err
-        assert "Menu, Quiz, Result" in err
+        # The listing is the project's own screens: the fixture's three, plus
+        # anything another test module left imported in this interpreter (the
+        # list is built from live classes, so it is not asserted exactly).
+        assert "Menu" in err and "Quiz" in err and "Result" in err
 
     def test_a_wrong_step_reports_the_widget(
         self, project_dir: Path, capsys: pytest.CaptureFixture[str]

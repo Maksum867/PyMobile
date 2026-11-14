@@ -517,7 +517,7 @@ class TestEventLoop:
         assert home.counter.text == "2"
 
     def test_loop_exit_shuts_the_app_down(self) -> None:
-        """A finished event loop means the platform closed the app (PM-10).
+        """A finished event loop means the platform closed the app.
 
         The loop returns when the device asks it to stop (activity destroyed);
         it used to leave ``running`` True, ``App.current()`` pointing at the
@@ -872,15 +872,7 @@ class TestBuildRobustness:
     def test_project_renderer_is_included_in_the_automatic_source_build(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        renderer = (
-            tmp_path
-            / "java"
-            / "org"
-            / "pymobile"
-            / "app"
-            / "widgets"
-            / "GaugeRenderer.java"
-        )
+        renderer = tmp_path / "java" / "org" / "pymobile" / "app" / "widgets" / "GaugeRenderer.java"
         renderer.parent.mkdir(parents=True)
         renderer.write_text(
             "package org.pymobile.app.widgets; class GaugeRenderer {}", encoding="utf-8"
@@ -908,15 +900,7 @@ class TestBuildRobustness:
     def test_project_overlay_errors_never_fall_back_to_a_stale_dex(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        renderer = (
-            tmp_path
-            / "java"
-            / "org"
-            / "pymobile"
-            / "app"
-            / "widgets"
-            / "GaugeRenderer.java"
-        )
+        renderer = tmp_path / "java" / "org" / "pymobile" / "app" / "widgets" / "GaugeRenderer.java"
         renderer.parent.mkdir(parents=True)
         renderer.write_text("broken java", encoding="utf-8")
         monkeypatch.setenv("PYMOBILE_BUILD_JAVA", "0")
@@ -925,9 +909,7 @@ class TestBuildRobustness:
             raise PyMobileError("javac rejected the project renderer")
 
         monkeypatch.setattr("pymobile.compiler.backends.native._run", fail)
-        with pytest.raises(
-            PyMobileError, match="could not compile the project Java overlay"
-        ):
+        with pytest.raises(PyMobileError, match="could not compile the project Java overlay"):
             self._backend(tmp_path).compile_java(tmp_path / "work")
 
     def test_source_build_failure_falls_back(
@@ -1032,8 +1014,11 @@ class TestRendererContract:
     def _source(self, name: str) -> str:
         from pymobile.resources import resource_path
 
-        return (renderer_source() if name == "ViewBuilder.java"
-                else resource_path("android", "java", name).read_text(encoding="utf-8"))
+        return (
+            renderer_source()
+            if name == "ViewBuilder.java"
+            else resource_path("android", "java", name).read_text(encoding="utf-8")
+        )
 
     def test_leaf_widgets_do_not_set_layout_params(self) -> None:
         """Regression: a Spacer setting ViewGroup.LayoutParams made
@@ -1136,11 +1121,19 @@ class TestRendererContract:
         assert "getLayoutParams()" not in _method_body(source, "void applyStyle(")
 
     def test_margin_adds_to_spacing_instead_of_replacing_it(self) -> None:
-        """A container's spacing and a widget's margin must both survive."""
-        source = self._source("ViewBuilder.java")
+        """A container's spacing and a widget's margin must both survive.
+
+        Horizontal margins are start/end, so an Arabic or Hebrew screen mirrors
+        instead of keeping Western spacing (A4).
+        """
+        source = self._source("ViewStyles.java")
         margin = _method_body(source, "void applyMargin(")
-        for field in ("leftMargin", "topMargin", "rightMargin", "bottomMargin"):
+        assert "setMarginStart(params.getMarginStart() +" in margin
+        assert "setMarginEnd(params.getMarginEnd() +" in margin
+        for field in ("topMargin", "bottomMargin"):
             assert f"params.{field} +=" in margin
+        for directional in ("leftMargin", "rightMargin"):
+            assert f"params.{directional} +=" not in margin
 
     def test_style_width_and_height_reach_the_layout(self) -> None:
         """Style(width=..., height=...) had no effect on device at all."""
@@ -1170,8 +1163,11 @@ class TestDeviceFixes:
     def _java(self, name: str) -> str:
         from pymobile.resources import resource_path
 
-        return (renderer_source() if name == "ViewBuilder.java"
-                else resource_path("android", "java", name).read_text(encoding="utf-8"))
+        return (
+            renderer_source()
+            if name == "ViewBuilder.java"
+            else resource_path("android", "java", name).read_text(encoding="utf-8")
+        )
 
     def _jni(self) -> str:
         from pymobile.resources import resource_path

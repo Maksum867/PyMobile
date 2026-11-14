@@ -1,0 +1,67 @@
+name: Good first contribution
+description: A small, self-contained task that does not need Android or an SDK
+title: "[Good first issue]: "
+labels: [good first issue, help wanted, documentation]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form is for tasks that can be finished without an Android device, an
+        SDK or deep knowledge of the renderers. If you are new to the project,
+        read [Contributing](../blob/main/docs/CONTRIBUTING.md#first-contribution-in-ten-minutes)
+        first: it names the files, the commands and what a review looks for.
+
+        Claim a task by commenting on it, so two people do not write the same
+        fix. Nothing here needs permission from a maintainer to start.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of task is it
+      options:
+        - Documentation (README, docs/, docstring, example)
+        - Test (a behaviour that should be pinned down)
+        - Small bug in a preview (web, Tk, text)
+        - Error message or hint that could be clearer
+        - Template or scaffold example
+        - Translation or wording
+      validations:
+        required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong or missing today
+      description: Quote the current text or the current output if you can.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What "done" looks like
+      description: One or two sentences. A docstring, a test name, the new message.
+    validations:
+      required: true
+  - type: input
+    id: files
+    attributes:
+      label: The files involved
+      description: Best guess is fine; a maintainer will confirm before you start.
+      placeholder: pymobile/core/ui/components.py, README.md
+  - type: dropdown
+    id: skills
+    attributes:
+      label: What it needs
+      options:
+        - Python only
+        - Documentation only
+        - Python and a browser (web preview)
+        - Python and a display (Tk preview)
+        - Java (needs the SDK, not a first task)
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: |
+        **Checks before opening a pull request:** `python -m pytest`,
+        `python -m ruff check pymobile`, `python -m mypy pymobile`. If a check
+        fails for a reason unrelated to your change, say so in the pull request
+        instead of hiding it.

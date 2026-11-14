@@ -151,6 +151,9 @@ def _setter_names(cls: type) -> frozenset[str]:
     return names
 
 
+#: Effects ``animate_visibility`` can play (see ``Widget.visibility_animation``).
+VISIBILITY_ANIMATIONS = ("fade_scale", "fade", "scale", "slide")
+
 #: Keywords every widget understands through :class:`Widget.__init__`.
 _WIDGET_KEYWORDS = frozenset(
     {
@@ -162,6 +165,7 @@ _WIDGET_KEYWORDS = frozenset(
         "enabled",
         "animate_visibility",
         "animation_duration_ms",
+        "visibility_animation",
         "accessibility_label",
         "extra",
     }
@@ -187,9 +191,7 @@ def accepted_keywords(cls: type) -> frozenset[str]:
         try:
             # ``vars()`` reads the unbound function out of the class dict;
             # ``klass.__init__`` would trip mypy's "could be a subclass" rule.
-            initialiser = vars(klass).get("__init__") or inspect.getattr_static(
-                klass, "__init__"
-            )
+            initialiser = vars(klass).get("__init__") or inspect.getattr_static(klass, "__init__")
             signature = inspect.signature(initialiser)
         except (TypeError, ValueError):  # pragma: no cover - C classes
             continue
@@ -378,6 +380,65 @@ def _reject_unknown_keywords(widget: Widget, props: Mapping[str, Any]) -> None:
         )
 
 
+def _child_type_reason(parent: Widget, child: object) -> str | None:
+    """Why ``child`` cannot go inside ``parent``, or ``None`` when it can.
+
+    ``Column(Label("a"), "text")`` used to sail through ``extend()`` and fail
+    three frames later with ``'str' object has no attribute '_parent'`` — a
+    message about an attribute the developer never wrote. Two call sites want
+    the reason in different sentences: :meth:`Container.add` names the offending
+    type, and ``Container.__init__`` keeps the older "children must be Widget
+    instances" wording for a bad sequence. Both get it here.
+    """
+    if isinstance(child, Widget):
+        return None
+    what = type(child).__name__
+    if child is None:
+        return (
+            "got None. Every child must be a widget instance; check for a "
+            "'widget if condition else None' that produced the other branch — or "
+            "for a handler written with parentheses, on_press=self.tap(), whose "
+            "result is None."
+        )
+    if isinstance(child, str):
+        return (
+            f"got {what}. Wrap the text in a widget, for example "
+            f"{type(parent).__name__}(Label({child[:40]!r})); a string is not a "
+            "child, every child must be a widget instance."
+        )
+    if callable(child):
+        name = getattr(child, "__name__", "make_widget")
+        return (
+            f"got {what}. A function is not a widget: a factory you forgot to call "
+            f"needs parentheses ({type(parent).__name__}({name}())), and a handler "
+            f"belongs in a keyword (Button(on_press={name})), not in the children."
+        )
+    if isinstance(child, Sequence) and not isinstance(child, (str, bytes)):
+        return (
+            f"got {what}. A list inside a list is flattened only one level deep; "
+            "unpack it or pass it flat."
+        )
+    return (
+        f"got {child!r}. Every child must be a widget instance; check for a "
+        "'widget if condition else None' that produced the other branch."
+    )
+
+
+def _check_child_type(parent: Widget, child: object) -> None:
+    """Reject a non-widget child with the error that names the real mistake.
+
+    The companion of :func:`_child_type_reason` for :meth:`Container.add`, where
+    the offending type belongs in the first sentence.
+    """
+    reason = _child_type_reason(parent, child)
+    if reason is None:
+        return
+    # WidgetTypeError is about find()/get() and takes (id, expected, actual);
+    # this is a plain TypeError so `except TypeError` keeps working.
+    what = type(child).__name__
+    raise TypeError(f"{type(parent).__name__} cannot contain {what}. {reason}") from None
+
+
 def _extra_props(extra: Mapping[str, Any] | None) -> dict[str, Any]:
     """Validate the explicit ``extra={...}`` escape hatch."""
     if extra is None:
@@ -412,6 +473,7 @@ class Widget:
         "_explicit_id",
         "_animate_visibility",
         "_animation_duration_ms",
+        "_visibility_animation",
         "_accessibility_label",
     )
 
@@ -424,6 +486,7 @@ class Widget:
         enabled: bool = True,
         animate_visibility: bool = False,
         animation_duration_ms: int = 220,
+        visibility_animation: str = "fade_scale",
         accessibility_label: str | None = None,
         extra: Mapping[str, Any] | None = None,
         **props: Any,
@@ -462,8 +525,16 @@ class Widget:
             raise ValueError("animation_duration_ms must be an int from 0 to 5000")
         self._visible = visible
         self._enabled = enabled
+        if not isinstance(visibility_animation, str) or (
+            visibility_animation.lower() not in VISIBILITY_ANIMATIONS
+        ):
+            raise ValueError(
+                f"invalid visibility_animation {visibility_animation!r}; expected one of: "
+                + ", ".join(VISIBILITY_ANIMATIONS)
+            )
         self._animate_visibility = animate_visibility
         self._animation_duration_ms = animation_duration_ms
+        self._visibility_animation = visibility_animation.lower()
         self._accessibility_label = accessibility_label
         self._parent: Widget | None = None
         self._screen: Screen | None = None
@@ -532,6 +603,30 @@ class Widget:
     def children(self) -> Sequence[Widget]:
         """Child widgets; leaf widgets return an empty tuple."""
         return ()
+
+    def capture_state(self) -> dict[str, Any]:
+        """The state this widget owns, for a rebuild to carry over.
+
+        A widget created inside ``build()`` is a new object on every rebuild,
+        so whatever the user typed into it went away with the old tree — the
+        screen said ``self.search = TextInput(...)`` and the text vanished on
+        the next ``refresh()``. The framework now snapshots the interactive
+        state of the retiring tree and replays it onto widgets that come back
+        with the same id (see :meth:`Screen.rebuild`).
+
+        Leaf widgets return nothing by default; the stateful ones override this
+        and :meth:`restore_state`.
+        """
+        return {}
+
+    def restore_state(self, state: Mapping[str, Any]) -> None:
+        """Apply a snapshot taken by :meth:`capture_state` from an earlier build.
+
+        The default does nothing, so a widget that owns no state needs no code
+        here. An override applies only what it recognises, which keeps a
+        snapshot from an older version of the widget harmless.
+        """
+        return None
 
     def walk(self) -> Iterator[Widget]:
         """Depth-first iteration over this widget and its descendants."""
@@ -624,6 +719,7 @@ class Widget:
 
     @visible.setter
     def visible(self, value: bool) -> None:
+        """Show or hide the widget, re-rendering only when the value changes."""
         if value != self._visible:
             self._visible = value
             self.invalidate()
@@ -635,10 +731,34 @@ class Widget:
 
     @animate_visibility.setter
     def animate_visibility(self, value: bool) -> None:
+        """Choose whether hiding and showing is animated on Android; must be a bool."""
         if not isinstance(value, bool):
             raise TypeError("animate_visibility must be a bool")
         if value != self._animate_visibility:
             self._animate_visibility = value
+            self.invalidate()
+
+    @property
+    def visibility_animation(self) -> str:
+        """Which effect ``animate_visibility`` plays.
+
+        ``fade_scale`` (the default) fades and shrinks slightly, ``fade`` only
+        changes opacity, ``slide`` moves the widget in from the start edge and
+        ``scale`` grows it from 92 %. Ignored unless ``animate_visibility`` is
+        true.
+        """
+        return self._visibility_animation
+
+    @visibility_animation.setter
+    def visibility_animation(self, value: str) -> None:
+        """Pick the effect by name; anything outside the list raises ``ValueError``."""
+        if not isinstance(value, str) or value.lower() not in VISIBILITY_ANIMATIONS:
+            raise ValueError(
+                f"invalid visibility_animation {value!r}; expected one of: "
+                + ", ".join(VISIBILITY_ANIMATIONS)
+            )
+        if value.lower() != self._visibility_animation:
+            self._visibility_animation = value.lower()
             self.invalidate()
 
     @property
@@ -648,6 +768,7 @@ class Widget:
 
     @animation_duration_ms.setter
     def animation_duration_ms(self, value: int) -> None:
+        """Set the animation length in milliseconds, from 0 to 5000."""
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 5000:
             raise ValueError("animation_duration_ms must be an int from 0 to 5000")
         if value != self._animation_duration_ms:
@@ -661,6 +782,7 @@ class Widget:
 
     @enabled.setter
     def enabled(self, value: bool) -> None:
+        """Enable or disable the widget, re-rendering only when the value changes."""
         if value != self._enabled:
             self._enabled = value
             self.invalidate()
@@ -672,6 +794,7 @@ class Widget:
 
     @accessibility_label.setter
     def accessibility_label(self, value: str | None) -> None:
+        """Set the screen-reader name, or ``None`` to fall back to the widget's own text."""
         if value is not None and not isinstance(value, str):
             raise TypeError("accessibility_label must be a string or None")
         if value != self._accessibility_label:
@@ -743,7 +866,7 @@ class Widget:
             node["style"] = style
         if self._animate_visibility:
             node["animation"] = {
-                "visibility": "fade_scale",
+                "visibility": self._visibility_animation,
                 "duration_ms": self._animation_duration_ms,
             }
         children = []
@@ -840,8 +963,15 @@ class Container(Widget):
         for child in children:
             if isinstance(child, Sequence) and not isinstance(child, (str, bytes, Widget)):
                 # Validate sequences before attaching any of their contents.
-                if any(not isinstance(item, Widget) for item in child):
-                    raise TypeError(f"{type(self).__name__} children must be Widget instances")
+                for item in child:
+                    if isinstance(item, Widget):
+                        continue
+                    # The class of the whole expression is reported, as it was
+                    # before, but with the child that is actually wrong named.
+                    reason = _child_type_reason(self, item)
+                    raise TypeError(
+                        f"{type(self).__name__} children must be Widget instances: {reason}"
+                    ) from None
                 flattened.extend(child)
             else:
                 # Keep scalar validation with add(): specialized containers
@@ -865,6 +995,7 @@ class Container(Widget):
             self.on_long_press()
 
     def props(self) -> WidgetProps:
+        """The serialised props: spacing and the two press callbacks, when set."""
         result = super().props()
         if self.spacing:
             result["spacing"] = self.spacing
@@ -881,12 +1012,15 @@ class Container(Widget):
 
     def add(self, child: Widget) -> Widget:
         """Append a child and return it (so calls can be chained/assigned)."""
+        _check_child_type(self, child)
         if child is None:
             raise TypeError(
                 f"{type(self).__name__} received None as a child; "
                 "every child must be a Widget instance. "
                 "Check for conditional expressions like "
-                "'Label('x') if condition else None' \u2014 use 'visible' instead."
+                "'Label('x') if condition else None' \u2014 use 'visible' instead. "
+                "A handler written with parentheses, Button(on_press=self.tap()), "
+                "returns None too and belongs in the keyword, not in the children."
             )
         if child is self:
             raise ValueError("a container cannot contain itself")
@@ -979,7 +1113,7 @@ def _not_found_hint(root: Widget, widget_id: str) -> str:
 def in_build_scope() -> bool:
     """Whether we are currently inside a Screen.build() call.
 
-    Used to suppress on_change/on_select callbacks during build() (BUG-25):
+    Used to suppress on_change/on_select callbacks during build():
     firing them while the tree is still being constructed would let a handler
     access widgets that haven't been created yet.
     Outside build() (standalone widgets, tests, user interactions) callbacks

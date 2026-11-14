@@ -68,6 +68,7 @@ class _Linear(Container):
         super().__init__(*children, **kwargs)
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: spacing and the two alignments."""
         props = {**super().props(), "spacing": self.spacing, "align": self.align}
         if self.cross_align is not None:
             props["cross_align"] = self.cross_align
@@ -113,6 +114,7 @@ class ScrollView(Container):
         super().__init__(*children, **kwargs)
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the spacing and the scroll direction."""
         return {**super().props(), "horizontal": self.horizontal, "spacing": self.spacing}
 
 
@@ -172,6 +174,7 @@ class Grid(Container):
         return -(-len(self.children) // self.columns)  # ceil division
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the column count and both gaps."""
         return {
             **super().props(),
             "columns": self.columns,
@@ -222,6 +225,7 @@ class Wrap(Container):
         super().__init__(*children, **kwargs)
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the gaps and the alignment of each run."""
         return {
             **super().props(),
             "spacing": self.spacing,
@@ -265,6 +269,7 @@ class _Flex(Container):
         return self.children[0]
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the flex factor and the fit mode."""
         return {**super().props(), "flex": self.flex, "fit": self.fit}
 
 
@@ -329,6 +334,7 @@ class Divider(Widget):
         self.vertical = vertical
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: thickness, inset, colour and orientation."""
         return {
             **super().props(),
             "thickness": self.thickness,
@@ -375,6 +381,7 @@ class SafeArea(Container):
         super().__init__(*children, **kwargs)
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: which edges to inset and by how much."""
         return {
             **super().props(),
             "top": self.top,

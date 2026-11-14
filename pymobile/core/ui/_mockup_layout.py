@@ -169,8 +169,14 @@ class _Layout(_WidgetLayout, _ChromeLayout):
             box.style = style
         if style.get("elevation") and style.get("background") is None:
             style["_surface"] = self.p["SURFACE"]
+        # Style(opacity=…) dims the widget and everything inside it — the same
+        # thing Android's View.setAlpha() does — so it composes with the dim a
+        # disabled widget already gets.
+        opacity = _number(style.get("opacity"))
+        if opacity is not None:
+            box.fade *= max(0.0, min(1.0, opacity))
         if not node.get("enabled", True):
-            box.fade = 0.45
+            box.fade *= 0.45
         return box
 
     def _padding(

@@ -215,9 +215,7 @@ class PngSnapshotChecker:
         """Check ``target`` (default: the last frame drawn); return the golden path."""
         if name is None:
             self._unnamed += 1
-            chosen = (
-                self._test_name if self._unnamed == 1 else f"{self._test_name}_{self._unnamed}"
-            )
+            chosen = self._test_name if self._unnamed == 1 else f"{self._test_name}_{self._unnamed}"
         else:
             chosen = snapshot_name(name)
         # ``ci`` is passed through instead of poking ``os.environ["CI"]``: the

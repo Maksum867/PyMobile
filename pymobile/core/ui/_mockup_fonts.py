@@ -43,6 +43,33 @@ _SANS_CANDIDATES: tuple[tuple[str, str], ...] = (
     ("C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/arialbd.ttf"),
 )
 
+#: Faces a ``Style(font_family="serif" | "monospace")`` resolves to, in order.
+_SERIF_CANDIDATES = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSerif-Regular.ttf",
+    "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
+    "C:/Windows/Fonts/times.ttf",
+)
+
+_MONO_CANDIDATES = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoMono-Regular.ttf",
+    "/System/Library/Fonts/Menlo.ttc",
+    "C:/Windows/Fonts/consola.ttf",
+)
+
+#: Where a named family is looked for (file names without spaces are tried too).
+_FONT_DIRECTORIES = (
+    "/usr/share/fonts/truetype",
+    "/usr/share/fonts/TTF",
+    "/usr/share/fonts",
+    "/Library/Fonts",
+    "/System/Library/Fonts",
+    "C:/Windows/Fonts",
+)
+
 #: Faces consulted glyph by glyph for what the main face lacks (CJK, symbols).
 _FALLBACK_CANDIDATES = (
     *_SYMBOL_CANDIDATES,
@@ -78,6 +105,7 @@ class _Fonts:
         return "", ""
 
     def font(self, path: str, size: float) -> Any:
+        """The font for ``size``, style flags and family, created once and cached."""
         key = (path, size)
         font = self._cache.get(key)
         if font is None:
@@ -101,17 +129,58 @@ class _Fonts:
             known = self._glyph[key] = _has_glyph(font, ch)
         return known
 
-    def runs(self, text: str, size: float, bold: bool = False) -> list[tuple[Any, str]]:
+    def family(self, requested: str) -> str:
+        """Resolve a ``Style(font_family=…)`` list to a font file, or ``""``.
+
+        Only the first family that resolves is used: a mockup says "this is not
+        the default face", it does not reproduce the whole fallback chain of a
+        device that may not have the font at all. Known families are looked up
+        under the usual font directories; an unknown name falls back to the
+        shipped sans face so the picture stays legible.
+        """
+        wanted = [part.strip().strip("'\"").lower() for part in requested.split(",")]
+        for name in wanted:
+            if not name:
+                continue
+            if name in ("sans-serif", "sans", "system-ui", "roboto", "arial", "helvetica"):
+                return self.regular
+            if name in ("serif", "georgia", "times", "times new roman", "noto serif"):
+                candidate = self._first_existing(_SERIF_CANDIDATES)
+                return candidate or self.regular
+            if name in ("monospace", "mono", "courier", "courier new", "consolas", "menlo"):
+                candidate = self._first_existing(_MONO_CANDIDATES)
+                return candidate or self.regular
+            for directory in _FONT_DIRECTORIES:
+                stem = Path(directory) / name.replace(" ", "")
+                for suffix in (".ttf", ".otf", ".ttc"):
+                    for attempt in (stem.with_suffix(suffix), stem.parent / f"{stem.name}{suffix}"):
+                        if attempt.is_file():
+                            return str(attempt)
+                    spaced = Path(directory) / f"{name.title().replace(' ', '')}{suffix}"
+                    if spaced.is_file():
+                        return str(spaced)
+        return self.regular
+
+    @staticmethod
+    def _first_existing(candidates: tuple[str, ...]) -> str:
+        for path in candidates:
+            if Path(path).is_file():
+                return path
+        return ""
+
+    def runs(
+        self, text: str, size: float, bold: bool = False, *, path: str | None = None
+    ) -> list[tuple[Any, str]]:
         """Split ``text`` into (font, chunk) runs, patching missing glyphs."""
-        main_path = self.bold if bold else self.regular
+        main_path = path or (self.bold if bold else self.regular)
         main = self.font(main_path, size)
         runs: list[tuple[Any, str]] = []
         for ch in text:
             chosen = main
             if not self._covers(main_path, main, ch):
-                for path in self._fallbacks:
-                    candidate = self.font(path, size)
-                    if self._covers(path, candidate, ch):
+                for fallback_path in self._fallbacks:
+                    candidate = self.font(fallback_path, size)
+                    if self._covers(fallback_path, candidate, ch):
                         chosen = candidate
                         break
                 else:
@@ -140,9 +209,12 @@ class _Fonts:
                 high = middle - 1
         return text[:low] + "…"
 
-    def width(self, text: str, size: float, bold: bool = False) -> float:
+    def width(
+        self, text: str, size: float, bold: bool = False, *, path: str | None = None
+    ) -> float:
+        """How wide ``text`` is when drawn in ``font``."""
         total = 0.0
-        for font, chunk in self.runs(text, size, bold):
+        for font, chunk in self.runs(text, size, bold, path=path):
             try:
                 total += float(font.getlength(chunk))
             except AttributeError:  # pragma: no cover - bitmap font
