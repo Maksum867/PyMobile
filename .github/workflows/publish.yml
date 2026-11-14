@@ -15,8 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     steps:
-      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
-      - uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3  # v5.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.13"
       - run: python -m pip install --upgrade pip build twine
@@ -31,7 +31,7 @@ jobs:
       # Never push an artifact whose metadata PyPI would reject anyway.
       - run: python -m twine check --strict dist/*
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@aef6c9b6e301dc803e1bc9133e9ce67ae9b0906b  # v1.14.3
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
         with:
           # A version can be published by hand before the release is cut; do
           # not fail the workflow over files that are already on PyPI.
