@@ -138,6 +138,56 @@ final class ViewInputs {
         return button;
     }
 
+    /**
+     * The soft keyboard a ``TextInput(keyboard=…)`` asks for.
+     *
+     * One table shared by the build path and the update path: asking for an
+     * e-mail keyboard used to mean typing TYPE_CLASS_TEXT and living with a
+     * full alphabetic keyboard with no @ key.
+     */
+    int inputTypeFor(JSONObject props) {
+        String keyboard = props.optString("keyboard", "text");
+        if (props.optBoolean("multiline", false) || "multiline".equals(keyboard)) {
+            return InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                    | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES;
+        }
+        if (props.optBoolean("password", false) || "password".equals(keyboard)) {
+            return InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD;
+        }
+        if ("email".equals(keyboard)) {
+            return InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS;
+        }
+        if ("url".equals(keyboard)) {
+            return InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI;
+        }
+        if ("search".equals(keyboard)) {
+            return InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_WEB_EDIT_TEXT;
+        }
+        if ("phone".equals(keyboard)) {
+            return InputType.TYPE_CLASS_PHONE;
+        }
+        if ("number".equals(keyboard)) {
+            return InputType.TYPE_CLASS_NUMBER;
+        }
+        if ("decimal".equals(keyboard)) {
+            return InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL;
+        }
+        return InputType.TYPE_CLASS_TEXT;
+    }
+
+    /** The IME action key, or 0 when the field keeps the platform default. */
+    int imeActionFor(JSONObject props) {
+        String action = props.optString("ime_action", "");
+        if ("done".equals(action)) return android.view.inputmethod.EditorInfo.IME_ACTION_DONE;
+        if ("go".equals(action)) return android.view.inputmethod.EditorInfo.IME_ACTION_GO;
+        if ("next".equals(action)) return android.view.inputmethod.EditorInfo.IME_ACTION_NEXT;
+        if ("search".equals(action)) return android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH;
+        if ("send".equals(action)) return android.view.inputmethod.EditorInfo.IME_ACTION_SEND;
+        if ("previous".equals(action)) return android.view.inputmethod.EditorInfo.IME_ACTION_PREVIOUS;
+        if ("none".equals(action)) return android.view.inputmethod.EditorInfo.IME_ACTION_NONE;
+        return 0;
+    }
+
     View buildTextInput(final String id, JSONObject props) {
         EditText input = new EditText(owner.context);
         input.setText(props.optString("value", ""));
@@ -145,17 +195,38 @@ final class ViewInputs {
         input.setTextColor(owner.colorText);
         input.setHintTextColor(owner.colorTextMuted);
         owner.inputRevisions.put(input, props.optInt("revision", 0));
+        input.setInputType(inputTypeFor(props));
         if (props.optBoolean("multiline", false)) {
-            input.setInputType(InputType.TYPE_CLASS_TEXT
-                    | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
             input.setMinLines(3);
-        } else if (props.optBoolean("password", false)) {
-            input.setInputType(InputType.TYPE_CLASS_TEXT
-                    | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         } else {
-            input.setInputType(InputType.TYPE_CLASS_TEXT);
             input.setSingleLine(true);
         }
+        int imeAction = imeActionFor(props);
+        if (imeAction != 0) {
+            input.setImeOptions(imeAction);
+        }
+        input.setOnEditorActionListener(new android.widget.TextView.OnEditorActionListener() {
+            @Override
+            public boolean onEditorAction(
+                    android.widget.TextView view, int actionId, android.view.KeyEvent event) {
+                boolean action = imeActionFor(props) != 0
+                        ? actionId == imeActionFor(props)
+                        : actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+                                || actionId == android.view.inputmethod.EditorInfo.IME_ACTION_GO
+                                || actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND
+                                || actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH;
+                if (event != null) {
+                    // A hardware Enter arrives as a key event instead.
+                    action = event.getKeyCode() == android.view.KeyEvent.KEYCODE_ENTER
+                            && event.getAction() == android.view.KeyEvent.ACTION_DOWN;
+                }
+                if (!action) {
+                    return false;
+                }
+                Native.dispatchEvent(id, "submit", input.getText().toString());
+                return true;
+            }
+        });
         input.addTextChangedListener(new TextWatcher() {
             @Override
             public void beforeTextChanged(CharSequence s, int a, int b, int c) {

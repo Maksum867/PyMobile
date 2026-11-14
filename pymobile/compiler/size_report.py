@@ -20,6 +20,7 @@ class SizeReport:
     dependencies: dict[str, int]
 
     def to_dict(self) -> dict[str, object]:
+        """The report as plain data, ready to serialise."""
         return {
             "apk": str(self.apk),
             "total": self.total,

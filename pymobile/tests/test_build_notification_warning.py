@@ -120,7 +120,7 @@ def test_a_project_exclude_pattern_removes_a_file_from_the_scan(root: Path) -> N
 
 
 def test_a_file_with_notification_use_is_reported(root: Path) -> None:
-    # П-06: a file with a syntax error fails the build before any
+    # A file with a syntax error fails the build before any
     # notification scan can run (fail-fast is the whole point). The fallback
     # regex still works for *individual* AST-parsing failures inside
     # find_notification_use(), but the build as a whole refuses files that

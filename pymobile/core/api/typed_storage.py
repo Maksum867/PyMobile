@@ -13,14 +13,17 @@ A model needs a stable ``id`` field by default. Dataclasses are converted with
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, is_dataclass
 from typing import Any, Generic, TypeVar, cast
 
 from ...errors import ModelStoreError
+from ...log import get_logger
 from .storage import Storage
 
-__all__ = ["ModelStore", "ModelMigration"]
+__all__ = ["ModelStore", "ModelMigration", "Q", "ENVELOPE_WARN_BYTES"]
+
+_log = get_logger("api.typed_storage")
 
 T = TypeVar("T")
 ModelId = str | int
@@ -28,6 +31,151 @@ _Record = dict[str, Any]
 
 #: A step takes all records at schema ``n`` and returns their schema ``n + 1``.
 ModelMigration = Callable[[list[_Record]], list[Mapping[str, Any]]]
+
+
+class Q:
+    """A query expression for :meth:`ModelStore.find`.
+
+    Deliberately tiny: ``Q`` compares one field, ``&`` and ``|`` combine
+    queries, ``~`` negates one. A dict passed to ``find`` means the same as an
+    ``&`` of ``Q(field, "==", value)`` for every entry, which is what a caller
+    writing ``store.find(lambda m: …)`` actually wanted most of the time.
+
+    >>> Q("done", "==", False) & Q("priority", ">=", 2)
+    """
+
+    __slots__ = ("_text", "_predicate")
+    _predicate: Callable[[Mapping[str, Any]], bool]
+    _text: str
+
+    def __init__(self, field: str, op: str, value: Any = None) -> None:
+        if not isinstance(field, str) or not field.strip():
+            raise ValueError("Q needs a field name")
+        if op not in _OPERATORS:
+            raise ValueError(f"unknown operator {op!r}; use one of {', '.join(sorted(_OPERATORS))}")
+        compare = _OPERATORS[op]
+        self._text = f"{field} {op} {value!r}"
+
+        def predicate(record: Mapping[str, Any]) -> bool:
+            if field not in record:
+                return False
+            try:
+                return bool(compare(record[field], value))
+            except TypeError:
+                # Comparing 3 with "three" is a data question, not a crash:
+                # the record simply does not match.
+                return False
+
+        self._predicate = predicate
+
+    def __and__(self, other: Q) -> Q:
+        return _Combined(
+            lambda record: self.matches(record) and other.matches(record), f"({self} and {other})"
+        )
+
+    def __or__(self, other: Q) -> Q:
+        return _Combined(
+            lambda record: self.matches(record) or other.matches(record), f"({self} or {other})"
+        )
+
+    def __invert__(self) -> Q:
+        return _Combined(lambda record: not self.matches(record), f"not ({self})")
+
+    def matches(self, record: Mapping[str, Any]) -> bool:
+        """Whether ``record`` satisfies this query."""
+        return self._predicate(record)
+
+    def __repr__(self) -> str:
+        return f"Q({self._text})"
+
+
+#: A warning threshold for one model store's envelope; beyond this, every write
+#: serialises the whole list and the store should be split or moved to sqlite3.
+ENVELOPE_WARN_BYTES = 1_000_000
+
+
+def _check_envelope_overflow(key: str, by_id: Mapping[Any, Mapping[str, Any]]) -> None:
+    """Warn once per store when the record list outgrows a single JSON value."""
+    if len(by_id) % 500:
+        return
+    try:
+        size = len(json.dumps(list(by_id.values())))
+    except (TypeError, ValueError):  # pragma: no cover - records are JSON by contract
+        return
+    if size > ENVELOPE_WARN_BYTES:
+        _log.warning(
+            "model store %r holds %d records (~%.1f MB) in one JSON array: every "
+            "write rewrites all of them; consider sqlite3 or splitting the store",
+            key,
+            len(by_id),
+            size / 1_000_000,
+        )
+
+
+def _matches(
+    query: object,
+    record: Mapping[str, Any],
+    decode: Callable[[Mapping[str, Any]], Any] | None = None,
+) -> bool:
+    """Apply a ``find`` query to one raw record."""
+    if query is None:
+        return True
+    if isinstance(query, Q):
+        return query.matches(record)
+    if isinstance(query, Mapping):
+        return all(
+            _OPERATORS["=="](record.get(field, _MISSING), value) for field, value in query.items()
+        )
+    if callable(query):
+        # A predicate on the *model* cannot be applied to a raw record: decode
+        # the record to ask the question, which keeps dict/Q filters cheap and
+        # lets a caller write the obvious lambda when it is clearer.
+        return bool(query(decode(record) if decode is not None else record))
+    raise TypeError("query must be a Q, a mapping of fields or a callable predicate")
+
+
+def _sort_key(record: Mapping[str, Any], fields: list[str]) -> tuple[Any, ...]:
+    """A total order across records, tolerating a missing or mixed-type field."""
+    parts: list[tuple[int, Any]] = []
+    for field in fields:
+        value = record.get(field, _MISSING)
+        if value is _MISSING:
+            parts.append((1, ""))
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            parts.append((0, value))
+        else:
+            parts.append((0, str(value)))
+    return tuple(parts)
+
+
+class _Combined(Q):
+    """The result of ``&``, ``|`` or ``~``; kept separate to keep the slots tidy."""
+
+    __slots__ = ()
+
+    def __init__(self, predicate: Callable[[Mapping[str, Any]], bool], text: str) -> None:
+        self._predicate = predicate
+        self._text = text
+
+
+_OPERATORS: dict[str, Callable[[Any, Any], bool]] = {
+    "==": lambda a, b: a == b,
+    "!=": lambda a, b: a != b,
+    "<": lambda a, b: a < b,
+    "<=": lambda a, b: a <= b,
+    ">": lambda a, b: a > b,
+    ">=": lambda a, b: a >= b,
+    "in": lambda a, b: a in b,
+    "not in": lambda a, b: a not in b,
+    "contains": lambda a, b: b in a,
+    "startswith": lambda a, b: isinstance(a, str) and a.startswith(b),
+    "endswith": lambda a, b: isinstance(a, str) and a.endswith(b),
+}
+
+#: Sentinel for "this field is absent" so a missing field never equals None.
+_MISSING: Any = object()
+
+Query = Q | Mapping[str, Any] | Callable[[T], bool]
 
 
 class ModelStore(Generic[T]):
@@ -42,8 +190,10 @@ class ModelStore(Generic[T]):
     JSON cannot reconstruct by calling its constructor, provide both
     ``to_record=`` and ``from_record=``.
 
-    ``migrations`` maps the *source* version to a function that upgrades the
-    complete list of records by one version. For example, ``{1: migrate_v1}``
+    ``migrations`` maps the *source* version to a function, like
+    ``Storage``'s ``{version: fn}`` is keyed by the version the store is
+    already at — both mean "this is the function that runs when the stored data
+    is at that version". ``{1: migrate_v1}`` upgrades v1 records to v2.
     handles the transition from schema 1 to schema 2. Migrations run in order
     and are written back atomically on the next read or write. A missing step
     or a store created by a newer app raises :class:`ModelStoreError`; data is
@@ -75,6 +225,8 @@ class ModelStore(Generic[T]):
         "_migrations",
         "_to_record",
         "_from_record",
+        "_by_id",
+        "_indexed",
     )
 
     def __init__(
@@ -120,8 +272,8 @@ class ModelStore(Generic[T]):
                 or source_version >= schema_version
             ):
                 raise ValueError(
-                    "migration keys must be source versions from 1 up to "
-                    "schema_version - 1"
+                    "migration keys are the version the store is at "
+                    "(1 up to schema_version - 1), the same convention as Storage"
                 )
             if not callable(migration):
                 raise TypeError(f"migration for schema {source_version} must be callable")
@@ -135,6 +287,17 @@ class ModelStore(Generic[T]):
         self._migrations = checked_migrations
         self._to_record = to_record
         self._from_record = from_record
+        # id -> record, built once per store. Every read used to walk and
+        # re-validate the whole list, so 1000 sequential puts cost five
+        # seconds; ``put``/``delete`` now touch one entry and the cache is
+        # dropped whenever the envelope on disk is replaced from outside.
+        self._by_id: dict[Any, _Record] = {}
+        self._indexed = False
+
+    @property
+    def storage(self) -> Storage:
+        """The :class:`Storage` this store keeps its records in."""
+        return self._storage
 
     @property
     def key(self) -> str:
@@ -168,9 +331,7 @@ class ModelStore(Generic[T]):
         if any(not isinstance(name, str) for name in record):
             raise ModelStoreError(f"{context} field names must be strings")
         try:
-            converted = json.loads(
-                json.dumps(dict(record), ensure_ascii=False, allow_nan=False)
-            )
+            converted = json.loads(json.dumps(dict(record), ensure_ascii=False, allow_nan=False))
         except (TypeError, ValueError) as exc:
             raise ModelStoreError(
                 f"{context} is not JSON serializable: {exc}",
@@ -258,16 +419,82 @@ class ModelStore(Generic[T]):
             )
         return records
 
+    def _records(self) -> list[_Record]:
+        """Every record, through the id cache; caller holds the transaction."""
+        if not self._indexed:
+            records = self._read_records()
+            self._by_id = {
+                self._identifier(record, context="stored record"): record for record in records
+            }
+            self._indexed = True
+            return records
+        return list(self._by_id.values())
+
+    def _invalidate(self) -> None:
+        self._indexed = False
+        self._by_id = {}
+
+    def find(
+        self,
+        query: Q | Mapping[str, Any] | Callable[[T], bool] | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        order_by: str | Iterable[str] | None = None,
+        reverse: bool = False,
+    ) -> list[T]:
+        """Return the models matching ``query``, decoded.
+
+        ``query`` is a :class:`Q`, a mapping (all fields must match) or a plain
+        predicate on the model. ``order_by`` names one or more record fields;
+        ``limit``/``offset`` page the result. Filtering happens on the stored
+        records — before decoding — so a page of ten does not build a thousand
+        dataclasses.
+        """
+        if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool)):
+            raise TypeError("limit must be an int or None")
+        if limit is not None and limit < 0:
+            raise ValueError("limit must be >= 0")
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise ValueError("offset must be an int >= 0")
+        decode = self._decode if callable(query) and not isinstance(query, Q) else None
+        with self._storage.transaction():
+            records = self._records()
+            matched = [record for record in records if _matches(query, record, decode)]
+        if order_by is not None:
+            fields = [order_by] if isinstance(order_by, str) else list(order_by)
+            for field in fields:
+                if not isinstance(field, str):
+                    raise TypeError("order_by takes field names")
+            matched.sort(key=lambda record: _sort_key(record, fields), reverse=reverse)
+        window = matched[offset:] if limit is None else matched[offset : offset + limit]
+        return [self._decode(record) for record in window]
+
+    def count(self, query: Q | Mapping[str, Any] | Callable[[T], bool] | None = None) -> int:
+        """How many models match ``query`` (``None`` counts everything).
+
+        Counted on records, so it costs no decoding and no list of models.
+        """
+        decode = self._decode if callable(query) and not isinstance(query, Q) else None
+        with self._storage.transaction():
+            return sum(1 for record in self._records() if _matches(query, record, decode))
+
+    def get_by(self, **fields: Any) -> T | None:
+        """The first model whose fields equal ``fields``, or ``None``.
+
+        The indexed shortcut for ``store.get(store.find({"email": email})[0].id)``.
+        """
+        if not fields:
+            raise ValueError("get_by needs at least one field")
+        found = self.find(fields, limit=1)
+        return found[0] if found else None
+
     def _encode(self, model: T) -> _Record:
         if not isinstance(model, self._model_type):
-            raise TypeError(
-                f"expected {self._model_type.__name__}, got {type(model).__name__}"
-            )
+            raise TypeError(f"expected {self._model_type.__name__}, got {type(model).__name__}")
         try:
             source = (
-                self._to_record(model)
-                if self._to_record is not None
-                else asdict(cast(Any, model))
+                self._to_record(model) if self._to_record is not None else asdict(cast(Any, model))
             )
         except Exception as exc:
             raise ModelStoreError(
@@ -297,7 +524,7 @@ class ModelStore(Generic[T]):
     def all(self) -> list[T]:
         """Return every stored model in insertion order."""
         with self._storage.transaction():
-            return [self._decode(record) for record in self._read_records()]
+            return [self._decode(record) for record in self._records()]
 
     def list(self) -> list[T]:
         """Alias for :meth:`all`."""
@@ -307,11 +534,9 @@ class ModelStore(Generic[T]):
         """Return a model by id, or ``None`` when it does not exist."""
         self._validate_lookup_id(identifier)
         with self._storage.transaction():
-            for record in self._read_records():
-                stored_id = self._identifier(record, context="stored record")
-                if type(stored_id) is type(identifier) and stored_id == identifier:
-                    return self._decode(record)
-        return None
+            self._records()  # populates the id cache
+            record = self._lookup(identifier)
+            return None if record is None else self._decode(record)
 
     def put(self, model: T) -> T:
         """Insert or replace a model, identified by ``id_field``.
@@ -328,17 +553,17 @@ class ModelStore(Generic[T]):
         record = self._encode(model)
         identifier = self._identifier(record, context=f"{self._model_type.__name__} record")
         with self._storage.transaction() as storage:
-            records = self._read_records()
-            for index, stored in enumerate(records):
-                stored_id = self._identifier(stored, context="stored record")
-                if type(stored_id) is type(identifier) and stored_id == identifier:
-                    records[index] = record
-                    break
-            else:
-                records.append(record)
+            self._records()
+            # One dict write instead of a list walk and a full re-validation:
+            # this is what turns 1000 puts from five seconds into milliseconds.
+            self._by_id[identifier] = record
+            _check_envelope_overflow(self._key, self._by_id)
             storage.set(
                 self._key,
-                {"schema_version": self._schema_version, "records": records},
+                {
+                    "schema_version": self._schema_version,
+                    "records": list(self._by_id.values()),
+                },
             )
         return model
 
@@ -375,8 +600,7 @@ class ModelStore(Generic[T]):
             if not hasattr(model, name):
                 known = ", ".join(sorted(vars(model))) or "none"
                 raise ModelStoreError(
-                    f"{self._model_type.__name__} has no field {name!r} "
-                    f"(fields: {known})"
+                    f"{self._model_type.__name__} has no field {name!r} (fields: {known})"
                 )
             try:
                 setattr(model, name, value)
@@ -394,31 +618,43 @@ class ModelStore(Generic[T]):
         """Delete a model by id; return ``False`` when the id was absent."""
         self._validate_lookup_id(identifier)
         with self._storage.transaction() as storage:
-            records = self._read_records()
-            remaining = [
-                record
-                for record in records
-                if not (
-                    type(self._identifier(record, context="stored record")) is type(identifier)
-                    and self._identifier(record, context="stored record") == identifier
-                )
-            ]
-            if len(remaining) == len(records):
+            self._records()
+            if self._lookup(identifier) is None:
                 return False
+            del self._by_id[identifier]
             storage.set(
                 self._key,
-                {"schema_version": self._schema_version, "records": remaining},
+                {
+                    "schema_version": self._schema_version,
+                    "records": list(self._by_id.values()),
+                },
             )
             return True
 
     def clear(self) -> None:
         """Remove all records while keeping an empty envelope at the current schema."""
         with self._storage.transaction() as storage:
+            self._invalidate()
             storage.set(self._key, {"schema_version": self._schema_version, "records": []})
 
     def __len__(self) -> int:
         with self._storage.transaction():
-            return len(self._read_records())
+            return len(self._records())
+
+    def _lookup(self, identifier: ModelId) -> _Record | None:
+        """The raw record for ``identifier``, comparing types as before.
+
+        ``True == 1`` in Python; a store keyed by strings must not hand back the
+        record whose id is ``1`` for a lookup of ``True``.
+        """
+        record = self._by_id.get(identifier)
+        if record is None:
+            return None
+        if type(record.get(self._id_field)) is not type(identifier):
+            # ``True == 1`` and they hash alike, so the dict would happily hand
+            # back the row whose id is ``1`` for a lookup of ``True``.
+            return None
+        return record
 
     @staticmethod
     def _validate_lookup_id(identifier: ModelId) -> None:

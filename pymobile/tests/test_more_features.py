@@ -64,6 +64,7 @@ def test_integer_number():
     assert number(1.5) is None
     assert number("3.14") is None
 
+
 def test_number_accepts_decimal_comma():
     """0.9.4: prices typed in Ukrainian/European notation ("89,90")."""
     assert number("89,90") is None

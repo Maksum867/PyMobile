@@ -158,6 +158,26 @@ public final class Native {
         return DeviceServices.share(MainActivity.current(), text, url, subject);
     }
 
+    // -- keystore-backed secrets ------------------------------------------
+
+    /**
+     * Store ``value`` under ``name``, encrypted with a key that lives in the
+     * Android keystore (AES-GCM). False when the keystore is unavailable.
+     */
+    public static boolean putSecret(String name, String value) {
+        return DeviceServices.putSecret(MainActivity.current(), name, value);
+    }
+
+    /** Read a secret back; an empty string when it is absent or unreadable. */
+    public static String getSecret(String name) {
+        return DeviceServices.getSecret(MainActivity.current(), name);
+    }
+
+    /** Delete a secret; false when there was nothing to delete. */
+    public static boolean deleteSecret(String name) {
+        return DeviceServices.deleteSecret(MainActivity.current(), name);
+    }
+
     // -- audio ------------------------------------------------------------
 
     /**

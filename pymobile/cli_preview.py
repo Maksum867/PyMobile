@@ -372,8 +372,8 @@ def cmd_preview(args: argparse.Namespace) -> int:
         cli._out.ok(f"wrote the text preview to {path}")
     elif args.png:
         width, height = cli._parse_size(getattr(args, "size", None))
-        # П-05: surface size validation as an expected error instead of the
-        # generic "unexpected error: width must be at least 120 dp".
+        # Surface size validation as an expected error instead of the generic
+        # "unexpected error: width must be at least 120 dp".
         if width < 120:
             raise PyMobileError(
                 "width must be at least 120 dp",

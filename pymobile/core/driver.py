@@ -129,9 +129,7 @@ def discover_screens(
     # The entry point has already been executed as ``__main__``: importing the
     # same file again would define every screen a second time and make names
     # ambiguous. Callers pass it in ``exclude``.
-    skipped = {
-        str(Path(item).expanduser().resolve()) for item in exclude
-    }
+    skipped = {str(Path(item).expanduser().resolve()) for item in exclude}
     roots: list[Path] = []
     for raw in paths:
         root = Path(raw).expanduser().resolve()
@@ -220,9 +218,7 @@ def _path_token(path: Path) -> str:
     return hashlib.blake2s(str(path.resolve()).encode("utf-8"), digest_size=4).hexdigest()
 
 
-def find_screen_class(
-    name: str, candidates: Iterable[type[Screen]] | None = None
-) -> type[Screen]:
+def find_screen_class(name: str, candidates: Iterable[type[Screen]] | None = None) -> type[Screen]:
     """The :class:`Screen` subclass called ``name`` (``Result``, ``screens.Result``).
 
     Raises :class:`PyMobileError` listing the screens that exist when there is
@@ -405,11 +401,7 @@ class Driver:
                 raise PyMobileError("arguments only apply when the screen is opened by class")
             instance = target
         else:
-            cls = (
-                find_screen_class(target, self._screens)
-                if isinstance(target, str)
-                else target
-            )
+            cls = find_screen_class(target, self._screens) if isinstance(target, str) else target
             try:
                 instance = cls(*args, **kwargs)
             except TypeError as error:
@@ -418,7 +410,7 @@ class Driver:
                     hint=(
                         "Pass what its constructor needs — from the command line with "
                         "--set score=7 (repeatable, no quoting needed) or as JSON: "
-                        '--args \'{"score": 7}\' (an object is keywords, a list is positional).'
+                        "--args '{\"score\": 7}' (an object is keywords, a list is positional)."
                     ),
                 ) from error
         if self.app.screen is None:
@@ -501,8 +493,7 @@ class Driver:
         if chosen is None:
             described = "; ".join(
                 ", ".join(
-                    str(label)
-                    for label in getattr(bar, "labels", getattr(bar, "options", ()))
+                    str(label) for label in getattr(bar, "labels", getattr(bar, "options", ()))
                 )
                 for bar in bars
             )
@@ -528,7 +519,7 @@ class Driver:
         everything else is sent as the text the front end would send.
         """
         widget = self._usable(widget_id, "change")
-        # П-09: mirror the guard in press() — a Button/Chip/Link that only
+        # Mirror the guard in press(): a Button/Chip/Link that only
         # supports a tap must not silently swallow `id=value` routes.
         accepts_value = (
             hasattr(widget, "set_checked")  # Switch / Checkbox
@@ -575,7 +566,7 @@ class Driver:
                     else:
                         self.change(step.target, step.value)
                 except PyMobileError as exc:
-                    # П-17: if the user wrote "Meniu.start" (typo in a screen
+                    # If the user wrote "Meniu.start" (typo in a screen
                     # name) the parser treated "Meniu.start" as a widget id
                     # because "Meniu" is not a known screen. Surface a screen
                     # hint in addition to whatever the widget hint says.
@@ -585,9 +576,7 @@ class Driver:
                         close_screen = get_close_matches(head, names, n=1, cutoff=0.6)
                         if close_screen and close_screen[0] != head:
                             tail = step.text.split(".", 1)[-1] if "." in step.text else "widget"
-                            hint = (
-                                (exc.hint + " ") if exc.hint else ""
-                            ) + (
+                            hint = ((exc.hint + " ") if exc.hint else "") + (
                                 f"Did you mean the screen {close_screen[0]!r}? "
                                 f"Write it as {close_screen[0]}.{tail}."
                             )

@@ -119,7 +119,7 @@ DEFAULT_ASSET_SUFFIXES = frozenset(
 #: Directories never considered when reporting files that were not packaged.
 #: Reuses the same set the collector skips so the warning does not fire on
 #: cache/tag files inside .pytest_cache/.mypy_cache/.ruff_cache/node_modules
-#: (П-19 — the collector already knows about them).
+#: (the collector already knows about them).
 _IGNORED_ASSET_DIRS = frozenset(_ALWAYS_EXCLUDED_DIRS | {".pymobile", "build", "dist"})
 
 #: Names that make ``<receiver>.notify(...)`` a PyMobile notification: ``app``,
@@ -253,10 +253,20 @@ class BuildPipeline:
         keystore_password: str | None = None,
         key_alias: str | None = None,
         key_password: str | None = None,
+        debug: bool = False,
+        bundle: bool = False,
     ) -> None:
         self.config = config
         self.use_cache = use_cache
         self.native = native
+        #: ``build --native --bundle``: also write the ``.aab`` Google Play
+        #: requires (an APK cannot be uploaded any more).
+        self.bundle = bundle
+        #: ``build --native --debug``: add ``android:debuggable="true"`` so
+        #: `adb shell run-as`, Layout Inspector and the Android Studio debugger
+        #: can attach. Refused together with a release keystore — a debuggable
+        #: APK must never be the artifact a store or a user installs.
+        self.debug = debug
         self.check_startup = native if check_startup is None else check_startup
         self.on_stage = on_stage
         self.keystore = keystore
@@ -293,6 +303,25 @@ class BuildPipeline:
     def _validate(self) -> None:
         """Re-check the configuration and warn about likely mistakes."""
         self.config.validate()
+        if self.debug and not self.native:
+            raise PyMobileError(
+                "`--debug` only applies to a native APK",
+                hint="A structural package never installs, so it has nothing to debug. "
+                "Run `pymobile build --native --debug`.",
+            )
+        if self.bundle and not self.native:
+            raise PyMobileError(
+                "`--bundle` needs a native build",
+                hint="An app bundle contains a compiled APK's contents; a structural "
+                "package has none. Run `pymobile build --native --bundle`.",
+            )
+        if self.debug and self.keystore is not None:
+            raise PyMobileError(
+                "`--debug` cannot be combined with a release keystore",
+                hint="A debuggable APK lets anything with the key attach a debugger; "
+                "build and test it without `--keystore`, then sign a release build "
+                "without `--debug`.",
+            )
         if self.config.min_sdk < self.config.effective_min_sdk:
             self.warnings.append(
                 f"min_sdk = {self.config.min_sdk} is below what the embedded CPython 3.14 "
@@ -313,6 +342,17 @@ class BuildPipeline:
                     "Full Python stdlib is included. Use --minimal-stdlib to reduce APK size; "
                     "test the reduced build against your app's imports before distributing."
                 )
+        from .sdk_installer import SDK_PLATFORM
+
+        if self.config.target_sdk > SDK_PLATFORM:
+            self.warnings.append(
+                f"target_sdk = {self.config.target_sdk} is newer than the Android platform "
+                f"the toolchain installs (android-{SDK_PLATFORM}): the APK still compiles "
+                f"against API {SDK_PLATFORM}, so APIs from {self.config.target_sdk} are not "
+                f"available and behaviour switches meant for it will not apply. "
+                f"Set target_sdk = {SDK_PLATFORM} in pymobile.toml, or install a newer "
+                "command-line tools release and rebuild."
+            )
         permissions = {str(p) for p in self.config.permissions}
         if "android.permission.INTERNET" not in permissions and self._uses_http():
             self.warnings.append(
@@ -529,7 +569,7 @@ class BuildPipeline:
         against the allowed set (defaults + ``asset_suffixes``), not against
         what happened to be collected.
         """
-        from .collector import _is_excluded
+        from .collector import _is_excluded, is_credential_file
 
         allowed_suffixes = DEFAULT_ASSET_SUFFIXES | {
             str(suffix).lower() for suffix in self.config.asset_suffixes
@@ -540,6 +580,7 @@ class BuildPipeline:
         java_overlay = self.config.root / "java"
         ignored: dict[str, int] = {}
         secret_packaged: list[str] = []
+        credentials_skipped: list[str] = []
         for path in self.config.source_path.rglob("*"):
             if not path.is_file():
                 continue
@@ -547,6 +588,11 @@ class BuildPipeline:
             if any(part in _IGNORED_ASSET_DIRS for part in relative.parts):
                 continue
             if _is_excluded(relative, self.config.exclude):
+                continue
+            if is_credential_file(relative):
+                # collect_sources() drops these; say so instead of leaving the
+                # user to wonder why a file they did not exclude is missing.
+                credentials_skipped.append(relative.as_posix())
                 continue
             if path.suffix.lower() == ".java":
                 try:
@@ -558,7 +604,7 @@ class BuildPipeline:
             suffix = path.suffix.lower()
             if suffix and suffix not in allowed_suffixes:
                 ignored[suffix] = ignored.get(suffix, 0) + 1
-            # П-03: warn when a secret-like file IS packaged (not excluded).
+            # Warn when a secret-like file IS packaged (not excluded).
             if path.name in SECRET_LIKE_BASENAMES or suffix in SECRET_LIKE_SUFFIXES:
                 secret_packaged.append(relative.as_posix())
         if ignored:
@@ -567,6 +613,19 @@ class BuildPipeline:
                 f"files under {self.config.source_path.name}/ were NOT packaged: {listed}. "
                 "Add the extensions you need with `asset_suffixes = ['…']` in "
                 "pymobile.toml (read them on device through the packaged app dir)."
+            )
+        if credentials_skipped:
+            listed = ", ".join(sorted(credentials_skipped)[:5])
+            more = (
+                ""
+                if len(credentials_skipped) <= 5
+                else f" … (+{len(credentials_skipped) - 5} more)"
+            )
+            self.warnings.append(
+                f"kept out of the APK as credentials: {listed}{more}. "
+                "Anything inside an APK can be extracted. If one of these is app "
+                "content rather than a secret, rename it (or read it from "
+                "`~/.pymobile/` at build time and ship the result)."
             )
         if secret_packaged:
             listed = ", ".join(sorted(secret_packaged)[:5])
@@ -579,7 +638,7 @@ class BuildPipeline:
             )
 
     def _check_python_syntax(self, sources: SourceSet) -> None:
-        """П-06: fail the build on a syntax error instead of shipping broken code.
+        """Fail the build on a syntax error instead of shipping broken code.
 
         ``py_compile`` used to emit a warning and continue, producing an APK
         that installs but crashes at launch with ImportError. A plain
@@ -729,7 +788,7 @@ class BuildPipeline:
     ) -> PackageResult:
         """Write the final archive."""
         resources = {
-            f"res/mipmap-{density}/icon.png": path for density, path in icons.files.items()
+            f"res/mipmap-{density}/ic_launcher.png": path for density, path in icons.files.items()
         }
         entrypoint = sources.entrypoint.relative_to(sources.root).as_posix()
         packaged = {name for name, _ in entries}
@@ -760,7 +819,7 @@ class BuildPipeline:
         self._stage("validate", self._validate)
         self._warn_unexcluded_output()
         sources: SourceSet = self._stage("collect", self._collect)
-        # П-06: fail fast on Python syntax errors rather than shipping an
+        # Fail fast on Python syntax errors rather than shipping an
         # APK that crashes at launch.
         self._stage("syntax", lambda: self._check_python_syntax(sources))
         self._check_requested_permissions(sources)
@@ -809,7 +868,7 @@ class BuildPipeline:
 
         output_dir = self.config.output_path
         output_dir.mkdir(parents=True, exist_ok=True)
-        apk_path = output_dir / self.config.apk_name
+        apk_path = output_dir / self.config.apk_name_for(self.build_mode())
 
         cache = BuildCache(output_dir)
         fingerprint = self._fingerprint(sources, dependencies)
@@ -927,7 +986,8 @@ class BuildPipeline:
             require_javac=has_project_java or os.environ.get("PYMOBILE_BUILD_JAVA") != "0",
         )
 
-        runtime = self._stage("runtime", lambda: ensure_runtime(self.config.abis[0]))
+        primary_abi = self.config.abis[0]
+        runtime = self._stage("runtime", lambda: ensure_runtime(primary_abi))
         backend = NativeBackend(
             self.config,
             toolchain,
@@ -938,15 +998,9 @@ class BuildPipeline:
             keystore_password=self.keystore_password,
             key_alias=self.key_alias,
             key_password=self.key_password,
-            abi=self.config.abis[0],
+            abi=primary_abi,
+            debuggable=self.debug,
         )
-        if len(self.config.abis) > 1:
-            # The native backend packages only the first ABI; surfacing this
-            # beats silently shipping an APK that ignores the rest.
-            self.warnings.append(
-                "native builds package only the first requested ABI "
-                f"({self.config.abis[0]} of {self.config.abis}); build one ABI at a time"
-            )
 
         # What the launcher has to run: recorded in assets/pymobile.properties
         # and, for the prebuilt launcher, in a main.py bootstrap as well.
@@ -956,10 +1010,10 @@ class BuildPipeline:
         backend.set_entrypoint(entrypoint_name, entrypoint_type)
         # The launcher re-extracts its bundled Python when this changes, so an
         # ``edit → build → adb install -r`` that keeps versionCode = 1 no
-        # longer leaves the previous build's app code on disk (PM-29).
+        # longer leaves the previous build's app code on disk.
         backend.set_payload_digest(fingerprint)
 
-        native_dir = self._stage("jni", lambda: backend.compile_jni(workdir))
+        native_dir = self._stage("jni", lambda: self._compile_native_libraries(backend, workdir))
         dex = self._stage("dex", lambda: backend.compile_java(workdir))
         self._verify_renderers(dex)
         base = self._stage("resources", lambda: backend.link_resources(workdir, icons.files))
@@ -973,6 +1027,9 @@ class BuildPipeline:
             self.warnings.append("apksigner could not verify the signature")
         self.warnings.extend(backend.warnings)
 
+        if self.bundle:
+            self._write_app_bundle(backend, workdir, apk_path)
+
         duration = time.perf_counter() - started
         return BuildResult(
             apk=signed,
@@ -984,6 +1041,199 @@ class BuildPipeline:
             icon_is_default=icons.is_default,
             timings=list(self._timings),
             warnings=list(self.warnings),
+        )
+
+    def _compile_native_libraries(self, backend: NativeBackend, workdir: Path) -> Path:
+        """Compile ``libpymobile.so`` for every requested ABI into one ``lib/``.
+
+        An APK could only ever carry the first ABI: ``abis = ["arm64-v8a",
+        "x86_64"]`` silently produced an arm64-only package, so the same file
+        could not run on an emulator. Each ABI now gets its own
+        ``lib/<abi>/`` directory in a single, larger APK (a split APK per ABI
+        would need a build per ABI and a bundle to ship them).
+        """
+        shared = workdir / "lib"
+        first: Path | None = None
+        for index, abi in enumerate(self.config.abis):
+            if index == 0:
+                directory = self._stage("jni", lambda: backend.compile_jni(workdir))
+            else:
+                directory = self._stage(f"jni:{abi}", self._secondary_stage(backend, abi, workdir))
+            first = first or directory
+            target = shared / abi
+            if directory == target:
+                continue
+            target.mkdir(parents=True, exist_ok=True)
+            for library in directory.glob("*.so"):
+                shutil.copyfile(library, target / library.name)
+        if len(self.config.abis) > 1:
+            self.warnings.append(
+                "APK carries " + ", ".join(self.config.abis) + "; one file for every device, "
+                "at the size of all of them together. Pick one with --abi for a smaller APK."
+            )
+        return shared
+
+    def _secondary_stage(
+        self, backend: NativeBackend, abi: str, workdir: Path
+    ) -> Callable[[], Path]:
+        """A thunk, so the stage timer sees a call rather than a closure."""
+        return lambda: self._compile_secondary_abi(backend, abi, workdir)
+
+    def _compile_secondary_abi(self, backend: NativeBackend, abi: str, workdir: Path) -> Path:
+        """Run the ABI-independent parts of the build for a second architecture."""
+        toolchain = backend.toolchain
+        runtime = ensure_runtime(abi)
+        secondary = NativeBackend(
+            self.config,
+            toolchain,
+            runtime,
+            keystore=self.keystore,
+            keystore_password=self.keystore_password,
+            key_alias=self.key_alias,
+            key_password=self.key_password,
+            abi=abi,
+            debuggable=self.debug,
+        )
+        secondary.set_entrypoint(backend.entrypoint_name, backend.entrypoint_type)
+        secondary.set_payload_digest(backend.payload_digest)
+        directory = secondary.compile_jni(workdir)
+        self.warnings.extend(secondary.warnings)
+        return directory
+
+    def _run_aapt2(self, command: list[str | Path]) -> None:
+        """Run ``aapt2 link`` (the bundle needs a proto-format second link)."""
+        from .backends.native import _run
+
+        _run(command, step="aapt2 link (bundle)", java_home=find_toolchain().java_home)
+
+    def _write_app_bundle(self, backend: NativeBackend, workdir: Path, apk_path: Path) -> None:
+        """Write the ``.aab`` next to the APK and verify it with bundletool.
+
+        The bundle is assembled from the same artifacts the APK used — the
+        binary manifest, ``classes.dex``, the assets and the native libraries —
+        so the two cannot drift. ``bundletool validate`` then reads the whole
+        thing, which is the only check that answers "will Play accept this".
+        Without a JDK or bundletool the file is still written and a warning says
+        plainly that it was not verified.
+        """
+        import zipfile
+
+        from .bundle import build_bundle, bundletool_path, validate_bundle
+
+        output = apk_path.with_suffix(".aab")
+
+        def stage() -> None:
+            # A bundle stores the manifest and the resource table in *protobuf*
+            # form (proto XmlNode), not as the flat bytes an APK holds. aapt2
+            # produces that form itself; hand-copying the APK's bytes made
+            # bundletool fail with a protobuf parse error.
+            binary_manifest = workdir / "bundle-manifest.xml"
+            resource_table = workdir / "resources.pb"
+            flat = sorted((workdir / "flat").glob("*.flat"))
+            self._run_aapt2(
+                [
+                    str(find_toolchain().aapt2),
+                    "link",
+                    "-o",
+                    str(workdir / "base-proto.apk"),
+                    "-I",
+                    str(find_toolchain().platform_jar),
+                    "--manifest",
+                    str(workdir / "AndroidManifest.xml"),
+                    *[str(path) for path in flat],
+                    "--min-sdk-version",
+                    str(self.config.effective_min_sdk),
+                    "--target-sdk-version",
+                    str(self.config.target_sdk),
+                    "--auto-add-overlay",
+                    "--proto-format",
+                ]
+            )
+            with zipfile.ZipFile(workdir / "base-proto.apk") as proto:
+                binary_manifest.write_bytes(proto.read("AndroidManifest.xml"))
+                resource_table.write_bytes(proto.read("resources.pb"))
+            asset_tree = workdir / "bundle-assets"
+            asset_tree.mkdir(parents=True, exist_ok=True)
+            for name, path in backend.last_assets.items():
+                # Archive names start with "assets/"; inside the bundle the
+                # module's asset directory *is* base/assets/, so the prefix
+                # would be doubled ("base/assets/assets/app/main.py").
+                relative = name[len("assets/") :] if name.startswith("assets/") else name
+                asset_file = asset_tree / relative
+                asset_file.parent.mkdir(parents=True, exist_ok=True)
+                asset_file.write_bytes(path.read_bytes())
+            # compile_jni() writes into lib/<abi>/; a bundle wants the same
+            # <abi>/… path under base/lib/, for every ABI in the build.
+            library_tree = workdir / "bundle-lib"
+            library_tree.mkdir(parents=True, exist_ok=True)
+            for native_lib in sorted((workdir / "lib").rglob("*.so")):
+                abi_path = native_lib.relative_to(workdir / "lib")
+                copied = library_tree / abi_path
+                copied.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(native_lib, copied)
+            # base/res/ must hold the *proto* resource files the resource
+            # table points at (`res/mipmap-mdpi-v4/ic_launcher.png`), which are
+            # the entries of the proto-format APK — not the compiler's `.flat`
+            # intermediates (shipping those gives "resource files that are not
+            # referenced from the resource table").
+            resource_tree = workdir / "bundle-res"
+            resource_tree.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(workdir / "base-proto.apk") as proto:
+                for name in proto.namelist():
+                    if not name.startswith("res/") or name.endswith("/"):
+                        continue
+                    target = resource_tree / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(proto.read(name))
+            self._bundle = build_bundle(
+                output,
+                manifest=binary_manifest,
+                dex=workdir / "dex" / "classes.dex",
+                assets=asset_tree,
+                libraries=workdir / "bundle-lib",
+                resources=resource_tree,
+                resource_table=resource_table,
+            )
+
+        self._stage("bundle", stage)
+
+        toolchain = find_toolchain()
+        java = toolchain.java_home / "bin" / "java"
+        candidates: list[Path] = []
+        override = os.environ.get("PYMOBILE_BUNDLETOOL")
+        if override:
+            candidates.append(Path(override).expanduser())
+        candidates.extend(
+            [
+                self.config.root / "tools" / "bundletool.jar",
+                Path.home() / ".andro" / "bundletool.jar",
+                Path.home() / ".pymobile" / "bundletool.jar",
+            ]
+        )
+        jar = bundletool_path(candidates)
+        if jar is None or not java.is_file():
+            missing = "bundletool" if jar is None else "a JDK"
+            self.warnings.append(
+                f"wrote {output.name} but did not verify it: no {missing} on this "
+                "machine. Download bundletool-all.jar from "
+                "github.com/google/bundletool/releases into ~/.andro/bundletool.jar "
+                f"(or set PYMOBILE_BUNDLETOOL), then run `java -jar bundletool.jar "
+                f"validate --bundle {output.name}` before uploading."
+            )
+            if isinstance(getattr(self, "_bundle", None), object) and self._bundle is not None:
+                self._bundle = self._bundle.__class__(
+                    path=self._bundle.path, size=self._bundle.size, entries=self._bundle.entries
+                )
+            return
+
+        universal = output.with_name(f"{output.stem}-universal.apks")
+        self._stage(
+            "bundle-verify",
+            lambda: validate_bundle(output, java=java, bundletool=jar, universal=universal),
+        )
+        self.warnings.append(
+            f"app bundle verified by bundletool; the universal APK it produced is "
+            f"{universal.name} — install that to check the bundle before uploading"
         )
 
     def signer_identity(self) -> str:
@@ -1013,7 +1263,9 @@ class BuildPipeline:
         Java source builds are the default so framework fixes reach the APK;
         ``PYMOBILE_BUILD_JAVA=0`` explicitly selects the prebuilt dex unless a
         project overlay is present. ``PYMOBILE_BUILD_JNI=1`` opts into building
-        the bridge from source. These artifact choices belong in the cache key.
+        the bridge from source. These artifact choices belong in the cache key,
+        and so does ``--debug``: a debuggable APK and a release-shaped one are
+        different artifacts even though both are "native".
         """
         mode = "native" if self.native else "structural"
         if os.environ.get("PYMOBILE_BUILD_JNI") == "1":
@@ -1024,6 +1276,12 @@ class BuildPipeline:
             mode += "+java"
         elif self.native:
             mode += "+prebuilt-java"
+        if self.bundle and self.native:
+            mode += "+bundle"
+        if self.debug:
+            # Last, so the flag stays visible and greppable in the cache key:
+            # "native+java+debug", never "native+debug+java".
+            mode += "+debug"
         return mode
 
     def _fingerprint(

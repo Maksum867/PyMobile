@@ -42,6 +42,7 @@ class _Formatter(logging.Formatter):
         self.color = color
 
     def format(self, record: logging.LogRecord) -> str:
+        """Format the record, redacting anything that looks like a secret."""
         message = super().format(record)
         prefix = record.levelname.lower()
         if record.levelno <= logging.INFO:

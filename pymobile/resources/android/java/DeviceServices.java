@@ -225,6 +225,135 @@ final class DeviceServices {
         return MainActivity.requestPermissionBlocking(activity, permission);
     }
 
+    // -- secrets ----------------------------------------------------------
+
+    private static final String SECRET_STORE = "pymobile-secrets";
+    private static final String SECRET_KEY_ALIAS = "pymobile-secret-key";
+    private static final String SECRET_TRANSFORMATION = "AES/GCM/NoPadding";
+    private static final int SECRET_IV_BYTES = 12;
+    private static final int SECRET_TAG_BITS = 128;
+
+    /**
+     * The AES key that protects every secret, created on first use.
+     *
+     * The key lives in the Android keystore, not in the app's data directory:
+     * a backup of that directory, or a copy pulled from a rooted device, holds
+     * ciphertext that cannot be opened elsewhere. Returns null when the
+     * keystore refuses (API below 23, a reset keystore, a broken provider).
+     */
+    private static javax.crypto.SecretKey secretKey() {
+        if (Build.VERSION.SDK_INT < 23) {
+            // KeyGenParameterSpec arrived in API 23; below it there is no
+            // keystore-backed symmetric key to use.
+            return null;
+        }
+        try {
+            java.security.KeyStore keyStore = java.security.KeyStore.getInstance("AndroidKeyStore");
+            keyStore.load(null);
+            if (!keyStore.containsAlias(SECRET_KEY_ALIAS)) {
+                javax.crypto.KeyGenerator generator = javax.crypto.KeyGenerator.getInstance(
+                        android.security.keystore.KeyProperties.KEY_ALGORITHM_AES,
+                        "AndroidKeyStore");
+                generator.init(new android.security.keystore.KeyGenParameterSpec.Builder(
+                        SECRET_KEY_ALIAS,
+                        android.security.keystore.KeyProperties.PURPOSE_ENCRYPT
+                                | android.security.keystore.KeyProperties.PURPOSE_DECRYPT)
+                        .setBlockModes(android.security.keystore.KeyProperties.BLOCK_MODE_GCM)
+                        .setEncryptionPaddings(
+                                android.security.keystore.KeyProperties.ENCRYPTION_PADDING_NONE)
+                        .build());
+                generator.generateKey();
+            }
+            java.security.Key key = keyStore.getKey(SECRET_KEY_ALIAS, null);
+            return key instanceof javax.crypto.SecretKey ? (javax.crypto.SecretKey) key : null;
+        } catch (Exception error) {
+            Log.w(TAG, "keystore is unavailable", error);
+            return null;
+        }
+    }
+
+    private static android.content.SharedPreferences secretPreferences(Context context) {
+        return context.getSharedPreferences(SECRET_STORE, Context.MODE_PRIVATE);
+    }
+
+    static boolean putSecret(Context context, String name, String value) {
+        if (context == null || name == null || name.isEmpty() || value == null) {
+            return false;
+        }
+        try {
+            javax.crypto.SecretKey key = secretKey();
+            if (key == null) {
+                return false;
+            }
+            javax.crypto.Cipher cipher = javax.crypto.Cipher.getInstance(SECRET_TRANSFORMATION);
+            cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, key);
+            byte[] sealed = cipher.doFinal(value.getBytes("UTF-8"));
+            // The IV is not a secret; it is stored next to the ciphertext so
+            // the value can be opened again after a restart.
+            String payload = android.util.Base64.encodeToString(
+                    cipher.getIV(), android.util.Base64.NO_WRAP)
+                    + ":"
+                    + android.util.Base64.encodeToString(sealed, android.util.Base64.NO_WRAP);
+            android.content.SharedPreferences.Editor editor = secretPreferences(context).edit();
+            editor.putString(name, payload);
+            return editor.commit();
+        } catch (Exception error) {
+            Log.w(TAG, "could not store secret " + name, error);
+            return false;
+        }
+    }
+
+    static String getSecret(Context context, String name) {
+        if (context == null || name == null || name.isEmpty()) {
+            return null;
+        }
+        try {
+            String payload = secretPreferences(context).getString(name, null);
+            if (payload == null) {
+                return null;
+            }
+            javax.crypto.SecretKey key = secretKey();
+            if (key == null) {
+                return null;
+            }
+            int split = payload.indexOf(':');
+            if (split <= 0) {
+                return null;
+            }
+            byte[] iv = android.util.Base64.decode(
+                    payload.substring(0, split), android.util.Base64.NO_WRAP);
+            byte[] sealed = android.util.Base64.decode(
+                    payload.substring(split + 1), android.util.Base64.NO_WRAP);
+            javax.crypto.Cipher cipher = javax.crypto.Cipher.getInstance(SECRET_TRANSFORMATION);
+            cipher.init(javax.crypto.Cipher.DECRYPT_MODE, key,
+                    new javax.crypto.spec.GCMParameterSpec(SECRET_TAG_BITS, iv));
+            return new String(cipher.doFinal(sealed), "UTF-8");
+        } catch (Exception error) {
+            // A keystore reset (a reinstall, a restored backup) makes the
+            // ciphertext unreadable: report "absent" instead of crashing.
+            Log.w(TAG, "could not read secret " + name, error);
+            return null;
+        }
+    }
+
+    static boolean deleteSecret(Context context, String name) {
+        if (context == null || name == null || name.isEmpty()) {
+            return false;
+        }
+        try {
+            android.content.SharedPreferences store = secretPreferences(context);
+            if (!store.contains(name)) {
+                return false;
+            }
+            android.content.SharedPreferences.Editor editor = store.edit();
+            editor.remove(name);
+            return editor.commit();
+        } catch (Exception error) {
+            Log.w(TAG, "could not delete secret " + name, error);
+            return false;
+        }
+    }
+
     // -- misc -------------------------------------------------------------
 
     /** Open a URL in the system browser. */

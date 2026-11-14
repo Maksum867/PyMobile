@@ -18,17 +18,18 @@ import json
 import mimetypes
 import secrets
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 from urllib.parse import unquote, urlsplit
 
 from ...log import get_logger
 from .contract import text_value
 from .extras_preview import EXTRA_SCRIPT, render_extra_html
 from .registry import preview_renderer
+from .style import GRADIENT_DIRECTIONS
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..app import App
@@ -58,7 +59,11 @@ DRAIN_CHUNK = 64 * 1024
 class _Readable(Protocol):
     """What draining needs: ``BinaryIO`` refuses ``BufferedIOBase.read``."""
 
-    def read(self, size: int = ..., /) -> bytes | None: ...  # pragma: no cover
+    """Read up to ``size`` bytes, or to the end of the stream."""
+
+    def read(self, size: int = ..., /) -> bytes | None:
+        """Read up to ``size`` bytes, or to the end of the stream."""
+        ...  # pragma: no cover
 
 
 def _drain_body(rfile: _Readable, length: int, limit: int = DRAIN_LIMIT) -> int:
@@ -81,6 +86,46 @@ def _is_loopback(host: str) -> bool:
     """Whether ``host`` names this machine only (wildcards do not)."""
     text = (host or "").strip()
     return text in LOOPBACK_HOSTS or text.startswith("127.")
+
+
+def _host_header_allowed(header: str, port: int, allow_hosts: Sequence[str] = ()) -> str | None:
+    """Whether a ``Host`` header may reach a loopback preview; ``None`` if not.
+
+    The loopback preview carries no token, so the *only* thing standing between
+    a hostile page and the developer's screen was ``Origin`` — and a DNS-rebinding
+    attack never sends one: the browser believes it is talking to
+    ``evil.example``, so it sends ``Host: evil.example:8765`` and no ``Origin``
+    on a top-level GET. The name resolves to 127.0.0.1, the request is served,
+    and the attacker reads the screen and presses its buttons.
+
+    A request addressed to this machine by name therefore has to *name* this
+    machine: ``localhost``, ``127.0.0.1`` or ``[::1]``, with any port. Anything
+    else is refused unless it was added to ``allow_hosts`` (a preview behind a
+    reverse proxy legitimately sees its own public name here; that is also why
+    the check is skipped for an exposed preview, which carries a token instead).
+
+    Returns a short reason when the header is refused, so the caller can say
+    which name was rejected.
+    """
+    if not header:
+        # HTTP/1.0 clients and tests may omit it; nothing to verify.
+        return None
+    name = header.strip()
+    hostname, _, port_text = name.rpartition(":")
+    if not hostname:  # a bare host without a port
+        hostname, port_text = name, ""
+    if port_text and port_text.isdigit() and int(port_text) != port:
+        return f"Host {name!r} names port {port_text}, not {port}"
+    allowed_names = {allowed.lower() for allowed in allow_hosts}
+    if allow_hosts and (name.lower() in allowed_names or hostname.lower() in allowed_names):
+        return None
+    if hostname.lower() in LOOPBACK_HOSTS or hostname.startswith("127."):
+        return None
+    return (
+        f"Host {name!r} is not a loopback name. A local preview answers to "
+        "localhost, 127.0.0.1 and [::1] only, so a DNS name that resolves here "
+        "cannot reach it."
+    )
 
 
 def browser_url(host: str, port: int, token: str = "") -> str:
@@ -309,6 +354,32 @@ poll();
 """
 
 
+def _input_type(keyboard: str, password: bool) -> str:
+    """The ``<input type>`` a ``TextInput(keyboard=…)`` maps to."""
+    if password or keyboard == "password":
+        return "password"
+    return {
+        "email": "email",
+        "phone": "tel",
+        "url": "url",
+        "number": "number",
+        "decimal": "number",
+        "search": "search",
+    }.get(keyboard, "text")
+
+
+def _input_mode(keyboard: str) -> str:
+    """``inputmode`` gives a phone browser the right keys where ``type`` cannot."""
+    return {
+        "email": "email",
+        "phone": "tel",
+        "url": "url",
+        "number": "numeric",
+        "decimal": "decimal",
+        "search": "search",
+    }.get(keyboard, "text")
+
+
 def _style_css(style: dict[str, Any]) -> str:
     """Translate a serialised Style into inline CSS."""
     parts: list[str] = []
@@ -350,7 +421,75 @@ def _style_css(style: dict[str, Any]) -> str:
     if style.get("elevation"):
         depth = int(style["elevation"])
         parts.append(f"box-shadow:0 {depth}px {depth * 2}px rgba(0,0,0,.2)")
+    # -- surface ----------------------------------------------------------
+    if style.get("opacity") is not None:
+        parts.append(f"opacity:{float(style['opacity']):.3f}".rstrip("0").rstrip("."))
+    gradient = style.get("gradient")
+    if isinstance(gradient, dict) and gradient.get("stops"):
+        parts.append(f"background:{_gradient_css(gradient)}")
+    border = style.get("border")
+    if isinstance(border, dict) and border.get("sides"):
+        width = border.get("width", 1)
+        colour = _css_colour(str(border.get("color", "#E0E0E0")))
+        sides = border.get("sides") or []
+        if len(sides) == 4:
+            parts.append(f"border:{width}px solid {colour}")
+        else:
+            for side in sides:
+                parts.append(f"border-{side}:{width}px solid {colour}")
+    # -- type -------------------------------------------------------------
+    if style.get("line_height") is not None:
+        parts.append(f"line-height:{style['line_height']}px")
+    if style.get("letter_spacing") is not None:
+        parts.append(f"letter-spacing:{style['letter_spacing']}px")
+    if style.get("font_family"):
+        # A family list carries its own fallbacks (``Georgia, serif``), so it is
+        # written as-is; names with a space are quoted the way CSS wants.
+        families = []
+        for name in str(style["font_family"]).split(","):
+            name = name.strip()
+            quoted = " " in name and not name.startswith(("'", '"'))
+            families.append(f"'{name}'" if quoted else name)
+        parts.append("font-family:" + ",".join(families))
+    if style.get("text_transform"):
+        parts.append(f"text-transform:{style['text_transform']}")
+    if style.get("underline"):
+        parts.append("text-decoration-line:underline")
+    if style.get("strikethrough"):
+        parts.append("text-decoration-line:line-through")
+    if style.get("underline") and style.get("strikethrough"):
+        parts[-1] = "text-decoration-line:underline line-through"
+    if style.get("max_lines"):
+        parts.append(f"-webkit-line-clamp:{int(style['max_lines'])}")
+        parts.append("display:-webkit-box")
+        parts.append("-webkit-box-orient:vertical")
+        parts.append("overflow:hidden")
+    elif style.get("text_overflow"):
+        parts.append(f"text-overflow:{style['text_overflow']}")
+        parts.append("white-space:nowrap")
+        parts.append("overflow:hidden")
     return ";".join(parts)
+
+
+def _gradient_css(gradient: dict[str, Any]) -> str:
+    """A ``linear-gradient`` aimed the way the serializer recorded it.
+
+    CSS measures the angle from "to top" clockwise, so the direction table of
+    :data:`~pymobile.core.ui.style.GRADIENT_DIRECTIONS` is turned into a vector
+    and then into that angle — the same arithmetic the Pillow and Java
+    renderers do, which is what keeps the preview honest.
+    """
+    from math import atan2, degrees
+
+    start_x, start_y, end_x, end_y = GRADIENT_DIRECTIONS.get(
+        str(gradient.get("direction", "to_bottom")), GRADIENT_DIRECTIONS["to_bottom"]
+    )
+    angle = (degrees(atan2(end_x - start_x, start_y - end_y)) + 360) % 360
+    stops = ", ".join(
+        f"{_css_colour(str(colour))} {float(offset) * 100:.4g}%"
+        for offset, colour in gradient["stops"]
+    )
+    return f"linear-gradient({angle:.4g}deg, {stops})"
 
 
 def _css_colour(value: str) -> str:
@@ -389,8 +528,27 @@ def _js_value(value: str) -> str:
     )
 
 
+class _RenderContext(NamedTuple):
+    """Everything an ``_html_*`` helper reads about the node it draws."""
+
+    node: dict[str, Any]
+    kind: str
+    props: dict[str, Any]
+    style: dict[str, Any]
+    css: str
+    widget_id: str
+    disabled: str
+    children: Sequence[Any]
+    inner: str
+
+
 def _render_html_node(node: dict[str, Any]) -> str:
-    """Render one serialised widget node (and its children) as HTML."""
+    """Render one serialised widget node (and its children) as HTML.
+
+    The drawing itself lives in the ``_html_*`` helpers below, one per widget
+    family; this function keeps the shared prologue, the custom-renderer hook
+    and the ``_HTML_RENDERERS`` lookup.
+    """
     if not node.get("visible", True):
         return ""
 
@@ -424,7 +582,51 @@ def _render_html_node(node: dict[str, Any]) -> str:
         return markup
 
     inner = "".join(render_html(child) for child in children)
+    ctx = _RenderContext(node, kind, props, style, css, widget_id, disabled, children, inner)
+    # A helper that draws several kinds keeps one guard per kind, so it returns
+    # None for the kinds it did not draw; the table above sends it the right one.
+    handler = _HTML_RENDERERS.get(kind)
+    if handler is not None:
+        markup = handler(ctx)
+        if markup is not None:
+            return markup
 
+    return f'<div class="muted">&lt;{escape(kind)}&gt;</div>'
+
+
+_SELECTED_CSS = (
+    "font-weight:700;background:var(--primary);color:var(--on-primary);border-color:var(--primary);"
+)
+
+#: Colours of the five ButtonVariant roles in the browser preview.
+_BUTTON_VARIANTS = {
+    "primary": (
+        "background:var(--primary);color:var(--on-primary);border:1px solid var(--primary);"
+        "box-shadow:0 1px 3px rgba(0,0,0,.24);"
+    ),
+    "tonal": (
+        "background:var(--bar-bg);"
+        "background:color-mix(in srgb,var(--primary) 18%,var(--bar-bg));"
+        "color:var(--text);border:1px solid var(--primary);"
+    ),
+    "outlined": "background:transparent;color:var(--primary);border:1px solid var(--primary);",
+    "text": "background:transparent;color:var(--primary);border:1px solid transparent;",
+    "danger": (
+        "background:#C62828;color:#fff;border:1px solid #C62828;"
+        "box-shadow:0 1px 3px rgba(0,0,0,.24);"
+    ),
+}
+
+
+def _html_list(ctx: _RenderContext) -> str | None:
+    """A List: numbered rows, pull-to-refresh and paging."""
+    kind = ctx.kind
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
+    disabled = ctx.disabled
+    children = ctx.children
+    inner = ctx.inner
     if kind == "List":
         # Rows are numbered so List.scroll_to() can find its target, and the
         # pull gesture becomes a button (a mouse cannot pull).
@@ -464,7 +666,17 @@ def _render_html_node(node: dict[str, Any]) -> str:
             f'<div class="col" data-wid="{widget_id}" data-scroll-to="{target}" '
             f'data-scroll-serial="{serial}" style="{extra}">{inner}</div>'
         )
+    return None
 
+
+def _html_layout(ctx: _RenderContext) -> str | None:
+    """The plain containers: Stack and the column-like ones."""
+    kind = ctx.kind
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
+    disabled = ctx.disabled
+    inner = ctx.inner
     if kind == "Stack":
         tap = _tap_attributes(kind, props, widget_id, disabled)
         access = ' role="button" tabindex="0"' if tap else ""
@@ -481,7 +693,17 @@ def _render_html_node(node: dict[str, Any]) -> str:
             extra += ";cursor:pointer"
             return f'<div class="col" role="button" tabindex="0" style="{extra}"{tap}>{inner}</div>'
         return f'<div class="col" style="{extra}">{inner}</div>'
+    return None
 
+
+def _html_flow(ctx: _RenderContext) -> str | None:
+    """Layouts that flow their children: scroll, row, grid, wrap, flex."""
+    kind = ctx.kind
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
+    disabled = ctx.disabled
+    inner = ctx.inner
     if kind == "ScrollView":
         gap = props.get("spacing", 0)
         horizontal = props.get("horizontal")
@@ -530,7 +752,15 @@ def _render_html_node(node: dict[str, Any]) -> str:
         flex = int(props.get("flex", 1))
         basis = "0" if props.get("fit", "tight") == "tight" else "auto"
         return f'<div style="flex:{flex} {flex} {basis};min-width:0;{css}">{inner}</div>'
+    return None
 
+
+def _html_ornament(ctx: _RenderContext) -> str | None:
+    """Non-interactive decoration: a divider, a spacer, a badge."""
+    kind = ctx.kind
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
     if kind == "Divider":
         thickness = props.get("thickness", 1)
         inset = props.get("inset", 0)
@@ -547,25 +777,68 @@ def _render_html_node(node: dict[str, Any]) -> str:
             f'margin:8px {inset}px;width:calc(100% - {2 * inset}px);{css}">'
         )
 
-    if kind == "Label":
-        # The id is carried through so the browser inspector shows which
-        # widget a node is — the same readable ids find() uses.
-        text = escape(text_value(props.get("text", "")))
-        return f'<div data-wid="{widget_id}" style="{css}">{text}</div>'
+    if kind == "Spacer":
+        return f'<div style="height:{props.get("size", 8)}px;flex:0 0 auto"></div>'
 
-    if kind == "Button":
+    if kind == "Badge":
         label = escape(text_value(props.get("text", "")))
-        look = _button_css(props.get("variant"))
+        bg = _css_colour(text_value(props.get("background", "var(--primary)")))
+        fg = _css_colour(text_value(props.get("color", "#FFFFFF")))
         return (
-            f'<button class="w" data-wid="{widget_id}"{disabled} style="{look}{css}" '
-            f"onclick=\"send(this.dataset.wid,'press','')\">{label}</button>"
+            f'<span data-wid="{widget_id}" style="align-self:flex-start;'
+            "display:inline-block;padding:2px 8px;"
+            f'border-radius:999px;background:{bg};color:{fg};font-size:12px;{css}">'
+            f"{label}</span>"
         )
+    return None
 
+
+def _html_label(ctx: _RenderContext) -> str | None:
+    """A label: its text, transform and overflow."""
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
+    # The id is carried through so the browser inspector shows which
+    # widget a node is — the same readable ids find() uses.
+    text = escape(text_value(props.get("text", "")))
+    return f'<div data-wid="{widget_id}" style="{css}">{text}</div>'
+
+
+def _html_button(ctx: _RenderContext) -> str | None:
+    """A button, styled by variant."""
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
+    disabled = ctx.disabled
+    label = escape(text_value(props.get("text", "")))
+    look = _button_css(props.get("variant"))
+    return (
+        f'<button class="w" data-wid="{widget_id}"{disabled} style="{look}{css}" '
+        f"onclick=\"send(this.dataset.wid,'press','')\">{label}</button>"
+    )
+
+
+def _html_text_field(ctx: _RenderContext) -> str | None:
+    """Text entry: the text field and the search bar."""
+    kind = ctx.kind
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
+    disabled = ctx.disabled
     if kind == "TextInput":
         value = escape(text_value(props.get("value", "")), quote=True)
         placeholder = escape(text_value(props.get("placeholder", "")), quote=True)
-        kind_attr = "password" if props.get("password") else "text"
-        if props.get("multiline"):
+        keyboard = text_value(props.get("keyboard", "text"))
+        kind_attr = _input_type(keyboard, bool(props.get("password")))
+        submit = ""
+        if props.get("on_submit"):
+            # The keyboard's action key is Enter in a browser: one submit event
+            # per press, and the page does not reload.
+            submit = (
+                " onkeydown=\"if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();"
+                "send(this.dataset.wid,'submit',this.value)}\""
+            )
+        if props.get("multiline") or keyboard == "multiline":
             body = escape(text_value(props.get("value", "")))
             return (
                 f'<textarea class="w" data-wid="{widget_id}" placeholder="{placeholder}"'
@@ -574,10 +847,30 @@ def _render_html_node(node: dict[str, Any]) -> str:
             )
         return (
             f'<input class="w" type="{kind_attr}" data-wid="{widget_id}" value="{value}" '
-            f'placeholder="{placeholder}"{disabled} style="{css}" '
+            f'placeholder="{placeholder}" inputmode="{_input_mode(keyboard)}"{disabled} '
+            f'style="{css}"{submit} '
             f"oninput=\"send(this.dataset.wid,'change',this.value)\">"
         )
 
+    if kind == "SearchBar":
+        value = escape(text_value(props.get("value", "")), quote=True)
+        placeholder = escape(text_value(props.get("placeholder", "")), quote=True)
+        return (
+            f'<input class="w" type="search" data-wid="{widget_id}" value="{value}" '
+            f'placeholder="{placeholder}"{disabled} style="{css}" '
+            f"oninput=\"send(this.dataset.wid,'change',this.value)\" "
+            f"onkeydown=\"if(event.key==='Enter')send(this.dataset.wid,'search',this.value)\">"
+        )
+    return None
+
+
+def _html_choice(ctx: _RenderContext) -> str | None:
+    """On/off choices: a switch, a checkbox, a radio button."""
+    kind = ctx.kind
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
+    disabled = ctx.disabled
     if kind == "Switch":
         checked = " checked" if props.get("checked") else ""
         return (
@@ -587,6 +880,33 @@ def _render_html_node(node: dict[str, Any]) -> str:
             f'<span class="muted">{"on" if props.get("checked") else "off"}</span></label>'
         )
 
+    if kind == "Checkbox":
+        checked = " checked" if props.get("checked") else ""
+        return (
+            f'<label style="display:flex;gap:8px;align-items:center;{css}">'
+            f'<input type="checkbox" data-wid="{widget_id}"{checked}{disabled} '
+            f"onchange=\"send(this.dataset.wid,'toggle',this.checked?'true':'false')\">"
+            f"{escape(text_value(props.get('text', '')))}</label>"
+        )
+
+    if kind == "RadioButton":
+        checked = " checked" if props.get("selected") else ""
+        label = escape(text_value(props.get("text", "")))
+        return (
+            f'<label style="display:flex;gap:8px;align-items:center;{css}">'
+            f'<input type="radio" data-wid="{widget_id}"{checked}{disabled} '
+            f"onchange=\"send(this.dataset.wid,'press','')\">"
+            f"<span>{label}</span></label>"
+        )
+    return None
+
+
+def _html_indicator(ctx: _RenderContext) -> str | None:
+    """Progress, shown as a bar or as text."""
+    kind = ctx.kind
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
     if kind == "ProgressBar":
         if props.get("indeterminate"):
             return f'<progress class="w" style="{css}"></progress>'
@@ -594,6 +914,25 @@ def _render_html_node(node: dict[str, Any]) -> str:
         value = props.get("value", 0)
         return f'<progress class="w" max="{maximum}" value="{value}" style="{css}"></progress>'
 
+    if kind == "ProgressText":
+        text = escape(text_value(props.get("text", "")))
+        maximum = props.get("maximum", 100) or 100
+        value = props.get("value", 0)
+        return (
+            f'<div data-wid="{widget_id}" style="{css}">'
+            f'<progress class="w" max="{maximum}" value="{value}"></progress>'
+            f'<div class="muted">{text}</div></div>'
+        )
+    return None
+
+
+def _html_media(ctx: _RenderContext) -> str | None:
+    """A picture: an image and an avatar."""
+    kind = ctx.kind
+    props = ctx.props
+    style = ctx.style
+    css = ctx.css
+    widget_id = ctx.widget_id
     if kind == "Image":
         source = escape(text_value(props.get("source", "")), quote=True)
         label = "" if props.get("decorative") else text_value(props.get("accessibility_label", ""))
@@ -611,156 +950,6 @@ def _render_html_node(node: dict[str, Any]) -> str:
             f'style="width:100%;height:{height};object-fit:{fit};display:block" '
             f'onerror="{onerror}">'
             f"</div>"
-        )
-
-    if kind == "Spacer":
-        return f'<div style="height:{props.get("size", 8)}px;flex:0 0 auto"></div>'
-
-    if kind == "Slider":
-        minimum = props.get("minimum", 0)
-        maximum = props.get("maximum", 100)
-        value = props.get("value", 0)
-        return (
-            f'<input class="w" type="range" data-wid="{widget_id}" min="{minimum}" '
-            f'max="{maximum}" value="{value}"{disabled} style="{css}" '
-            f"oninput=\"send(this.dataset.wid,'change',this.value)\">"
-        )
-
-    if kind == "Checkbox":
-        checked = " checked" if props.get("checked") else ""
-        return (
-            f'<label style="display:flex;gap:8px;align-items:center;{css}">'
-            f'<input type="checkbox" data-wid="{widget_id}"{checked}{disabled} '
-            f"onchange=\"send(this.dataset.wid,'toggle',this.checked?'true':'false')\">"
-            f"{escape(text_value(props.get('text', '')))}</label>"
-        )
-
-    if kind == "RatingBar":
-        rating = props.get("rating", 0)
-        maximum = int(props.get("maximum", 5) or 5)
-        stars = "".join(
-            f'<button type="button" data-wid="{widget_id}"{disabled} '
-            f"onclick=\"send(this.dataset.wid,'change','{i}')\">"
-            f"{'★' if i <= float(rating or 0) else '☆'}</button>"
-            for i in range(1, maximum + 1)
-        )
-        return f'<div style="display:flex;gap:2px;{css}">{stars}</div>'
-
-    if kind == "Dropdown":
-        options = [str(o) for o in (props.get("options") or [])]
-        labels = [str(lbl) for lbl in (props.get("labels") or options)]
-        # Pad labels in case someone crafted the props by hand.
-        while len(labels) < len(options):
-            labels.append(options[len(labels)])
-        selected = text_value(props.get("value", ""))
-        items = "".join(
-            f'<option value="{escape(val, quote=True)}"'
-            f"{' selected' if val == selected else ''}>{escape(lbl)}</option>"
-            for val, lbl in zip(options, labels, strict=False)
-        )
-        return (
-            f'<select class="w" data-wid="{widget_id}"{disabled} style="{css}" '
-            f"onchange=\"send(this.dataset.wid,'change',this.value)\">{items}</select>"
-        )
-
-    if kind == "Chip":
-        label = escape(text_value(props.get("text", "")))
-        selected = _SELECTED_CSS if props.get("selected") else ""
-        return (
-            f'<button class="w" data-wid="{widget_id}"{disabled} '
-            f'style="border-radius:999px;{selected}{css}" '
-            f"onclick=\"send(this.dataset.wid,'press','')\">{label}</button>"
-        )
-
-    if kind == "Badge":
-        label = escape(text_value(props.get("text", "")))
-        bg = _css_colour(text_value(props.get("background", "var(--primary)")))
-        fg = _css_colour(text_value(props.get("color", "#FFFFFF")))
-        return (
-            f'<span data-wid="{widget_id}" style="align-self:flex-start;'
-            "display:inline-block;padding:2px 8px;"
-            f'border-radius:999px;background:{bg};color:{fg};font-size:12px;{css}">'
-            f"{label}</span>"
-        )
-
-    if kind == "Stepper":
-        value = escape(text_value(props.get("value", 0)))
-        return (
-            f'<div data-wid="{widget_id}" style="display:flex;gap:8px;align-items:center;{css}">'
-            f'<button class="w" style="width:auto"{disabled} '
-            f"onclick=\"send(this.parentElement.dataset.wid,'decrement','')\">-</button>"
-            f"<span>{value}</span>"
-            f'<button class="w" style="width:auto"{disabled} '
-            f"onclick=\"send(this.parentElement.dataset.wid,'increment','')\">+</button>"
-            f"</div>"
-        )
-
-    if kind == "SearchBar":
-        value = escape(text_value(props.get("value", "")), quote=True)
-        placeholder = escape(text_value(props.get("placeholder", "")), quote=True)
-        return (
-            f'<input class="w" type="search" data-wid="{widget_id}" value="{value}" '
-            f'placeholder="{placeholder}"{disabled} style="{css}" '
-            f"oninput=\"send(this.dataset.wid,'change',this.value)\" "
-            f"onkeydown=\"if(event.key==='Enter')send(this.dataset.wid,'search',this.value)\">"
-        )
-
-    if kind == "RadioButton":
-        checked = " checked" if props.get("selected") else ""
-        label = escape(text_value(props.get("text", "")))
-        return (
-            f'<label style="display:flex;gap:8px;align-items:center;{css}">'
-            f'<input type="radio" data-wid="{widget_id}"{checked}{disabled} '
-            f"onchange=\"send(this.dataset.wid,'press','')\">"
-            f"<span>{label}</span></label>"
-        )
-
-    if kind == "SegmentedButtons":
-        options = [str(o) for o in (props.get("options") or [])]
-        labels = [str(lbl) for lbl in (props.get("labels") or options)]
-        while len(labels) < len(options):
-            labels.append(options[len(labels)])
-        selected = text_value(props.get("value", ""))
-        buttons = ""
-        for val, lbl in zip(options, labels, strict=False):
-            active = _SELECTED_CSS if val == selected else ""
-            buttons += (
-                f'<button class="w" data-wid="{widget_id}"{disabled} '
-                f'style="{active}" '
-                f"onclick=\"send(this.dataset.wid,'change','{_js_value(val)}')\">"
-                f"{escape(lbl)}</button>"
-            )
-        classes = "seg wrap" if props.get("wrap") else "seg"
-        return f'<div class="{classes}" style="{css}">{buttons}</div>'
-
-    if kind == "ProgressText":
-        text = escape(text_value(props.get("text", "")))
-        maximum = props.get("maximum", 100) or 100
-        value = props.get("value", 0)
-        return (
-            f'<div data-wid="{widget_id}" style="{css}">'
-            f'<progress class="w" max="{maximum}" value="{value}"></progress>'
-            f'<div class="muted">{text}</div></div>'
-        )
-
-    if kind == "Link":
-        label = escape(text_value(props.get("text", "")))
-        url = escape(text_value(props.get("url", "")), quote=True)
-        return (
-            f'<a class="w" data-wid="{widget_id}" href="{url or "#"}" '
-            f'style="{css}" '
-            f"onclick=\"event.preventDefault();send(this.dataset.wid,'press','')\">{label}</a>"
-        )
-
-    if kind == "DataTable":
-        headers = "".join(f"<th>{escape(str(h))}</th>" for h in (props.get("headers") or []))
-        rows = "".join(
-            "<tr>" + "".join(f"<td>{escape(str(c))}</td>" for c in row) + "</tr>"
-            for row in (props.get("rows") or [])
-        )
-        return (
-            f'<table class="w" data-wid="{widget_id}" style="{css}">'
-            f"<thead><tr>{headers}</tr></thead><tbody>{rows}</tbody></table>"
         )
 
     if kind == "Avatar":
@@ -781,74 +970,238 @@ def _render_html_node(node: dict[str, Any]) -> str:
             f'width:{size}px;height:{size}px;background:{bg};color:{fg};{css}">'
             f"{text}{photo}</div>"
         )
+    return None
 
-    if kind == "ListTile":
-        title = escape(text_value(props.get("title", "")))
-        subtitle = escape(text_value(props.get("subtitle", "")))
-        trailing = escape(text_value(props.get("trailing", "")))
-        # A long press has no mouse equivalent, so the browser preview maps it
-        # to the context menu (right click / touch-and-hold), which is what a
-        # desktop tester reaches for anyway.
-        long_press = (
-            " oncontextmenu=\"send(this.dataset.wid,'long_press','');return false\""
-            if props.get("long_pressable")
-            else ""
-        )
-        tile = (
-            f'<button class="w" data-wid="{widget_id}"{disabled} style="text-align:left;{css}" '
-            f"onclick=\"send(this.dataset.wid,'press','')\"{long_press}>"
-            f"<div>{title}</div>"
-            f'<div class="muted">{subtitle}</div>'
-            f'<div class="muted">{trailing}</div></button>'
-        )
-        if not (props.get("swipe_left") or props.get("swipe_right")):
-            return tile
-        # No finger to drag with: each swipe direction becomes a button.
-        buttons = ""
-        for direction, arrow in (("right", "⟶"), ("left", "⟵")):
-            if props.get(f"swipe_{direction}"):
-                colour = _css_colour(text_value(props.get(f"swipe_{direction}_color", "#757575")))
-                buttons += (
-                    f'<button class="w swipe" data-wid="{widget_id}"{disabled} '
-                    f'title="swipe {direction}" style="background:{colour}" '
-                    f"onclick=\"send(this.dataset.wid,'swipe','{direction}')\">{arrow}</button>"
-                )
-        return f'<div class="row" style="gap:4px;align-items:stretch">{tile}{buttons}</div>'
 
-    if kind == "BottomNavigation":
+def _html_range(ctx: _RenderContext) -> str | None:
+    """Numeric input along a scale: a slider and a rating bar."""
+    kind = ctx.kind
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
+    disabled = ctx.disabled
+    if kind == "Slider":
+        minimum = props.get("minimum", 0)
+        maximum = props.get("maximum", 100)
+        value = props.get("value", 0)
+        return (
+            f'<input class="w" type="range" data-wid="{widget_id}" min="{minimum}" '
+            f'max="{maximum}" value="{value}"{disabled} style="{css}" '
+            f"oninput=\"send(this.dataset.wid,'change',this.value)\">"
+        )
+
+    if kind == "RatingBar":
+        rating = props.get("rating", 0)
+        maximum = int(props.get("maximum", 5) or 5)
+        stars = "".join(
+            f'<button type="button" data-wid="{widget_id}"{disabled} '
+            f"onclick=\"send(this.dataset.wid,'change','{i}')\">"
+            f"{'★' if i <= float(rating or 0) else '☆'}</button>"
+            for i in range(1, maximum + 1)
+        )
+        return f'<div style="display:flex;gap:2px;{css}">{stars}</div>'
+    return None
+
+
+def _html_options(ctx: _RenderContext) -> str | None:
+    """A fixed list of options: a drop-down and segmented buttons."""
+    kind = ctx.kind
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
+    disabled = ctx.disabled
+    if kind == "Dropdown":
+        options = [str(o) for o in (props.get("options") or [])]
+        labels = [str(lbl) for lbl in (props.get("labels") or options)]
+        # Pad labels in case someone crafted the props by hand.
+        while len(labels) < len(options):
+            labels.append(options[len(labels)])
+        selected = text_value(props.get("value", ""))
+        items = "".join(
+            f'<option value="{escape(val, quote=True)}"'
+            f"{' selected' if val == selected else ''}>{escape(lbl)}</option>"
+            for val, lbl in zip(options, labels, strict=False)
+        )
+        return (
+            f'<select class="w" data-wid="{widget_id}"{disabled} style="{css}" '
+            f"onchange=\"send(this.dataset.wid,'change',this.value)\">{items}</select>"
+        )
+
+    if kind == "SegmentedButtons":
         options = [str(o) for o in (props.get("options") or [])]
         labels = [str(lbl) for lbl in (props.get("labels") or options)]
         while len(labels) < len(options):
             labels.append(options[len(labels)])
-        tabs = []
+        selected = text_value(props.get("value", ""))
+        buttons = ""
         for val, lbl in zip(options, labels, strict=False):
-            active = val == props.get("value")
-            look = _SELECTED_CSS if active else ""
-            tabs.append(
+            active = _SELECTED_CSS if val == selected else ""
+            buttons += (
                 f'<button class="w" data-wid="{widget_id}"{disabled} '
-                f'style="flex:1;border-radius:0;{look}" '
+                f'style="{active}" '
                 f"onclick=\"send(this.dataset.wid,'change','{_js_value(val)}')\">"
                 f"{escape(lbl)}</button>"
             )
-        return f'<nav class="row" style="gap:0;{css}">{"".join(tabs)}</nav>'
+        classes = "seg wrap" if props.get("wrap") else "seg"
+        return f'<div class="{classes}" style="{css}">{buttons}</div>'
+    return None
 
-    if kind == "Dialog":
-        title = escape(text_value(props.get("title", "")))
-        accessible = escape(text_value(props.get("title") or "Dialog"), quote=True)
-        sheet = bool(props.get("sheet"))
-        radius = "16px 16px 0 0" if sheet else "12px"
-        head = f'<h4 style="margin:0 0 8px">{title}</h4>' if title else ""
-        gap = props.get("spacing", 0)
-        body = f'<div class="col" style="gap:{gap}px">{inner}</div>'
-        classes = "modal-overlay sheet" if sheet else "modal-overlay"
-        return (
-            f'<div class="{classes}" data-dialog-id="{widget_id}" '
-            f"onclick=\"if(event.target===this)send(this.dataset.dialogId,'dismiss','')\">"
-            f'<section class="modal-surface" role="dialog" aria-modal="true" '
-            f'aria-label="{accessible}" tabindex="-1" style="border-radius:{radius};{css}">'
-            f"{head}{body}</section></div>"
+
+def _html_chip(ctx: _RenderContext) -> str | None:
+    """A chip, selected or not."""
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
+    disabled = ctx.disabled
+    label = escape(text_value(props.get("text", "")))
+    selected = _SELECTED_CSS if props.get("selected") else ""
+    return (
+        f'<button class="w" data-wid="{widget_id}"{disabled} '
+        f'style="border-radius:999px;{selected}{css}" '
+        f"onclick=\"send(this.dataset.wid,'press','')\">{label}</button>"
+    )
+
+
+def _html_stepper(ctx: _RenderContext) -> str | None:
+    """A stepper with its minus and plus buttons."""
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
+    disabled = ctx.disabled
+    value = escape(text_value(props.get("value", 0)))
+    return (
+        f'<div data-wid="{widget_id}" style="display:flex;gap:8px;align-items:center;{css}">'
+        f'<button class="w" style="width:auto"{disabled} '
+        f"onclick=\"send(this.parentElement.dataset.wid,'decrement','')\">-</button>"
+        f"<span>{value}</span>"
+        f'<button class="w" style="width:auto"{disabled} '
+        f"onclick=\"send(this.parentElement.dataset.wid,'increment','')\">+</button>"
+        f"</div>"
+    )
+
+
+def _html_link(ctx: _RenderContext) -> str | None:
+    """A link, with the scheme it was validated for."""
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
+    label = escape(text_value(props.get("text", "")))
+    url = escape(text_value(props.get("url", "")), quote=True)
+    return (
+        f'<a class="w" data-wid="{widget_id}" href="{url or "#"}" '
+        f'style="{css}" '
+        f"onclick=\"event.preventDefault();send(this.dataset.wid,'press','')\">{label}</a>"
+    )
+
+
+def _html_data_table(ctx: _RenderContext) -> str | None:
+    """A data table: a header row and one row per record."""
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
+    headers = "".join(f"<th>{escape(str(h))}</th>" for h in (props.get("headers") or []))
+    rows = "".join(
+        "<tr>" + "".join(f"<td>{escape(str(c))}</td>" for c in row) + "</tr>"
+        for row in (props.get("rows") or [])
+    )
+    return (
+        f'<table class="w" data-wid="{widget_id}" style="{css}">'
+        f"<thead><tr>{headers}</tr></thead><tbody>{rows}</tbody></table>"
+    )
+
+
+def _html_list_tile(ctx: _RenderContext) -> str | None:
+    """A list row: leading, title, trailing and its action."""
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
+    disabled = ctx.disabled
+    title = escape(text_value(props.get("title", "")))
+    subtitle = escape(text_value(props.get("subtitle", "")))
+    trailing = escape(text_value(props.get("trailing", "")))
+    # A long press has no mouse equivalent, so the browser preview maps it
+    # to the context menu (right click / touch-and-hold), which is what a
+    # desktop tester reaches for anyway.
+    long_press = (
+        " oncontextmenu=\"send(this.dataset.wid,'long_press','');return false\""
+        if props.get("long_pressable")
+        else ""
+    )
+    tile = (
+        f'<button class="w" data-wid="{widget_id}"{disabled} style="text-align:left;{css}" '
+        f"onclick=\"send(this.dataset.wid,'press','')\"{long_press}>"
+        f"<div>{title}</div>"
+        f'<div class="muted">{subtitle}</div>'
+        f'<div class="muted">{trailing}</div></button>'
+    )
+    if not (props.get("swipe_left") or props.get("swipe_right")):
+        return tile
+    # No finger to drag with: each swipe direction becomes a button.
+    buttons = ""
+    for direction, arrow in (("right", "⟶"), ("left", "⟵")):
+        if props.get(f"swipe_{direction}"):
+            colour = _css_colour(text_value(props.get(f"swipe_{direction}_color", "#757575")))
+            buttons += (
+                f'<button class="w swipe" data-wid="{widget_id}"{disabled} '
+                f'title="swipe {direction}" style="background:{colour}" '
+                f"onclick=\"send(this.dataset.wid,'swipe','{direction}')\">{arrow}</button>"
+            )
+    return f'<div class="row" style="gap:4px;align-items:stretch">{tile}{buttons}</div>'
+
+
+def _html_bottom_navigation(ctx: _RenderContext) -> str | None:
+    """The bottom navigation bar and its tabs."""
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
+    disabled = ctx.disabled
+    options = [str(o) for o in (props.get("options") or [])]
+    labels = [str(lbl) for lbl in (props.get("labels") or options)]
+    while len(labels) < len(options):
+        labels.append(options[len(labels)])
+    tabs = []
+    for val, lbl in zip(options, labels, strict=False):
+        active = val == props.get("value")
+        look = _SELECTED_CSS if active else ""
+        tabs.append(
+            f'<button class="w" data-wid="{widget_id}"{disabled} '
+            f'style="flex:1;border-radius:0;{look}" '
+            f"onclick=\"send(this.dataset.wid,'change','{_js_value(val)}')\">"
+            f"{escape(lbl)}</button>"
         )
+    return f'<nav class="row" style="gap:0;{css}">{"".join(tabs)}</nav>'
 
+
+def _html_dialog(ctx: _RenderContext) -> str | None:
+    """A dialog or a sheet rendered as an overlay."""
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
+    inner = ctx.inner
+    title = escape(text_value(props.get("title", "")))
+    accessible = escape(text_value(props.get("title") or "Dialog"), quote=True)
+    sheet = bool(props.get("sheet"))
+    radius = "16px 16px 0 0" if sheet else "12px"
+    head = f'<h4 style="margin:0 0 8px">{title}</h4>' if title else ""
+    gap = props.get("spacing", 0)
+    body = f'<div class="col" style="gap:{gap}px">{inner}</div>'
+    classes = "modal-overlay sheet" if sheet else "modal-overlay"
+    return (
+        f'<div class="{classes}" data-dialog-id="{widget_id}" '
+        f"onclick=\"if(event.target===this)send(this.dataset.dialogId,'dismiss','')\">"
+        f'<section class="modal-surface" role="dialog" aria-modal="true" '
+        f'aria-label="{accessible}" tabindex="-1" style="border-radius:{radius};{css}">'
+        f"{head}{body}</section></div>"
+    )
+
+
+def _html_picker(ctx: _RenderContext) -> str | None:
+    """The date and the time picker."""
+    kind = ctx.kind
+    props = ctx.props
+    css = ctx.css
+    widget_id = ctx.widget_id
+    disabled = ctx.disabled
     if kind == "DatePicker":
         value = escape(text_value(props.get("value", "")), quote=True)
         return (
@@ -864,42 +1217,62 @@ def _render_html_node(node: dict[str, Any]) -> str:
             f'value="{value}" style="{css}" '
             f"onchange=\"send(this.dataset.wid,'change',this.value)\">"
         )
-
-    if kind in (
-        "Icon",
-        "IconButton",
-        "AutoComplete",
-        "RangeSlider",
-        "PageView",
-        "Chart",
-        "Canvas",
-    ):
-        return render_extra_html(node, render_html, css)
-
-    return f'<div class="muted">&lt;{escape(kind)}&gt;</div>'
+    return None
 
 
-_SELECTED_CSS = (
-    "font-weight:700;background:var(--primary);color:var(--on-primary);border-color:var(--primary);"
-)
+def _html_extras(ctx: _RenderContext) -> str | None:
+    """Widget types the browser preview cannot draw itself."""
+    return render_extra_html(ctx.node, render_html, ctx.css)
 
-#: Colours of the five ButtonVariant roles in the browser preview.
-_BUTTON_VARIANTS = {
-    "primary": (
-        "background:var(--primary);color:var(--on-primary);border:1px solid var(--primary);"
-        "box-shadow:0 1px 3px rgba(0,0,0,.24);"
-    ),
-    "tonal": (
-        "background:var(--bar-bg);"
-        "background:color-mix(in srgb,var(--primary) 18%,var(--bar-bg));"
-        "color:var(--text);border:1px solid var(--primary);"
-    ),
-    "outlined": "background:transparent;color:var(--primary);border:1px solid var(--primary);",
-    "text": "background:transparent;color:var(--primary);border:1px solid transparent;",
-    "danger": (
-        "background:#C62828;color:#fff;border:1px solid #C62828;"
-        "box-shadow:0 1px 3px rgba(0,0,0,.24);"
-    ),
+
+#: Which helper draws which widget type.
+_HTML_RENDERERS: dict[str, Callable[[_RenderContext], str | None]] = {
+    "List": _html_list,
+    "Stack": _html_layout,
+    "Column": _html_layout,
+    "Container": _html_layout,
+    "SafeArea": _html_layout,
+    "RadioGroup": _html_layout,
+    "ScrollView": _html_flow,
+    "Row": _html_flow,
+    "Grid": _html_flow,
+    "Wrap": _html_flow,
+    "Expanded": _html_flow,
+    "Flexible": _html_flow,
+    "Divider": _html_ornament,
+    "Spacer": _html_ornament,
+    "Badge": _html_ornament,
+    "Label": _html_label,
+    "Button": _html_button,
+    "TextInput": _html_text_field,
+    "SearchBar": _html_text_field,
+    "Switch": _html_choice,
+    "Checkbox": _html_choice,
+    "RadioButton": _html_choice,
+    "ProgressBar": _html_indicator,
+    "ProgressText": _html_indicator,
+    "Image": _html_media,
+    "Avatar": _html_media,
+    "Slider": _html_range,
+    "RatingBar": _html_range,
+    "Dropdown": _html_options,
+    "SegmentedButtons": _html_options,
+    "Chip": _html_chip,
+    "Stepper": _html_stepper,
+    "Link": _html_link,
+    "DataTable": _html_data_table,
+    "ListTile": _html_list_tile,
+    "BottomNavigation": _html_bottom_navigation,
+    "Dialog": _html_dialog,
+    "DatePicker": _html_picker,
+    "TimePicker": _html_picker,
+    "Icon": _html_extras,
+    "IconButton": _html_extras,
+    "AutoComplete": _html_extras,
+    "RangeSlider": _html_extras,
+    "PageView": _html_extras,
+    "Chart": _html_extras,
+    "Canvas": _html_extras,
 }
 
 
@@ -998,6 +1371,7 @@ class WebPreview:
         token: str | None = None,
         require_token: bool = True,
         allow_origins: Sequence[str] = (),
+        allow_hosts: Sequence[str] = (),
         frame_options: str = "DENY",
         assets: str | Path | None = None,
     ) -> None:
@@ -1016,6 +1390,10 @@ class WebPreview:
         self.allow_origins = tuple(
             origin.strip() for origin in allow_origins if str(origin).strip()
         )
+        #: Extra ``Host`` names a token-less preview answers to. Only a proxy
+        #: needs them: on loopback the request must name this machine, which is
+        #: what stops a DNS-rebinding page from reading the screen.
+        self.allow_hosts = tuple(host.strip() for host in allow_hosts if str(host).strip())
         #: Value of the ``X-Frame-Options`` header. ``""`` omits it, which is
         #: what a preview embedded in a portal's iframe needs.
         self.frame_options = str(frame_options or "")
@@ -1216,6 +1594,11 @@ class WebPreview:
         drive this app through the user's browser.
         """
         if not self.token:
+            # No token: the host name is the whole fence. A DNS-rebinding page
+            # sends its own name here and no Origin at all, so checking Origin
+            # alone left the screen readable.
+            if self.host_refusal(headers) is not None:
+                return False
             return self._origin_allowed(headers) and path in ("/", "/state", "/event")
         if not self._origin_allowed(headers):
             return False
@@ -1224,6 +1607,19 @@ class WebPreview:
             return False
         return path in ("/", "/state", "/event")
 
+    def host_refusal(self, headers: Any) -> str | None:
+        """Why this request's ``Host`` is not this preview, or ``None``.
+
+        Only a token-less preview needs the check: an exposed one already
+        refuses requests that lack its session token, and the page that holds
+        the token came from this machine. Loopback is where the check earns its
+        keep — the preview there is reachable without any credential, so the
+        request has to name the machine it reached.
+        """
+        if self.token:
+            return None
+        return _host_header_allowed(headers.get("Host", ""), self.port, self.allow_hosts)
+
     def _origin_allowed(self, headers: Any) -> bool:
         """Whether the request's ``Origin`` may drive this preview.
 
@@ -1231,7 +1627,7 @@ class WebPreview:
         browser, so the origin's host has to match the one the request was
         addressed to. Behind a TLS-terminating proxy the scheme is rewritten
         (https in the browser, http here), so both are accepted — and
-        ``X-Forwarded-Host`` is trusted when the proxy sets it (П-07).
+        ``X-Forwarded-Host`` is trusted when the proxy sets it.
 
         ``allow_origins`` is the escape hatch for setups where that check is
         wrong by construction: a portal embedding the preview as an iframe from
@@ -1337,25 +1733,34 @@ class WebPreview:
                 self._discard_body()
                 self._reply(body, "text/plain; charset=utf-8", status=status)
 
-            def _forbidden(self) -> None:
-                message = (
-                    "Refused: this preview was started with a session token.\n"
-                    "Open the URL printed by `pymobile run --web` (it carries "
-                    "?t=…), or pass the token in the X-PMB-Token header.\n"
-                ).encode()
+            def _forbidden(self, reason: str | None = None) -> None:
+                if reason is None:
+                    reason = (
+                        "this preview was started with a session token.\n"
+                        "Open the URL printed by `pymobile run --web` (it carries "
+                        "?t=…), or pass the token in the X-PMB-Token header."
+                    )
+                message = f"Refused: {reason}\n".encode()
                 self._reply(message, "text/plain; charset=utf-8", status=403)
+
+            def _refuse_unless_authorised(self, path: str, query: dict[str, list[str]]) -> bool:
+                """Answer 403 and return ``False`` when the request must not run."""
+                if preview._authorised(path, query, self.headers):
+                    return True
+                self._forbidden(preview.host_refusal(self.headers))
+                return False
 
             def _not_found(self, path: str) -> None:
                 body = f"No such route: {path}\n".encode()
                 self._reply(body, "text/plain; charset=utf-8", status=404)
 
             def do_GET(self) -> None:  # required name of the http.server API
+                """Serve the page, its assets or its JSON state, depending on the path."""
                 path, query = preview._route(self.path)
                 if path not in ("/", "/state"):
                     self._not_found(path)
                     return
-                if not preview._authorised(path, query, self.headers):
-                    self._forbidden()
+                if not self._refuse_unless_authorised(path, query):
                     return
                 if path == "/state":
                     payload = json.dumps(preview.state()).encode("utf-8")
@@ -1364,6 +1769,7 @@ class WebPreview:
                 self._reply(preview.page().encode("utf-8"), "text/html; charset=utf-8")
 
             def do_POST(self) -> None:  # required name of the http.server API
+                """Accept an interaction: update the tree and answer with the new one."""
                 path, query = preview._route(self.path)
                 # The handler used to accept a POST to *any* path and run the
                 # event it carried. Only /event is an event.
@@ -1373,7 +1779,7 @@ class WebPreview:
                     return
                 if not preview._authorised(path, query, self.headers):
                     self._discard_body()
-                    self._forbidden()
+                    self._forbidden(preview.host_refusal(self.headers))
                     return
                 content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip()
                 if content_type and content_type != "application/json":
@@ -1422,6 +1828,7 @@ def serve(
     token: str | None = None,
     require_token: bool = True,
     allow_origins: Sequence[str] = (),
+    allow_hosts: Sequence[str] = (),
     frame_options: str = "DENY",
 ) -> WebPreview:
     """Serve ``app`` in a browser, blocking until interrupted.
@@ -1439,6 +1846,7 @@ def serve(
         token=token,
         require_token=require_token,
         allow_origins=allow_origins,
+        allow_hosts=allow_hosts,
         frame_options=frame_options,
     )
     preview.serve_forever()

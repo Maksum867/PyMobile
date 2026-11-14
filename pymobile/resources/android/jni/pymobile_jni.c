@@ -966,6 +966,109 @@ static PyObject *py_clipboard_text(PyObject *self, PyObject *args) {
     return result ? result : PyUnicode_FromString("");
 }
 
+/* Keystore-backed secrets. The value never travels as a Python string
+ * literal: it goes over JNI as UTF-8 with an explicit length, and Java does the
+ * AES-GCM work against a key in the Android keystore (see DeviceServices).
+ * A device without a usable keystore answers false/"" instead of throwing, so
+ * an app can fall back to its own storage deliberately. */
+static PyObject *py_put_secret(PyObject *self, PyObject *args) {
+    const char *name;
+    const char *value;
+    int stored = 0;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "ss", &name, &value)) {
+        return NULL;
+    }
+    int attached = 0;
+    JNIEnv *env = jni_env(&attached);
+    if (env && g_native_class) {
+        jmethodID method = static_method(
+            env, "putSecret", "(Ljava/lang/String;Ljava/lang/String;)Z");
+        if (method) {
+            jstring jname = new_jstring(env, name);
+            jstring jvalue = new_jstring(env, value);
+            stored = (*env)->CallStaticBooleanMethod(env, g_native_class, method, jname, jvalue);
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);
+                stored = 0;
+            }
+            (*env)->DeleteLocalRef(env, jname);
+            (*env)->DeleteLocalRef(env, jvalue);
+        }
+        if (attached) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+    }
+    if (stored) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
+static PyObject *py_get_secret(PyObject *self, PyObject *args) {
+    const char *name;
+    PyObject *result = NULL;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "s", &name)) {
+        return NULL;
+    }
+    int attached = 0;
+    JNIEnv *env = jni_env(&attached);
+    if (env && g_native_class) {
+        jmethodID method = static_method(env, "getSecret", "(Ljava/lang/String;)Ljava/lang/String;");
+        if (method) {
+            jstring jname = new_jstring(env, name);
+            jstring value = (jstring)(*env)->CallStaticObjectMethod(
+                env, g_native_class, method, jname);
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);
+            } else if (value) {
+                Utf8Text text = jstring_to_utf8(env, value);
+                if (text.data) {
+                    result = PyUnicode_FromStringAndSize(text.data, (Py_ssize_t)text.len);
+                }
+                text_free(&text);
+                (*env)->DeleteLocalRef(env, value);
+            }
+            (*env)->DeleteLocalRef(env, jname);
+        }
+        if (attached) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+    }
+    return result ? result : PyUnicode_FromString("");
+}
+
+static PyObject *py_delete_secret(PyObject *self, PyObject *args) {
+    const char *name;
+    int removed = 0;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "s", &name)) {
+        return NULL;
+    }
+    int attached = 0;
+    JNIEnv *env = jni_env(&attached);
+    if (env && g_native_class) {
+        jmethodID method = static_method(env, "deleteSecret", "(Ljava/lang/String;)Z");
+        if (method) {
+            jstring jname = new_jstring(env, name);
+            removed = (*env)->CallStaticBooleanMethod(env, g_native_class, method, jname);
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->ExceptionClear(env);
+                removed = 0;
+            }
+            (*env)->DeleteLocalRef(env, jname);
+        }
+        if (attached) {
+            (*g_vm)->DetachCurrentThread(g_vm);
+        }
+    }
+    if (removed) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
 static PyObject *py_share(PyObject *self, PyObject *args) {
     const char *text;
     const char *url;
@@ -1334,6 +1437,10 @@ static PyMethodDef module_methods[] = {
     {"pick_file", py_pick_file, METH_VARARGS, "Ask the user for files."},
     {"pick_image", py_pick_image, METH_NOARGS, "Take a photo or pick a picture."},
     {"copy_to_clipboard", py_copy_to_clipboard, METH_VARARGS, "Copy text."},
+    {"put_secret", py_put_secret, METH_VARARGS,
+     "Store a secret encrypted with an Android keystore key."},
+    {"get_secret", py_get_secret, METH_VARARGS, "Read a stored secret ('' when absent)."},
+    {"delete_secret", py_delete_secret, METH_VARARGS, "Delete a stored secret."},
     {"clipboard_text", py_clipboard_text, METH_NOARGS, "Read the clipboard."},
     {"share", py_share, METH_VARARGS, "Open the share sheet."},
     {"audio_open", py_audio_open, METH_VARARGS, "Open an audio file."},

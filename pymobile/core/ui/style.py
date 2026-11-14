@@ -12,12 +12,46 @@ import types
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
-__all__ = ["Style", "Color", "Align", "EdgeInsets"]
+__all__ = ["Style", "Color", "Align", "EdgeInsets", "Border", "Gradient"]
 
 _HEX_COLOR = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
 
 #: Named sizes a Style width/height accepts (mirrors the native renderer).
 _DIMENSION_WORDS = frozenset({"match", "fill", "wrap", "match_parent", "wrap_content"})
+
+#: A font family is a comma-separated list of plain names (``"Georgia, serif"``).
+#: Quoted names and ``;`` are refused: the value is written into the device's
+#: ``Typeface.create`` and into inline CSS, where punctuation would break out.
+_FONT_NAME = r"[A-Za-z0-9][A-Za-z0-9 \-]{0,63}"
+_FONT_FAMILY = re.compile(rf"^{_FONT_NAME}(?: *, *{_FONT_NAME})*$")
+
+#: Gradient directions, each mapped to CSS ``linear-gradient`` corner points.
+#: Android draws its gradients top-to-bottom unless told otherwise, so every
+#: renderer needs the same vocabulary to agree on the picture.
+GRADIENT_DIRECTIONS: dict[str, tuple[float, float, float, float]] = {
+    "to_bottom": (0.5, 0.0, 0.5, 1.0),
+    "to_top": (0.5, 1.0, 0.5, 0.0),
+    "to_right": (0.0, 0.5, 1.0, 0.5),
+    "to_left": (1.0, 0.5, 0.0, 0.5),
+    "to_bottom_right": (0.0, 0.0, 1.0, 1.0),
+    "to_top_right": (0.0, 1.0, 1.0, 0.0),
+    "to_bottom_left": (1.0, 0.0, 0.0, 1.0),
+    "to_top_left": (1.0, 1.0, 0.0, 0.0),
+}
+
+#: ``text_transform`` values; the same four CSS offers, spelled the same way.
+TEXT_TRANSFORMS = ("none", "uppercase", "lowercase", "capitalize")
+
+#: ``text_overflow`` values. ``ellipsis`` clips a word that does not fit and
+#: marks the cut with "…"; ``clip`` just cuts. The CSS spellings are accepted
+#: as aliases because that is what people type first.
+TEXT_OVERFLOWS = {
+    "ellipsis": "ellipsis",
+    "clip": "clip",
+    "text-ellipsis": "ellipsis",
+    "text-clip": "clip",
+    "fade": "ellipsis",
+}
 
 
 class Color:
@@ -79,6 +113,139 @@ class Align:
                 f"invalid cross_align {value!r}; expected one of {', '.join(cls.CROSS)}"
             )
         return value
+
+
+@dataclass(frozen=True, slots=True)
+class Border:
+    """A stroke drawn around a widget.
+
+    ``width`` is in dp and is measured inside the widget's own box, the way
+    Android's ``GradientDrawable.setStroke`` does it, so adding a border never
+    changes a layout: ``Border(color="#E0E0E0")`` is a hairline, and
+    ``Border(width=2, color=…)`` a heavier one.
+
+    ``sides`` restricts the stroke to a subset (``Border(color=…, sides="bottom")``)
+    for the "row with a rule under it" case; the default draws all four.
+    """
+
+    width: float = 1
+    color: str = "#E0E0E0"
+    #: Any combination of ``top``, ``right``, ``bottom``, ``left``.
+    sides: str = "top right bottom left"
+
+    def __post_init__(self) -> None:
+        if isinstance(self.width, bool) or not isinstance(self.width, (int, float)):
+            raise TypeError(f"border width must be a number of dp, got {self.width!r}")
+        if self.width < 0:
+            raise ValueError("border width must not be negative")
+        if not isinstance(self.color, str):
+            raise TypeError(f"border color must be a hex string, got {self.color!r}")
+        Color.validate(self.color)
+
+    @property
+    def side_set(self) -> frozenset[str]:
+        """The sides named, normalised; an empty border names none."""
+        if self.width == 0:
+            return frozenset()
+        words = self.sides.replace(",", " ").split()
+        unknown = [word for word in words if word not in ("top", "right", "bottom", "left")]
+        if unknown:
+            raise ValueError(
+                f"unknown border side {unknown[0]!r}; expected a mix of "
+                "top, right, bottom, left (all four by default)"
+            )
+        return frozenset(words)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to the JSON the renderers read."""
+        return {
+            "width": self.width,
+            "color": Color.validate(self.color),
+            "sides": sorted(self.side_set),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Gradient:
+    """A linear colour ramp, interpolated in sRGB.
+
+    Two colours are the common case (``Gradient("#3F51B5", "#1A237E")``); a
+    third may be added to hold the middle of the ramp, and ``stops`` gives the
+    full control when the app has real design values::
+
+        Gradient("#FFFFFF", "#3F51B5", direction="to_bottom_right")
+        Gradient(stops=((0.0, "#FFFFFF"), (0.6, "#E8EAF6"), (1.0, "#3F51B5")))
+
+    ``direction`` is one of :data:`GRADIENT_DIRECTIONS` — ``to_bottom`` when
+    omitted, which is also what Android draws by default.
+    """
+
+    #: Positional spelling: the first two are the ends, the third the middle.
+    start: str = ""
+    end: str = ""
+    middle: str | None = None
+    #: ``((offset, colour), ...)`` with offsets from 0 to 1; overrides the three
+    #: positional colours when given.
+    stops: tuple[tuple[float, str], ...] | None = None
+    direction: str = "to_bottom"
+
+    def __post_init__(self) -> None:
+        direction = str(self.direction).replace("-", "_").lower().strip()
+        if direction not in GRADIENT_DIRECTIONS:
+            raise ValueError(
+                f"invalid gradient direction {self.direction!r}; expected one of: "
+                + ", ".join(GRADIENT_DIRECTIONS)
+            )
+        object.__setattr__(self, "direction", direction)
+        if self.stops is not None:
+            pairs: list[tuple[float, str]] = []
+            for index, stop in enumerate(self.stops):
+                if len(stop) != 2:  # type: ignore[arg-type]
+                    raise TypeError(f"gradient stop {index} must be (offset, colour), got {stop!r}")
+                offset, colour = stop
+                if isinstance(offset, bool) or not isinstance(offset, (int, float)):
+                    raise TypeError(
+                        f"gradient stop {index}: offset must be a number, got {offset!r}"
+                    )
+                if not 0 <= offset <= 1:
+                    raise ValueError(f"gradient stop {index}: offset must be from 0 to 1")
+                if not isinstance(colour, str):
+                    raise TypeError(f"gradient stop {index}: colour must be a hex string")
+                Color.validate(colour)
+                pairs.append((float(offset), colour))
+            if len(pairs) < 2:
+                raise ValueError("a gradient needs at least two stops")
+            pairs.sort(key=lambda pair: pair[0])
+            if pairs[0][0] != 0.0 or pairs[-1][0] != 1.0:
+                raise ValueError(
+                    "gradient stops must start at 0 and end at 1; without an end "
+                    "colour the last one is stretched, which hides the mistake"
+                )
+            object.__setattr__(self, "stops", tuple(pairs))
+            return
+        if not self.start or not self.end:
+            raise TypeError(
+                "Gradient needs a start and an end colour: "
+                "Gradient('#FFFFFF', '#3F51B5') or Gradient(stops=((0, '#FFFFFF'), (1, '#3F51B5')))"
+            )
+        for value in (self.start, self.end, self.middle):
+            if value is not None:
+                Color.validate(value)
+
+    def ramp(self) -> tuple[tuple[float, str], ...]:
+        """The stops as ``((offset, colour), ...)``, whatever spelling was used."""
+        if self.stops is not None:
+            return self.stops
+        if self.middle:
+            return ((0.0, self.start), (0.5, self.middle), (1.0, self.end))
+        return ((0.0, self.start), (1.0, self.end))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to the JSON the renderers read."""
+        return {
+            "stops": [[offset, Color.validate(colour)] for offset, colour in self.ramp()],
+            "direction": self.direction,
+        }
 
 
 class _FieldInsteadOfMethod(TypeError):
@@ -291,13 +458,7 @@ def _coerce_insets(name: str, value: object) -> EdgeInsets | None:
 
 @dataclass(frozen=True, slots=True)
 class Style:
-    """Visual attributes of a widget; ``None`` means "inherit the default".
-
-    Besides the fixed ``width``/``height`` there is a set of constraints —
-    ``min_width``, ``max_width``, ``min_height``, ``max_height`` and
-    ``aspect_ratio`` — for the common "at least this big, never bigger than
-    that" card, and for images that must keep a 16:9 shape.
-    """
+    """Visual attributes of a widget; ``None`` means "inherit the default"."""
 
     background: str | None = None
     color: str | None = None
@@ -319,12 +480,44 @@ class Style:
     corner_radius: int | None = None
     elevation: int | None = None
     weight: float | None = None
+    # -- surface -----------------------------------------------------------
+    #: ``0`` is fully transparent: for a whole screen it means "no background
+    #: of my own", so a themed parent shows through.
+    opacity: float | None = None
+    #: Stroke around the widget; width ``0`` means no border.
+    border: Border | None = None
+    #: A two-colour gradient. ``background`` keeps winning when both are set:
+    #: one of the two has to be the sRGB value the previews fall back on.
+    gradient: Gradient | None = None
+    # -- type --------------------------------------------------------------
+    #: Extra space between lines, in dp (not a multiplier, unlike CSS).
+    line_height: float | None = None
+    #: Extra space between letters, in dp; may be negative to tighten.
+    letter_spacing: float | None = None
+    #: Typographic name: ``"serif"``, ``"monospace"``, ``"sans-serif"`` or a
+    #: system family list such as ``"Georgia, serif"``.
+    font_family: str | None = None
+    #: ``"none"``, ``"uppercase"``, ``"lowercase"`` or ``"capitalize"``.
+    text_transform: str | None = None
+    #: How much of the text may be shown where the line ends (see
+    #: :meth:`truncate`); also accepts the CSS spellings.
+    text_overflow: str | None = None
+    max_lines: int | None = None
+    underline: bool = False
+    strikethrough: bool = False
 
     def __post_init__(self) -> None:
         # Frozen dataclass: normalise through object.__setattr__. Without this
         # Style(padding=8) was accepted and then crashed in to_dict().
         for name in ("padding", "margin"):
             object.__setattr__(self, name, _coerce_insets(name, getattr(self, name)))
+        for name in ("border", "gradient"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, (Border, Gradient)):
+                raise TypeError(
+                    f"{name} must be a {name.title()}, got {type(value).__name__!r}; "
+                    f"write Style({name}={name.title()}(...))"
+                )
         for value in (self.background, self.color):
             if value is not None:
                 if not isinstance(value, str):
@@ -388,10 +581,81 @@ class Style:
             raise ValueError("elevation must not be negative")
         if self.corner_radius is not None and self.corner_radius < 0:
             raise ValueError("corner_radius must not be negative")
+        if self.opacity is not None:
+            if isinstance(self.opacity, bool) or not _is_number(self.opacity):
+                raise TypeError(f"opacity must be a number from 0 to 1, got {self.opacity!r}")
+            if not 0 <= float(self.opacity) <= 1:
+                raise ValueError("opacity must be from 0 (invisible) to 1 (opaque)")
+        for name in ("line_height", "letter_spacing"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not _is_number(value):
+                raise TypeError(f"{name} must be a number of dp, got {value!r}")
+            if name == "line_height" and float(value) < 0:
+                raise ValueError("line_height must not be negative")
+        if self.font_family is not None:
+            if not isinstance(self.font_family, str) or not _FONT_FAMILY.match(self.font_family):
+                raise ValueError(
+                    f"invalid font_family {self.font_family!r}; expected a font name or a "
+                    "comma-separated list of names, e.g. 'serif' or 'Georgia, serif'"
+                )
+            object.__setattr__(self, "font_family", self.font_family.strip())
+        if self.text_transform is not None:
+            transform = str(self.text_transform).lower().strip()
+            if transform not in TEXT_TRANSFORMS:
+                raise ValueError(
+                    f"invalid text_transform {self.text_transform!r}; expected one of: "
+                    + ", ".join(TEXT_TRANSFORMS)
+                )
+            object.__setattr__(self, "text_transform", transform)
+        if self.text_overflow is not None:
+            overflow = TEXT_OVERFLOWS.get(str(self.text_overflow).lower().strip())
+            if overflow is None:
+                raise ValueError(
+                    f"invalid text_overflow {self.text_overflow!r}; expected one of: ellipsis, clip"
+                )
+            object.__setattr__(self, "text_overflow", overflow)
+        if self.max_lines is not None:
+            if isinstance(self.max_lines, bool) or not isinstance(self.max_lines, int):
+                raise TypeError(f"max_lines must be an int, got {self.max_lines!r}")
+            if self.max_lines < 1:
+                raise ValueError("max_lines must be at least 1")
+            if self.text_overflow is None:
+                # Cutting a paragraph short without saying how is what the
+                # device does anyway; say it out loud and the previews agree.
+                object.__setattr__(self, "text_overflow", "ellipsis")
+        for name in ("underline", "strikethrough"):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be a bool")
 
     def merge(self, **overrides: Any) -> Style:
         """Return a copy with some attributes replaced."""
         return replace(self, **overrides)
+
+    def derive(self, **overrides: Any) -> Style:
+        """Alias of :meth:`merge`, named the way design systems talk.
+
+        ``base.derive(background=brand)`` reads better than
+        ``base.merge(background=brand)`` at a call site, and both keep the rest
+        of the style intact.
+        """
+        return replace(self, **overrides)
+
+    @property
+    def url(self) -> str | None:
+        """The colour a preview would paint behind this widget, if any.
+
+        ``Gradient`` wins by design: it is the more specific instruction, and a
+        flat colour is what the app falls back on where gradients are absent.
+        """
+        if self.gradient is not None:
+            return self.gradient.ramp()[0][1]
+        if self.background is not None:
+            return self.background
+        if self.border is not None and self.border.width:
+            return self.border.color
+        return None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise, skipping unset and falsy-default fields."""
@@ -404,6 +668,16 @@ class Style:
                 insets = getattr(self, key)
                 if insets:
                     result[key] = insets.to_list()
+                continue
+            if key == "border":
+                border = self.border
+                if border is not None and border.width and border.side_set:
+                    result[key] = border.to_dict()
+                continue
+            if key == "gradient":
+                gradient = self.gradient
+                if gradient is not None:
+                    result[key] = gradient.to_dict()
                 continue
             result[key] = value
         return result

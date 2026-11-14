@@ -168,13 +168,14 @@ class RuleMessage(str):
         self.params = params
         return self
 
+
 #: Well-known regex for email addresses (pragmatic, not RFC-perfect).
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 #: What a user can type as an integer / a decimal number. Python's int() and
 #: float() are more permissive than a form should be: they accept "4_2",
 #: "nan", "inf" and non-ASCII digits.
-#: П-12: the decimal comma ``89,90`` (common in uk-UA and other European
+#: The decimal comma ``89,90`` (common in uk-UA and other European
 #: locales) is accepted as a decimal separator — forms typed by a Ukrainian
 #: user must not reject the price they actually typed.
 _INTEGER_RE = re.compile(r"[+-]?[0-9]+", re.ASCII)
@@ -212,6 +213,7 @@ def _is_empty(value: Any) -> bool:
     if isinstance(value, str):
         return not value.strip()
     return isinstance(value, (list, dict, tuple, set)) and not value
+
 
 #: Rules that only exist with an argument; a bare string spelling of one of
 #: these is a mistake we can name precisely instead of "unknown rule".
@@ -294,7 +296,7 @@ def number(value: Any) -> str | None:
     """A value must be a number (int or float).
 
     Accepts a decimal comma (``"89,90"``) the way Ukrainian and other
-    European users type prices (П-12).
+    European users type prices.
     """
     if _to_float(value) is not None:
         return None
@@ -614,9 +616,7 @@ class Validator:
                     continue
                 if skip_empty and not isinstance(fn, _MatchesField):
                     continue
-                message = (
-                    fn(value, data) if isinstance(fn, _MatchesField) else fn(value)
-                )
+                message = fn(value, data) if isinstance(fn, _MatchesField) else fn(value)
                 if message is not None:
                     errors[name] = self._finish(name, message)
                     break

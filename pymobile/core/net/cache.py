@@ -195,8 +195,8 @@ class HttpCache:
         return isinstance(url, str) and self.get(url) is not None
 
     def __len__(self) -> int:
-        # Storage exposes keys() but deliberately is not a Mapping/iterable.
+        # Storage exposes keys() but deliberately is not a Mapping/iterable,
+        # so the loop stays a plain call rather than ``for key in storage``.
         with self._lock:
-            return sum(
-                1 for key in self._storage.keys() if key.startswith(self._prefix)  # noqa: SIM118
-            )
+            keys = self._storage.keys()
+            return len([key for key in keys if key.startswith(self._prefix)])

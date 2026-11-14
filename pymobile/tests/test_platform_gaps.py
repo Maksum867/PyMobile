@@ -498,8 +498,7 @@ class TestNativeSurfaceIsConsistent:
         used.update(re.findall(r"native\.(\w+)\(", source))
         missing = sorted(used - self.jni_methods())
         assert not missing, (
-            f"these native calls are used from Python but not exported by "
-            f"pymobile_jni.c: {missing}"
+            f"these native calls are used from Python but not exported by pymobile_jni.c: {missing}"
         )
 
     def test_every_c_wrapper_calls_a_java_method_that_exists(self) -> None:
@@ -512,9 +511,7 @@ class TestNativeSurfaceIsConsistent:
                 JNI.read_text(encoding="utf-8"),
             )
         )
-        called.update(
-            re.findall(r'call_void_method\("(\w+)"', JNI.read_text(encoding="utf-8"))
-        )
+        called.update(re.findall(r'call_void_method\("(\w+)"', JNI.read_text(encoding="utf-8")))
         missing = sorted(called - declared)
         assert not missing, f"the JNI layer calls Native.{missing}, which does not exist"
 
@@ -545,6 +542,5 @@ class TestNativeSurfaceIsConsistent:
         media = (JAVA / "MediaServices.java").read_text(encoding="utf-8")
         for forbidden in ("PickVisualMedia", "registerForActivityResult", "getParcelableExtra"):
             assert forbidden not in media, (
-                f"{forbidden} is not available on minSdk 24; use the "
-                "startActivityForResult path"
+                f"{forbidden} is not available on minSdk 24; use the startActivityForResult path"
             )

@@ -19,6 +19,7 @@ and passed to that callback's ``on_error``; it never changes the job's result.
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 import uuid
@@ -35,6 +36,85 @@ _log = get_logger("jobs")
 def job_id() -> str:
     """Return a unique, human-friendly job id."""
     return uuid.uuid4().hex[:12]
+
+
+#: Threads kept alive for waiting work. One thread per job does not scale: 500
+#: queued jobs meant 500 threads, each with its own 8 MB stack reservation.
+DEFAULT_MAX_WORKERS = 8
+
+
+def _worker_count(requested: int | None) -> int:
+    """How many worker threads a manager may run at once."""
+    if requested is None:
+        try:
+            import os
+
+            return max(2, min(32, (os.cpu_count() or 2) * 2))
+        except Exception:  # pragma: no cover - platform without cpu_count
+            return DEFAULT_MAX_WORKERS
+    if isinstance(requested, bool) or not isinstance(requested, int):
+        raise TypeError("max_workers must be an int or None")
+    if requested < 1:
+        raise ValueError("max_workers must be >= 1")
+    return requested
+
+
+class _WorkerPool:
+    """A fixed set of daemon threads that drain a queue.
+
+    Used for one-shot jobs (``enqueue``). Repeating jobs (``every``) keep their
+    own thread on purpose: their loop *is* the job, and parking one of eight
+    workers in ``stop.wait(interval)`` would starve the queue.
+    """
+
+    def __init__(self, size: int) -> None:
+        self._queue: queue.Queue[tuple[Callable[[], None], threading.Event] | None] = queue.Queue()
+        self._lock = threading.Lock()
+        self._threads: list[threading.Thread] = []
+        self._size = size
+        self._closed = False
+        for index in range(size):
+            thread = threading.Thread(
+                target=self._loop, name=f"pymobile-worker-{index}", daemon=True
+            )
+            thread.start()
+            self._threads.append(thread)
+
+    def submit(self, task: Callable[[], None]) -> None:
+        """Queue ``task`` for a worker thread, refusing work after shutdown."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("the worker pool has been shut down")
+        self._queue.put((task, threading.Event()))
+
+    def _loop(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            task, started = item
+            started.set()
+            try:
+                task()
+            except BaseException:  # pragma: no cover - JobHandle already catches
+                _log.exception("a job worker raised")
+            finally:
+                self._queue.task_done()
+
+    def shutdown(self, wait: bool = False) -> None:
+        """Stop accepting work and wake every worker so it can exit."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        for _ in self._threads:
+            self._queue.put(None)
+        if wait:
+            for thread in self._threads:
+                thread.join(timeout=5)
+
+    def __len__(self) -> int:
+        return len(self._threads)
 
 
 class JobHandle:
@@ -290,16 +370,28 @@ class JobManager:
     :meth:`App.stop` integration).
     """
 
-    __slots__ = ("_jobs", "_lock", "_alive", "_deliver")
+    __slots__ = ("_jobs", "_lock", "_alive", "_deliver", "_pool", "_pool_size")
 
-    def __init__(self, *, deliver: Callable[[Callable[[], None]], None] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        deliver: Callable[[Callable[[], None]], None] | None = None,
+        max_workers: int | None = None,
+    ) -> None:
         """``deliver(callback)`` runs ``then()`` callbacks — :class:`App`
         passes one that runs them on the UI side; by default they run on the
-        worker thread."""
+        worker thread.
+
+        ``max_workers`` bounds how many one-shot jobs run at once (default:
+        twice the CPU count); extra jobs wait in a queue instead of each
+        starting a thread.
+        """
         self._deliver = deliver
         self._jobs: dict[str, JobHandle] = {}
         self._lock = threading.Lock()
         self._alive = True
+        self._pool_size = _worker_count(max_workers)
+        self._pool = _WorkerPool(self._pool_size)
 
     @property
     def active(self) -> list[JobHandle]:
@@ -354,7 +446,11 @@ class JobManager:
             callback_guard=callback_guard,
         )
         self._track(handle)
-        threading.Thread(target=run, name=f"pymobile-job-{handle_id}", daemon=True).start()
+        try:
+            self._pool.submit(run)
+        except RuntimeError:
+            handle._finish_cancelled()
+            raise
         return handle
 
     def every(
@@ -432,7 +528,18 @@ class JobManager:
         for handle in handles:
             handle.cancel()
 
-    def shutdown(self) -> None:
-        """Stop accepting new jobs and cancel all pending ones."""
+    def shutdown(self, *, wait: bool = False) -> None:
+        """Stop accepting new jobs, cancel pending ones and close the pool."""
         self._alive = False
         self.cancel_all()
+        self._pool.shutdown(wait=wait)
+
+    @property
+    def max_workers(self) -> int:
+        """How many one-shot jobs this manager runs at once."""
+        return self._pool_size
+
+    @property
+    def workers(self) -> int:
+        """How many worker threads exist (a fixed number, not per job)."""
+        return len(self._pool)

@@ -49,6 +49,7 @@ __all__ = [
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register the ``--pymobile-*`` options the plugin reads."""
     group = parser.getgroup("pymobile", "PyMobile")
     group.addoption(
         "--pymobile-update-snapshots",
@@ -87,9 +88,7 @@ def pymobile_driver(pymobile_session: Session) -> Driver:
 
 
 @pytest.fixture
-def pymobile_snapshot(
-    request: pytest.FixtureRequest, pymobile_session: Session
-) -> SnapshotChecker:
+def pymobile_snapshot(request: pytest.FixtureRequest, pymobile_session: Session) -> SnapshotChecker:
     """``pymobile_snapshot()`` checks the current screen against its golden text file."""
     update = bool(
         request.config.getoption("--pymobile-update-snapshots", default=False)

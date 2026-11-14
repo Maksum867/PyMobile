@@ -387,9 +387,7 @@ def method_body(source: str, signature: str) -> str:
 
 
 class TestAndroid:
-    source = renderer_source() + (ANDROID / "java/FlowViews.java").read_text(
-        encoding="utf-8"
-    )
+    source = renderer_source() + (ANDROID / "java/FlowViews.java").read_text(encoding="utf-8")
 
     def test_wrap_has_a_renderer_branch(self) -> None:
         assert 'case "Wrap":\n                view = buildWrap(node, props);' in self.source
@@ -448,9 +446,7 @@ class TestAndroid:
 @pytest.mark.skipif(shutil.which("javac") is None, reason="needs a JDK to compile FlowMath")
 def test_java_flow_math_breaks_lines_exactly_like_python(tmp_path: Path) -> None:
     """The phone and the previews must break lines in the same places."""
-    source = renderer_source() + (ANDROID / "java/FlowViews.java").read_text(
-        encoding="utf-8"
-    )
+    source = renderer_source() + (ANDROID / "java/FlowViews.java").read_text(encoding="utf-8")
     body = method_body(source, "static final class FlowMath")
     body = body.replace("FlowLayout.ALIGN_CENTER", "1").replace("FlowLayout.ALIGN_END", "2")
     assert "android" not in body, "FlowMath must stay free of Android classes"

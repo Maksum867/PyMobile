@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from ...log import get_logger
 from .contract import text_value
@@ -54,6 +54,17 @@ _PALETTE = {
 }
 
 #: Containers that simply stack their children vertically in the preview.
+#: Widget types the Tk preview draws through the shared extras renderer.
+_EXTRA_GUI_KINDS = (
+    "Icon",
+    "IconButton",
+    "AutoComplete",
+    "RangeSlider",
+    "PageView",
+    "Chart",
+    "Canvas",
+)
+
 _VERTICAL = ("Column", "Container", "SafeArea", "Expanded", "Flexible")
 
 
@@ -152,6 +163,21 @@ def skeleton(node: dict[str, Any]) -> tuple[Any, ...]:
         extra,
         tuple(skeleton(child) for child in node.get("children", ())),
     )
+
+
+class _BuildContext(NamedTuple):
+    """What a ``_build_*`` method reads about the node it draws."""
+
+    parent: tk.Misc
+    node: dict[str, Any]
+    kind: str
+    props: dict[str, Any]
+    style: dict[str, Any]
+    enabled: bool
+    widget_id: str
+    background: str
+    pad: int
+    tk: Any
 
 
 class GuiPreview:
@@ -476,7 +502,12 @@ class GuiPreview:
 
     # -- widget construction ----------------------------------------------
     def _build(self, parent: tk.Misc, node: dict[str, Any]) -> None:
-        """Create the Tk widget for ``node`` and pack it into ``parent``."""
+        """Create the Tk widget for ``node`` and pack it into ``parent``.
+
+        The drawing lives in the ``_build_*`` methods below, one per widget
+        family; this method keeps the prologue, the custom-renderer hook and
+        the ``_TK_BUILDERS`` lookup.
+        """
         if not node.get("visible", True):
             return
 
@@ -507,28 +538,45 @@ class GuiPreview:
                     bg=background,
                 ).pack(anchor="w")
             return
-
-        if kind == "ScrollView":
-            if props.get("horizontal"):
-                # No horizontal scrolling in the preview; a plain row keeps the
-                # arrangement honest, which is what the picture is for.
-                self._build_row(parent, node, background)
-            else:
-                self._build_scroll(parent, node, background)
-            return
-
-        if kind in (
-            "Icon",
-            "IconButton",
-            "AutoComplete",
-            "RangeSlider",
-            "PageView",
-            "Chart",
-            "Canvas",
-        ):
+        ctx = _BuildContext(
+            parent, node, kind, props, style, enabled, widget_id, background, pad, tk
+        )
+        if kind in _EXTRA_GUI_KINDS:
             build_extra_gui(self, parent, node, background)
             return
 
+        builder = _TK_BUILDERS.get(kind)
+        if builder is not None and builder(self, ctx):
+            return
+
+        tk.Label(parent, text=f"<{kind}>", fg=self.palette["muted"], bg=background).pack(anchor="w")
+
+    def _build_scroll_view(self, ctx: _BuildContext) -> bool:
+        """A scroll area, or a plain row when it scrolls sideways."""
+        parent = ctx.parent
+        node = ctx.node
+        props = ctx.props
+        background = ctx.background
+        if props.get("horizontal"):
+            # No horizontal scrolling in the preview; a plain row keeps the
+            # arrangement honest, which is what the picture is for.
+            self._build_row(parent, node, background)
+        else:
+            self._build_scroll(parent, node, background)
+        return True
+        return True
+
+    def _build_layout(self, ctx: _BuildContext) -> bool:
+        """The containers: Stack, the columns, a row, a grid and a wrap."""
+        parent = ctx.parent
+        node = ctx.node
+        kind = ctx.kind
+        props = ctx.props
+        style = ctx.style
+        widget_id = ctx.widget_id
+        background = ctx.background
+        pad = ctx.pad
+        tk = ctx.tk
         if kind == "Stack":
             frame = tk.Frame(parent, bg=background)
             frame.pack(fill="x", pady=pad)
@@ -557,8 +605,7 @@ class GuiPreview:
             frame.after_idle(size_stack)
             self._widgets[widget_id] = frame
             self._bind_tap(frame, node, widget_id)
-            return
-
+            return True
         if kind in _VERTICAL:
             frame = tk.Frame(parent, bg=background)
             frame.pack(fill="both" if kind != "Column" else "x", expand=kind != "Column", pady=pad)
@@ -566,54 +613,97 @@ class GuiPreview:
             # C-3: a tappable container is clickable in the Tk window too, so
             # the preview shows the same interaction as the phone.
             self._bind_tap(frame, node, widget_id)
-            return
-
+            return True
         if kind == "Row":
             self._build_row(parent, node, background)
-            return
-
+            return True
         if kind == "Grid":
             self._build_grid(parent, node, props, background)
-            return
-
+            return True
         if kind == "Wrap":
             self._build_wrap(parent, node, props, background)
-            return
+            return True
+        if kind == "RadioGroup":
+            frame = tk.Frame(parent, bg=background)
+            frame.pack(fill="x", pady=pad)
+            self._build_children(frame, node, background)
+            return True
+        return False
 
+    def _build_ornament(self, ctx: _BuildContext) -> bool:
+        """Non-interactive decoration: a divider and a spacer."""
+        parent = ctx.parent
+        kind = ctx.kind
+        props = ctx.props
+        background = ctx.background
+        tk = ctx.tk
         if kind == "Divider":
             thickness = max(1, int(props.get("thickness", 1)))
             colour = self.palette["line"]
             tk.Frame(parent, height=thickness, bg=colour).pack(fill="x", pady=6)
-            return
+            return True
+        if kind == "Spacer":
+            tk.Frame(parent, height=int(props.get("size", 8)), bg=background).pack()
+            return True
+        return False
 
-        if kind == "Label":
-            label = tk.Label(
-                parent,
-                text=text_value(props.get("text", "")),
-                bg=background,
-                fg=self._colour(style.get("color"), self.palette["text"]),
-                font=self._font(style),
-                justify="left",
-                anchor="w",
-                wraplength=340,
-            )
-            label.pack(fill="x", pady=pad)
-            self._widgets[widget_id] = label
-            return
+    def _build_label(self, ctx: _BuildContext) -> bool:
+        """A label."""
+        parent = ctx.parent
+        props = ctx.props
+        style = ctx.style
+        widget_id = ctx.widget_id
+        background = ctx.background
+        pad = ctx.pad
+        tk = ctx.tk
+        label = tk.Label(
+            parent,
+            text=text_value(props.get("text", "")),
+            bg=background,
+            fg=self._colour(style.get("color"), self.palette["text"]),
+            font=self._font(style),
+            justify="left",
+            anchor="w",
+            wraplength=340,
+        )
+        label.pack(fill="x", pady=pad)
+        self._widgets[widget_id] = label
+        return True
+        return True
 
-        if kind == "Button":
-            button = tk.Button(
-                parent,
-                text=text_value(props.get("text", "")),
-                font=self._font(style),
-                state="normal" if enabled else "disabled",
-                command=lambda: self._dispatch(widget_id, "press", ""),
-            )
-            self._button_colour(button, node)
-            button.pack(fill="x", pady=pad)
-            self._widgets[widget_id] = button
-            return
+    def _build_button(self, ctx: _BuildContext) -> bool:
+        """A button."""
+        parent = ctx.parent
+        node = ctx.node
+        props = ctx.props
+        style = ctx.style
+        enabled = ctx.enabled
+        widget_id = ctx.widget_id
+        pad = ctx.pad
+        tk = ctx.tk
+        button = tk.Button(
+            parent,
+            text=text_value(props.get("text", "")),
+            font=self._font(style),
+            state="normal" if enabled else "disabled",
+            command=lambda: self._dispatch(widget_id, "press", ""),
+        )
+        self._button_colour(button, node)
+        button.pack(fill="x", pady=pad)
+        self._widgets[widget_id] = button
+        return True
+        return True
 
+    def _build_text_input(self, ctx: _BuildContext) -> bool:
+        """Text entry: the text field, the search bar and the pickers."""
+        parent = ctx.parent
+        kind = ctx.kind
+        props = ctx.props
+        style = ctx.style
+        enabled = ctx.enabled
+        widget_id = ctx.widget_id
+        pad = ctx.pad
+        tk = ctx.tk
         if kind == "TextInput":
             variable = tk.StringVar(master=self.root, value=text_value(props.get("value", "")))
             entry = tk.Entry(
@@ -633,8 +723,40 @@ class GuiPreview:
             self._revisions[widget_id] = int(props.get("revision", 0))
             if props.get("placeholder") and not props.get("value"):
                 self._show_placeholder(entry, str(props["placeholder"]))
-            return
+            return True
+        if kind == "SearchBar":
+            variable = tk.StringVar(master=self.root, value=text_value(props.get("value", "")))
+            entry = tk.Entry(
+                parent, textvariable=variable, state="normal" if enabled else "disabled"
+            )
+            entry.pack(fill="x", pady=pad)
+            variable.trace_add(
+                "write", lambda *_: self._dispatch(widget_id, "change", variable.get())
+            )
+            self._widgets[widget_id] = entry
+            self._variables[widget_id] = variable
+            return True
+        if kind in ("DatePicker", "TimePicker"):
+            entry = tk.Entry(parent, width=14)
+            entry.insert(0, text_value(props.get("value", "")))
+            entry.bind(
+                "<Return>",
+                lambda _event, entry=entry: self._dispatch(widget_id, "change", entry.get()),
+            )
+            entry.pack(anchor="w", pady=pad)
+            return True
+        return False
 
+    def _build_choice(self, ctx: _BuildContext) -> bool:
+        """On/off choices: a switch, a checkbox and a radio button."""
+        parent = ctx.parent
+        kind = ctx.kind
+        props = ctx.props
+        enabled = ctx.enabled
+        widget_id = ctx.widget_id
+        background = ctx.background
+        pad = ctx.pad
+        tk = ctx.tk
         if kind == "Switch":
             variable = tk.BooleanVar(master=self.root, value=bool(props.get("checked")))
             toggle = tk.Checkbutton(
@@ -651,41 +773,7 @@ class GuiPreview:
             toggle.pack(fill="x", pady=pad)
             self._widgets[widget_id] = toggle
             self._variables[widget_id] = variable
-            return
-
-        if kind == "ProgressBar":
-            from tkinter import ttk
-
-            maximum = float(props.get("maximum", 100)) or 100.0
-            bar = ttk.Progressbar(
-                parent,
-                style="PyMobile.Horizontal.TProgressbar",
-                maximum=maximum,
-                value=float(props.get("value", 0)),
-                mode="indeterminate" if props.get("indeterminate") else "determinate",
-            )
-            bar.pack(fill="x", pady=pad)
-            if props.get("indeterminate"):
-                bar.start(60)
-            self._widgets[widget_id] = bar
-            return
-
-        if kind == "Image":
-            image = tk.Label(
-                parent,
-                text=f"🖼 {props.get('source', '')}",
-                fg=self.palette["muted"],
-                bg=background,
-                anchor="w",
-            )
-            image.pack(fill="x", pady=pad)
-            self._widgets[widget_id] = image
-            return
-
-        if kind == "Spacer":
-            tk.Frame(parent, height=int(props.get("size", 8)), bg=background).pack()
-            return
-
+            return True
         if kind in ("Checkbox",):
             variable = tk.BooleanVar(master=self.root, value=bool(props.get("checked")))
             box = tk.Checkbutton(
@@ -701,48 +789,157 @@ class GuiPreview:
             box.pack(fill="x", pady=pad)
             self._widgets[widget_id] = box
             self._variables[widget_id] = variable
-            return
-
-        if kind == "Slider":
-            variable = tk.DoubleVar(master=self.root, value=float(props.get("value", 0)))
-            scale = tk.Scale(
+            return True
+        if kind == "RadioButton":
+            variable = tk.IntVar(master=self.root, value=int(bool(props.get("selected"))))
+            radio = tk.Radiobutton(
                 parent,
-                from_=float(props.get("minimum", 0)),
-                to=float(props.get("maximum", 100)),
-                orient="horizontal",
-                resolution=float(props.get("step") or -1),
-                state="normal" if enabled else "disabled",
+                text=text_value(props.get("text")),
                 variable=variable,
-                command=lambda v: self._dispatch(widget_id, "change", str(v)),
+                value=1,
+                bg=background,
+                state="normal" if enabled else "disabled",
+                command=lambda: self._dispatch(widget_id, "press", ""),
             )
-            scale.pack(fill="x", pady=pad)
-            self._widgets[widget_id] = scale
+            radio.pack(anchor="w")
             self._variables[widget_id] = variable
-            return
+            self._widgets[widget_id] = radio
+            return True
+        return False
 
-        if kind == "RatingBar":
-            maximum = max(1, int(props.get("maximum", 5) or 5))
+    def _build_indicator(self, ctx: _BuildContext) -> bool:
+        """Progress, as a bar or as a bar with its text."""
+        parent = ctx.parent
+        kind = ctx.kind
+        props = ctx.props
+        widget_id = ctx.widget_id
+        background = ctx.background
+        pad = ctx.pad
+        tk = ctx.tk
+        if kind == "ProgressBar":
+            from tkinter import ttk
+
+            maximum = float(props.get("maximum", 100)) or 100.0
+            bar = ttk.Progressbar(
+                parent,
+                style="PyMobile.Horizontal.TProgressbar",
+                maximum=maximum,
+                value=float(props.get("value", 0)),
+                mode="indeterminate" if props.get("indeterminate") else "determinate",
+            )
+            bar.pack(fill="x", pady=pad)
+            if props.get("indeterminate"):
+                bar.start(60)
+            self._widgets[widget_id] = bar
+            return True
+        if kind == "ProgressText":
+            from tkinter import ttk
+
             frame = tk.Frame(parent, bg=background)
-            frame.pack(anchor="w", pady=pad)
-            colour = self._colour(style.get("color"), self.palette["text"])
-            stars: list[Any] = []
-            for number in range(1, maximum + 1):
-                star = tk.Label(frame, bg=background, fg=colour, font=("TkDefaultFont", 18))
-                star.pack(side="left")
-                if node.get("enabled", True):
-                    star.bind(
-                        "<Button-1>",
-                        lambda _event, n=number: self._dispatch(widget_id, "change", str(float(n))),
-                    )
-                stars.append(star)
-            frame.stars = stars  # type: ignore[attr-defined]
-            self._paint_stars(frame, props.get("rating", 0))
+            frame.pack(fill="x", pady=pad)
+            bar = ttk.Progressbar(
+                frame,
+                maximum=float(props.get("maximum", 100)) or 100,
+                value=float(props.get("value", 0)),
+                style="PyMobile.Horizontal.TProgressbar",
+            )
+            bar.pack(fill="x")
+            label = tk.Label(frame, text=text_value(props.get("text")), bg=background, anchor="w")
+            label.pack(fill="x")
+            frame.bar = bar
+            frame.label = label
             self._widgets[widget_id] = frame
-            return
+            return True
+        return False
 
+    def _build_image(self, ctx: _BuildContext) -> bool:
+        """A picture placeholder."""
+        parent = ctx.parent
+        props = ctx.props
+        widget_id = ctx.widget_id
+        background = ctx.background
+        pad = ctx.pad
+        tk = ctx.tk
+        image = tk.Label(
+            parent,
+            text=f"🖼 {props.get('source', '')}",
+            fg=self.palette["muted"],
+            bg=background,
+            anchor="w",
+        )
+        image.pack(fill="x", pady=pad)
+        self._widgets[widget_id] = image
+        return True
+        return True
+
+    def _build_slider(self, ctx: _BuildContext) -> bool:
+        """A slider."""
+        parent = ctx.parent
+        props = ctx.props
+        enabled = ctx.enabled
+        widget_id = ctx.widget_id
+        pad = ctx.pad
+        tk = ctx.tk
+        variable = tk.DoubleVar(master=self.root, value=float(props.get("value", 0)))
+        scale = tk.Scale(
+            parent,
+            from_=float(props.get("minimum", 0)),
+            to=float(props.get("maximum", 100)),
+            orient="horizontal",
+            resolution=float(props.get("step") or -1),
+            state="normal" if enabled else "disabled",
+            variable=variable,
+            command=lambda v: self._dispatch(widget_id, "change", str(v)),
+        )
+        scale.pack(fill="x", pady=pad)
+        self._widgets[widget_id] = scale
+        self._variables[widget_id] = variable
+        return True
+        return True
+
+    def _build_rating(self, ctx: _BuildContext) -> bool:
+        """A rating bar as a row of stars."""
+        parent = ctx.parent
+        node = ctx.node
+        props = ctx.props
+        style = ctx.style
+        widget_id = ctx.widget_id
+        background = ctx.background
+        pad = ctx.pad
+        tk = ctx.tk
+        maximum = max(1, int(props.get("maximum", 5) or 5))
+        frame = tk.Frame(parent, bg=background)
+        frame.pack(anchor="w", pady=pad)
+        colour = self._colour(style.get("color"), self.palette["text"])
+        stars: list[Any] = []
+        for number in range(1, maximum + 1):
+            star = tk.Label(frame, bg=background, fg=colour, font=("TkDefaultFont", 18))
+            star.pack(side="left")
+            if node.get("enabled", True):
+                star.bind(
+                    "<Button-1>",
+                    lambda _event, n=number: self._dispatch(widget_id, "change", str(float(n))),
+                )
+            stars.append(star)
+        frame.stars = stars  # type: ignore[attr-defined]
+        self._paint_stars(frame, props.get("rating", 0))
+        self._widgets[widget_id] = frame
+        return True
+        return True
+
+    def _build_options(self, ctx: _BuildContext) -> bool:
+        """A fixed list of options: a drop-down and segmented buttons."""
+        parent = ctx.parent
+        kind = ctx.kind
+        props = ctx.props
+        enabled = ctx.enabled
+        widget_id = ctx.widget_id
+        background = ctx.background
+        pad = ctx.pad
+        tk = ctx.tk
         if kind == "Dropdown":
-            # П-11: ``options`` is the list of values; ``labels`` is the
-            # parallel list of visible strings (falls back to the value).
+            # ``options`` is the list of values; ``labels`` is the parallel
+            # list of visible strings (falls back to the value).
             option_values = [str(o) for o in (props.get("options") or [])]
             option_labels = [str(lbl) for lbl in (props.get("labels") or option_values)]
             while len(option_labels) < len(option_values):
@@ -770,86 +967,7 @@ class GuiPreview:
             menu.pack(fill="x", pady=pad)
             self._widgets[widget_id] = menu
             self._variables[widget_id] = variable
-            return
-
-        if kind == "Chip":
-            button = tk.Button(
-                parent,
-                text=text_value(props.get("text")),
-                state="normal" if enabled else "disabled",
-                command=lambda: self._dispatch(widget_id, "press", ""),
-            )
-            self._chip_colour(button, node)
-            button.pack(anchor="w", pady=pad)
-            self._widgets[widget_id] = button
-            return
-
-        if kind in ("Badge", "Avatar"):
-            canvas = tk.Canvas(parent, bg=background, highlightthickness=0)
-            canvas.pack(anchor="w", pady=pad)
-            self._widgets[widget_id] = canvas
-            self._paint_identity(canvas, node)
-            return
-
-        if kind == "Stepper":
-            frame = tk.Frame(parent, bg=background)
-            frame.pack(fill="x", pady=pad)
-            minus = tk.Button(
-                frame,
-                text="-",
-                state="normal" if enabled else "disabled",
-                command=lambda: self._dispatch(widget_id, "decrement", ""),
-            )
-            minus.pack(side="left")
-            label = tk.Label(frame, text=text_value(props.get("value", 0)), bg=background)
-            label.pack(side="left", padx=8)
-            plus = tk.Button(
-                frame,
-                text="+",
-                state="normal" if enabled else "disabled",
-                command=lambda: self._dispatch(widget_id, "increment", ""),
-            )
-            plus.pack(side="left")
-            frame.label = label
-            frame.buttons = [minus, plus]
-            self._widgets[widget_id] = frame
-            return
-
-        if kind == "SearchBar":
-            variable = tk.StringVar(master=self.root, value=text_value(props.get("value", "")))
-            entry = tk.Entry(
-                parent, textvariable=variable, state="normal" if enabled else "disabled"
-            )
-            entry.pack(fill="x", pady=pad)
-            variable.trace_add(
-                "write", lambda *_: self._dispatch(widget_id, "change", variable.get())
-            )
-            self._widgets[widget_id] = entry
-            self._variables[widget_id] = variable
-            return
-
-        if kind == "RadioButton":
-            variable = tk.IntVar(master=self.root, value=int(bool(props.get("selected"))))
-            radio = tk.Radiobutton(
-                parent,
-                text=text_value(props.get("text")),
-                variable=variable,
-                value=1,
-                bg=background,
-                state="normal" if enabled else "disabled",
-                command=lambda: self._dispatch(widget_id, "press", ""),
-            )
-            radio.pack(anchor="w")
-            self._variables[widget_id] = variable
-            self._widgets[widget_id] = radio
-            return
-
-        if kind == "RadioGroup":
-            frame = tk.Frame(parent, bg=background)
-            frame.pack(fill="x", pady=pad)
-            self._build_children(frame, node, background)
-            return
-
+            return True
         if kind == "SegmentedButtons":
             frame = tk.Frame(parent, bg=background)
             frame.pack(fill="x", pady=pad)
@@ -875,152 +993,231 @@ class GuiPreview:
             self._widgets[widget_id] = frame
             if wrap:
                 self._flow(frame, buttons, 0, 0, "start")
-            return
+            return True
+        return False
 
-        if kind == "ProgressText":
-            from tkinter import ttk
+    def _build_chip(self, ctx: _BuildContext) -> bool:
+        """A chip."""
+        parent = ctx.parent
+        node = ctx.node
+        props = ctx.props
+        enabled = ctx.enabled
+        widget_id = ctx.widget_id
+        pad = ctx.pad
+        tk = ctx.tk
+        button = tk.Button(
+            parent,
+            text=text_value(props.get("text")),
+            state="normal" if enabled else "disabled",
+            command=lambda: self._dispatch(widget_id, "press", ""),
+        )
+        self._chip_colour(button, node)
+        button.pack(anchor="w", pady=pad)
+        self._widgets[widget_id] = button
+        return True
+        return True
 
-            frame = tk.Frame(parent, bg=background)
-            frame.pack(fill="x", pady=pad)
-            bar = ttk.Progressbar(
-                frame,
-                maximum=float(props.get("maximum", 100)) or 100,
-                value=float(props.get("value", 0)),
-                style="PyMobile.Horizontal.TProgressbar",
-            )
-            bar.pack(fill="x")
-            label = tk.Label(frame, text=text_value(props.get("text")), bg=background, anchor="w")
-            label.pack(fill="x")
-            frame.bar = bar
-            frame.label = label
-            self._widgets[widget_id] = frame
-            return
+    def _build_identity(self, ctx: _BuildContext) -> bool:
+        """A badge or an avatar, painted on a canvas."""
+        parent = ctx.parent
+        node = ctx.node
+        widget_id = ctx.widget_id
+        background = ctx.background
+        pad = ctx.pad
+        tk = ctx.tk
+        canvas = tk.Canvas(parent, bg=background, highlightthickness=0)
+        canvas.pack(anchor="w", pady=pad)
+        self._widgets[widget_id] = canvas
+        self._paint_identity(canvas, node)
+        return True
+        return True
 
-        if kind == "Link":
-            tk.Button(
-                parent,
-                text=text_value(props.get("text", "")),
-                fg="#3F51B5",
-                relief="flat",
-                command=lambda: self._dispatch(widget_id, "press", ""),
-            ).pack(anchor="w")
-            return
+    def _build_stepper(self, ctx: _BuildContext) -> bool:
+        """A stepper with its minus and plus buttons."""
+        parent = ctx.parent
+        props = ctx.props
+        enabled = ctx.enabled
+        widget_id = ctx.widget_id
+        background = ctx.background
+        pad = ctx.pad
+        tk = ctx.tk
+        frame = tk.Frame(parent, bg=background)
+        frame.pack(fill="x", pady=pad)
+        minus = tk.Button(
+            frame,
+            text="-",
+            state="normal" if enabled else "disabled",
+            command=lambda: self._dispatch(widget_id, "decrement", ""),
+        )
+        minus.pack(side="left")
+        label = tk.Label(frame, text=text_value(props.get("value", 0)), bg=background)
+        label.pack(side="left", padx=8)
+        plus = tk.Button(
+            frame,
+            text="+",
+            state="normal" if enabled else "disabled",
+            command=lambda: self._dispatch(widget_id, "increment", ""),
+        )
+        plus.pack(side="left")
+        frame.label = label
+        frame.buttons = [minus, plus]
+        self._widgets[widget_id] = frame
+        return True
+        return True
 
-        if kind == "DataTable":
-            headers = " | ".join(str(h) for h in (props.get("headers") or []))
+    def _build_link(self, ctx: _BuildContext) -> bool:
+        """A link."""
+        parent = ctx.parent
+        props = ctx.props
+        widget_id = ctx.widget_id
+        tk = ctx.tk
+        tk.Button(
+            parent,
+            text=text_value(props.get("text", "")),
+            fg="#3F51B5",
+            relief="flat",
+            command=lambda: self._dispatch(widget_id, "press", ""),
+        ).pack(anchor="w")
+        return True
+        return True
+
+    def _build_data_table(self, ctx: _BuildContext) -> bool:
+        """A data table: a header line and one line per record."""
+        parent = ctx.parent
+        props = ctx.props
+        background = ctx.background
+        tk = ctx.tk
+        headers = " | ".join(str(h) for h in (props.get("headers") or []))
+        tk.Label(
+            parent,
+            text=headers,
+            bg=background,
+            anchor="w",
+            font=("TkDefaultFont", 9, "bold"),
+        ).pack(fill="x")
+        for row in props.get("rows") or []:
             tk.Label(
                 parent,
-                text=headers,
+                text=" | ".join(str(c) for c in row),
                 bg=background,
                 anchor="w",
-                font=("TkDefaultFont", 9, "bold"),
             ).pack(fill="x")
-            for row in props.get("rows") or []:
-                tk.Label(
-                    parent,
-                    text=" | ".join(str(c) for c in row),
-                    bg=background,
-                    anchor="w",
-                ).pack(fill="x")
-            return
+        return True
+        return True
 
-        if kind in ("List", "ListTile"):
-            if kind == "List":
-                frame = tk.Frame(parent, bg=background)
-                frame.pack(fill="both", expand=True, pady=pad)
-                if props.get("refreshable"):
-                    # A mouse cannot pull: the gesture becomes a button.
-                    refreshing = bool(props.get("refreshing"))
+    def _build_list(self, ctx: _BuildContext) -> bool:
+        """A list, and the list rows it is made of."""
+        parent = ctx.parent
+        node = ctx.node
+        kind = ctx.kind
+        props = ctx.props
+        enabled = ctx.enabled
+        widget_id = ctx.widget_id
+        background = ctx.background
+        pad = ctx.pad
+        tk = ctx.tk
+        if kind == "List":
+            frame = tk.Frame(parent, bg=background)
+            frame.pack(fill="both", expand=True, pady=pad)
+            if props.get("refreshable"):
+                # A mouse cannot pull: the gesture becomes a button.
+                refreshing = bool(props.get("refreshing"))
+                tk.Button(
+                    frame,
+                    text="⟳ Refreshing…" if refreshing else "↻ Pull to refresh",
+                    state="disabled" if refreshing else "normal",
+                    command=lambda: self._dispatch(widget_id, "refresh", ""),
+                ).pack(fill="x", pady=pad)
+            self._build_children(frame, node, background)
+            if props.get("has_more"):
+                loaded = text_value(props.get("loaded", len(node.get("children", ()))))
+                tk.Button(
+                    frame,
+                    text=f"Load more ({loaded} of {props.get('item_count', '?')})",
+                    command=lambda: self._dispatch(widget_id, "load_more", loaded),
+                ).pack(fill="x", pady=pad)
+            return True
+        holder = parent
+        if props.get("swipe_left") or props.get("swipe_right"):
+            holder = tk.Frame(parent, bg=background)
+            holder.pack(fill="x", pady=pad)
+            for direction, arrow in (("left", "⟵"), ("right", "⟶")):
+                if props.get(f"swipe_{direction}"):
                     tk.Button(
-                        frame,
-                        text="⟳ Refreshing…" if refreshing else "↻ Pull to refresh",
-                        state="disabled" if refreshing else "normal",
-                        command=lambda: self._dispatch(widget_id, "refresh", ""),
-                    ).pack(fill="x", pady=pad)
-                self._build_children(frame, node, background)
-                if props.get("has_more"):
-                    loaded = text_value(props.get("loaded", len(node.get("children", ()))))
-                    tk.Button(
-                        frame,
-                        text=f"Load more ({loaded} of {props.get('item_count', '?')})",
-                        command=lambda: self._dispatch(widget_id, "load_more", loaded),
-                    ).pack(fill="x", pady=pad)
-                return
-            holder = parent
-            if props.get("swipe_left") or props.get("swipe_right"):
-                holder = tk.Frame(parent, bg=background)
-                holder.pack(fill="x", pady=pad)
-                for direction, arrow in (("left", "⟵"), ("right", "⟶")):
-                    if props.get(f"swipe_{direction}"):
-                        tk.Button(
-                            holder,
-                            text=arrow,
-                            bg=self._colour(props.get(f"swipe_{direction}_color"), "#757575"),
-                            fg="#FFFFFF",
-                            command=lambda d=direction: self._dispatch(widget_id, "swipe", d),
-                        ).pack(side="right")
-            tile = tk.Button(
-                holder,
-                text=self._tile_text(props),
-                state="normal" if enabled else "disabled",
-                command=lambda: self._dispatch(widget_id, "press", ""),
-                anchor="w",
+                        holder,
+                        text=arrow,
+                        bg=self._colour(props.get(f"swipe_{direction}_color"), "#757575"),
+                        fg="#FFFFFF",
+                        command=lambda d=direction: self._dispatch(widget_id, "swipe", d),
+                    ).pack(side="right")
+        tile = tk.Button(
+            holder,
+            text=self._tile_text(props),
+            state="normal" if enabled else "disabled",
+            command=lambda: self._dispatch(widget_id, "press", ""),
+            anchor="w",
+        )
+        self._widgets[widget_id] = tile
+        if holder is parent:
+            tile.pack(fill="x", pady=pad)
+        else:
+            tile.pack(side="left", fill="x", expand=True)
+        if props.get("long_pressable"):
+            # Right click stands in for touch-and-hold in the Tk window.
+            tile.bind(
+                "<Button-3>",
+                lambda _event, wid=widget_id: self._dispatch(wid, "long_press", ""),
             )
-            self._widgets[widget_id] = tile
-            if holder is parent:
-                tile.pack(fill="x", pady=pad)
-            else:
-                tile.pack(side="left", fill="x", expand=True)
-            if props.get("long_pressable"):
-                # Right click stands in for touch-and-hold in the Tk window.
-                tile.bind(
-                    "<Button-3>",
-                    lambda _event, wid=widget_id: self._dispatch(wid, "long_press", ""),
-                )
-            return
+        return True
+        return True
 
-        if kind == "BottomNavigation":
-            bar = tk.Frame(parent, bg=background)
-            bar.pack(fill="x", pady=pad)
-            option_values = [str(o) for o in (props.get("options") or [])]
-            option_labels = [str(lbl) for lbl in (props.get("labels") or option_values)]
-            while len(option_labels) < len(option_values):
-                option_labels.append(option_values[len(option_labels)])
-            buttons = []
-            for val, lbl in zip(option_values, option_labels, strict=False):
-                selected = val == props.get("value")
-                button = tk.Button(
-                    bar,
-                    text=lbl,
-                    relief="sunken" if selected else "raised",
-                    command=lambda v=val: self._dispatch(widget_id, "change", v),
-                )
-                button.pack(side="left", expand=True, fill="x")
-                buttons.append(button)
-            bar.buttons = buttons
-            self._selection(bar, props, "normal" if enabled else "disabled")
-            self._widgets[widget_id] = bar
-            return
-
-        if kind == "Dialog":
-            box = tk.LabelFrame(
-                parent, text=text_value(props.get("title", "")), bg=background, padx=8, pady=8
+    def _build_bottom_navigation(self, ctx: _BuildContext) -> bool:
+        """The bottom navigation bar and its tabs."""
+        parent = ctx.parent
+        props = ctx.props
+        enabled = ctx.enabled
+        widget_id = ctx.widget_id
+        background = ctx.background
+        pad = ctx.pad
+        tk = ctx.tk
+        bar = tk.Frame(parent, bg=background)
+        bar.pack(fill="x", pady=pad)
+        option_values = [str(o) for o in (props.get("options") or [])]
+        option_labels = [str(lbl) for lbl in (props.get("labels") or option_values)]
+        while len(option_labels) < len(option_values):
+            option_labels.append(option_values[len(option_labels)])
+        buttons = []
+        for val, lbl in zip(option_values, option_labels, strict=False):
+            selected = val == props.get("value")
+            button = tk.Button(
+                bar,
+                text=lbl,
+                relief="sunken" if selected else "raised",
+                command=lambda v=val: self._dispatch(widget_id, "change", v),
             )
-            box.pack(fill="x", pady=pad, side="bottom" if props.get("sheet") else "top")
-            self._build_children(box, node, background)
-            return
+            button.pack(side="left", expand=True, fill="x")
+            buttons.append(button)
+        bar.buttons = buttons
+        self._selection(bar, props, "normal" if enabled else "disabled")
+        self._widgets[widget_id] = bar
+        return True
+        return True
 
-        if kind in ("DatePicker", "TimePicker"):
-            entry = tk.Entry(parent, width=14)
-            entry.insert(0, text_value(props.get("value", "")))
-            entry.bind(
-                "<Return>",
-                lambda _event, entry=entry: self._dispatch(widget_id, "change", entry.get()),
-            )
-            entry.pack(anchor="w", pady=pad)
-            return
-
-        tk.Label(parent, text=f"<{kind}>", fg=self.palette["muted"], bg=background).pack(anchor="w")
+    def _build_dialog(self, ctx: _BuildContext) -> bool:
+        """A dialog or a sheet, drawn as a framed box."""
+        parent = ctx.parent
+        node = ctx.node
+        props = ctx.props
+        background = ctx.background
+        pad = ctx.pad
+        tk = ctx.tk
+        box = tk.LabelFrame(
+            parent, text=text_value(props.get("title", "")), bg=background, padx=8, pady=8
+        )
+        box.pack(fill="x", pady=pad, side="bottom" if props.get("sheet") else "top")
+        self._build_children(box, node, background)
+        return True
+        return True
 
     def _build_children(self, frame: tk.Misc, node: dict[str, Any], background: str) -> None:
         """Stack children vertically, honouring the container's spacing."""
@@ -1175,10 +1372,70 @@ class GuiPreview:
         weight = node.get("style", {}).get("weight")
         return int(weight) if weight else 0
 
-    def _font(self, style: dict[str, Any]) -> tuple[str, int, str]:
+    def _font(self, style: dict[str, Any]) -> tuple[Any, ...]:
+        """The Tk font descriptor for a serialised Style.
+
+        A named family has to be a *real* installed family: Tk silently keeps
+        the previous font otherwise, and a mockup that quietly ignores
+        ``font_family`` is worse than one that does not offer it. So the family
+        is resolved through ``tkinter.font.families()`` and an unknown name
+        falls back to the default — with the slant and underline flags Python
+        always supported and the desktop window never applied.
+        """
         size = int(style.get("font_size", 11))
         weight = "bold" if style.get("bold") else "normal"
-        return ("TkDefaultFont", max(7, size), weight)
+        slant = "italic" if style.get("italic") else "roman"
+        underline = bool(style.get("underline"))
+        strike = bool(style.get("strikethrough"))
+        family = self._family(style.get("font_family"))
+        needs_options = slant != "roman" or underline or strike
+        if needs_options:
+            overstrike = 1 if strike else 0
+            return (family, max(7, size), weight, slant, int(underline), overstrike)
+        return (
+            (family, max(7, size), weight)
+            if family != "TkDefaultFont"
+            else (
+                "TkDefaultFont",
+                max(7, size),
+                weight,
+            )
+        )
+
+    def _family(self, requested: Any) -> str:
+        """Resolve ``Style(font_family=…)`` against the families Tk really has."""
+        if not isinstance(requested, str) or not requested.strip():
+            return "TkDefaultFont"
+        from tkinter import font as tkfont
+
+        try:
+            available = {name.lower(): name for name in tkfont.families(self.root)}
+        except Exception:  # pragma: no cover - a Tk without font support
+            return "TkDefaultFont"
+        for name in requested.split(","):
+            wanted = name.strip().strip("'\"").lower()
+            if not wanted:
+                continue
+            if wanted in available:
+                return available[wanted]
+            without_spaces = {name.replace(" ", "").lower(): name for name in available}
+            if wanted.replace(" ", "") in without_spaces:
+                return without_spaces[wanted.replace(" ", "")]
+            # Tk reports family names with spaces ("DejaVu Serif"), so compare
+            # without them: a lookup table of squashed names never matched.
+            squashed = {name.replace(" ", "").lower(): name for name in available}
+            alias = {
+                "serif": ("dejavuserif", "times", "georgia", "liberationserif", "notoserif"),
+                "monospace": ("dejavusansmono", "courier", "consolas", "liberationmono"),
+                "sans-serif": ("dejavusans", "arial", "helvetica", "liberationsans"),
+            }.get(wanted, ())
+            for candidate in alias:
+                if candidate in squashed:
+                    return squashed[candidate]
+            for candidate in alias:
+                if candidate in available:
+                    return available[candidate]
+        return "TkDefaultFont"
 
     def _colour(self, value: Any, fallback: str) -> str:
         """Translate a framework colour into one Tk understands."""
@@ -1192,6 +1449,7 @@ class GuiPreview:
 
     @property
     def palette(self) -> dict[str, str]:
+        """The colours of the current preview theme."""
         return getattr(self, "_palette", _PALETTE)
 
     def _sync_theme(self) -> bool:
@@ -1405,3 +1663,48 @@ def run_gui(
         on_ready(preview)
     preview.run()
     return preview
+
+
+#: Which ``_build_*`` method draws which widget type. A method that draws
+#: several kinds keeps one guard per kind and returns False for the rest.
+_TK_BUILDERS: dict[str, Callable[[GuiPreview, _BuildContext], bool]] = {
+    "ScrollView": GuiPreview._build_scroll_view,
+    "Stack": GuiPreview._build_layout,
+    "Column": GuiPreview._build_layout,
+    "Container": GuiPreview._build_layout,
+    "SafeArea": GuiPreview._build_layout,
+    "Expanded": GuiPreview._build_layout,
+    "Flexible": GuiPreview._build_layout,
+    "Row": GuiPreview._build_layout,
+    "Grid": GuiPreview._build_layout,
+    "Wrap": GuiPreview._build_layout,
+    "RadioGroup": GuiPreview._build_layout,
+    "Divider": GuiPreview._build_ornament,
+    "Spacer": GuiPreview._build_ornament,
+    "Label": GuiPreview._build_label,
+    "Button": GuiPreview._build_button,
+    "TextInput": GuiPreview._build_text_input,
+    "SearchBar": GuiPreview._build_text_input,
+    "DatePicker": GuiPreview._build_text_input,
+    "TimePicker": GuiPreview._build_text_input,
+    "Switch": GuiPreview._build_choice,
+    "Checkbox": GuiPreview._build_choice,
+    "RadioButton": GuiPreview._build_choice,
+    "ProgressBar": GuiPreview._build_indicator,
+    "ProgressText": GuiPreview._build_indicator,
+    "Image": GuiPreview._build_image,
+    "Slider": GuiPreview._build_slider,
+    "RatingBar": GuiPreview._build_rating,
+    "Dropdown": GuiPreview._build_options,
+    "SegmentedButtons": GuiPreview._build_options,
+    "Chip": GuiPreview._build_chip,
+    "Badge": GuiPreview._build_identity,
+    "Avatar": GuiPreview._build_identity,
+    "Stepper": GuiPreview._build_stepper,
+    "Link": GuiPreview._build_link,
+    "DataTable": GuiPreview._build_data_table,
+    "List": GuiPreview._build_list,
+    "ListTile": GuiPreview._build_list,
+    "BottomNavigation": GuiPreview._build_bottom_navigation,
+    "Dialog": GuiPreview._build_dialog,
+}

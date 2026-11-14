@@ -9,17 +9,22 @@ with backoff, a base URL and default headers.
 from __future__ import annotations
 
 import codecs
+import contextlib
 import functools
 import hashlib
 import http.client
 import json as jsonlib
+import queue
+import secrets
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Mapping
+import zlib
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -31,12 +36,22 @@ from .cache import HttpCache
 if TYPE_CHECKING:  # pragma: no cover - typing only; `ssl` is imported lazily
     import ssl
 
-__all__ = ["HttpClient", "HttpSecurityPolicy", "Response", "HttpFuture", "DEFAULT_TIMEOUT"]
+__all__ = [
+    "HttpClient",
+    "HttpSecurityPolicy",
+    "Response",
+    "HttpFuture",
+    "DEFAULT_TIMEOUT",
+    "redact_url",
+]
 
 _log = get_logger("http")
 
 DEFAULT_TIMEOUT = 15.0
 _RETRY_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+#: Methods a 301/302/303 turn into a GET, as browsers do; 307/308 keep them.
+_SEE_OTHER_STATUSES = frozenset({301, 302, 303})
 Params = Mapping[str, str | int | float | bool | None]
 
 
@@ -101,6 +116,7 @@ class HttpSecurityPolicy:
         return _DEFAULT_CREDENTIAL_HEADERS | self.credential_headers
 
     def validate(self, url: str) -> None:
+        """Raise when ``url`` breaks the policy: scheme, host and redirect rules."""
         parsed = urllib.parse.urlparse(url)
         host = (parsed.hostname or "").casefold()
         if self.require_https and parsed.scheme != "https":
@@ -137,13 +153,347 @@ _DEFAULT_CREDENTIAL_HEADERS: frozenset[str] = frozenset(
 )
 
 
+#: Request bodies at least this large are worth compressing when asked to.
+COMPRESS_THRESHOLD = 1024
+
+FileValue = "bytes | str | Path | tuple[str, Any] | tuple[str, Any, str]"
+
+
+def _read_file_value(name: str, value: Any) -> tuple[str, bytes, str]:
+    """Normalise one ``files=`` entry into ``(filename, content, content_type)``."""
+    if isinstance(value, (bytes, bytearray)):
+        return name, bytes(value), "application/octet-stream"
+    if isinstance(value, tuple):
+        if len(value) == 2:
+            filename, content = value
+            content_type = "application/octet-stream"
+        elif len(value) == 3:
+            filename, content, content_type = value
+        else:
+            raise ValueError(
+                f"files[{name!r}] must be (filename, content) or (filename, content, content_type)"
+            )
+        return str(filename), _coerce_upload(content), str(content_type)
+    # A path is read here rather than by the caller: streaming a file upload
+    # from disk is the common case, and reading it lazily would mean holding
+    # the request open across a retry.
+    path = Path(value)
+    return path.name, path.read_bytes(), "application/octet-stream"
+
+
+def _coerce_upload(content: Any) -> bytes:
+    if isinstance(content, (bytes, bytearray)):
+        return bytes(content)
+    if isinstance(content, str):
+        return content.encode("utf-8")
+    if isinstance(content, Path):
+        return content.read_bytes()
+    raise TypeError(f"file content must be bytes, str or a Path, got {type(content).__name__!r}")
+
+
+def _encode_multipart(
+    fields: Mapping[str, Any] | None, files: Mapping[str, Any]
+) -> tuple[bytes, str]:
+    """Build a ``multipart/form-data`` body.
+
+    Uploads used to mean hand-rolling the boundary, the ``Content-Length`` and
+    the CRLF rules; a missing CRLF between parts is the classic bug, and it
+    fails silently on the server side. This does it once, correctly.
+    """
+    boundary = f"----PyMobileBoundary{secrets.token_hex(16)}"
+    lines: list[bytes] = []
+    for name, value in (fields or {}).items():
+        lines.append(f"--{boundary}".encode())
+        lines.append(f'Content-Disposition: form-data; name="{name}"'.encode())
+        lines.append(b"")
+        lines.append(str(value).encode("utf-8"))
+    for name, entry in files.items():
+        filename, content, content_type = _read_file_value(name, entry)
+        lines.append(f"--{boundary}".encode())
+        disposition = f'Content-Disposition: form-data; name="{name}"'
+        if filename:
+            disposition += f'; filename="{filename}"'
+        lines.append(disposition.encode())
+        lines.append(f"Content-Type: {content_type}".encode())
+        lines.append(b"")
+        lines.append(content)
+    lines.append(f"--{boundary}--".encode())
+    lines.append(b"")
+    return b"\r\n".join(lines), f"multipart/form-data; boundary={boundary}"
+
+
+#: Query parameters whose value is a credential, masked before a URL reaches
+#: the log. A debug log that carries ``?access_token=…`` ends up in logcat,
+#: in bug reports and in a support ticket.
+SECRET_QUERY_PARAMS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "apikey",
+        "auth",
+        "code",
+        "id_token",
+        "key",
+        "password",
+        "refresh_token",
+        "secret",
+        "session",
+        "sig",
+        "signature",
+        "token",
+    }
+)
+
+
+def redact_url(url: str) -> str:
+    """``url`` with credential-looking query values replaced by ``***``.
+
+    Kept as a small function of its own so a caller can log the same
+    redaction, and so the behaviour is obvious in a test.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:  # pragma: no cover - impossible for a str we built
+        return url
+    if not parts.query:
+        return url
+    pairs = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+    if not any(name.casefold() in SECRET_QUERY_PARAMS for name, _ in pairs):
+        return url
+    masked = [
+        (name, "***" if name.casefold() in SECRET_QUERY_PARAMS else value) for name, value in pairs
+    ]
+    # ``safe="*"`` keeps the mask readable in the log instead of %2A%2A%2A.
+    query = urllib.parse.urlencode(masked, safe="*")
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+
+
+def _header_value(headers: Mapping[str, str], name: str) -> str:
+    """Case-insensitive header lookup; ``""`` when the header is absent."""
+    wanted = name.casefold()
+    for key, value in headers.items():
+        if key.casefold() == wanted:
+            return value
+    return ""
+
+
 def _normalise_header_names(names: frozenset[str] | tuple[str, ...] | list[str]) -> frozenset[str]:
     """Lower-case header names, rejecting a bare string ("x-api-key" is iterable)."""
     if isinstance(names, str):
-        raise TypeError(
-            "credential_headers must be a collection of header names, not a str"
-        )
+        raise TypeError("credential_headers must be a collection of header names, not a str")
     return frozenset(str(name).strip().casefold() for name in names if str(name).strip())
+
+
+#: Encodings the client understands, in the order it advertises them. A server
+#: that honours ``Accept-Encoding`` gets a smaller body on the wire; one that
+#: compresses without being asked is still decoded (see :func:`_decompress`).
+ACCEPT_ENCODING = "gzip, deflate"
+
+#: Enough for a phone: a pool entry is one idle socket, and these are cheap.
+MAX_IDLE_CONNECTIONS = 4
+#: Servers close idle sockets after ~5-60 s; dropping ours sooner avoids
+#: writing a request into a socket the peer has already shut down.
+IDLE_CONNECTION_TIMEOUT = 20.0
+
+
+class _ConnectionPool:
+    """Idle keep-alive connections, keyed by scheme/host/port.
+
+    Every request used to open a fresh TCP connection (and, over HTTPS, a fresh
+    TLS handshake). Reusing the socket turn is what makes a page of twenty API
+    calls bearable on a phone. ``http.client`` connections are not thread safe,
+    so a checked-out connection belongs to one caller until it is returned;
+    connections handed back after an error are dropped rather than reused.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_idle: int = MAX_IDLE_CONNECTIONS,
+        idle_timeout: float = IDLE_CONNECTION_TIMEOUT,
+    ) -> None:
+        self._idle: dict[
+            tuple[str, str, int | None], list[tuple[http.client.HTTPConnection, float]]
+        ] = {}
+        self._lock = threading.Lock()
+        self._max_idle = max_idle
+        self._idle_timeout = idle_timeout
+
+    def acquire(
+        self, scheme: str, host: str, port: int | None, timeout: float
+    ) -> http.client.HTTPConnection:
+        """A reusable connection for the host, reusing an idle one when there is any."""
+        key = (scheme, host, port)
+        with self._lock:
+            entries = self._idle.get(key, [])
+            while entries:
+                connection, returned_at = entries.pop()
+                if time.monotonic() - returned_at <= self._idle_timeout:
+                    connection.timeout = timeout
+                    if connection.sock is not None:
+                        return connection
+                    connection.close()
+        return self._new(scheme, host, port, timeout)
+
+    @staticmethod
+    def _new(
+        scheme: str, host: str, port: int | None, timeout: float
+    ) -> http.client.HTTPConnection:
+        if scheme == "https":
+            return http.client.HTTPSConnection(host, port, timeout=timeout, context=_ssl_context())
+        return http.client.HTTPConnection(host, port, timeout=timeout)
+
+    def release(
+        self, scheme: str, host: str, port: int | None, connection: http.client.HTTPConnection
+    ) -> None:
+        """Return a healthy connection; anything else is closed instead."""
+        key = (scheme, host, port)
+        with self._lock:
+            entries = self._idle.setdefault(key, [])
+            if len(entries) >= self._max_idle:
+                connection.close()
+                return
+            entries.append((connection, time.monotonic()))
+
+    def discard(self, connection: http.client.HTTPConnection) -> None:
+        """Close and forget a connection that cannot be reused."""
+        with self._lock:
+            for entries in self._idle.values():
+                entries[:] = [item for item in entries if item[0] is not connection]
+        with contextlib.suppress(Exception):
+            connection.close()
+
+    def close(self) -> None:
+        """Close every idle socket (called by ``App.stop`` and by tests)."""
+        with self._lock:
+            entries = [item for items in self._idle.values() for item in items]
+            self._idle.clear()
+        for connection, _ in entries:
+            with contextlib.suppress(Exception):
+                connection.close()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return sum(len(items) for items in self._idle.values())
+
+
+def _http_worker_count(max_workers: int | None) -> int:
+    """How many worker threads serve ``*_async`` requests."""
+    if max_workers is None:
+        import os
+
+        return max(2, min(32, (os.cpu_count() or 2) * 2))
+    if isinstance(max_workers, bool) or not isinstance(max_workers, int):
+        raise TypeError("max_workers must be an int or None")
+    if max_workers < 1:
+        raise ValueError("max_workers must be >= 1")
+    return max_workers
+
+
+class _RequestPool:
+    """Fixed daemon workers for ``get_async`` and friends.
+
+    One thread per request does not scale: a screen that fires twenty async
+    loads, or a retry storm, used to create a thread each. A queued request
+    waits here instead, and ``close()`` drains the queue.
+    """
+
+    def __init__(self, size: int) -> None:
+        self._queue: queue.Queue[Callable[[], None] | None] = queue.Queue()
+        self._threads: list[threading.Thread] = []
+        self._closed = False
+        self._lock = threading.Lock()
+        self._size = size
+        # Threads are started with the first async request, not with the client:
+        # every ``HttpClient()`` used to spawn a worker pool on creation, and so
+        # did every ``App`` and every test that built one, for requests a
+        # synchronous app never makes.
+        self._spawned = False
+
+    def _ensure_started(self) -> None:
+        if self._spawned:
+            return
+        with self._lock:
+            if self._spawned:
+                return
+            for index in range(self._size):
+                thread = threading.Thread(
+                    target=self._loop, name=f"pymobile-http-worker-{index}", daemon=True
+                )
+                thread.start()
+                self._threads.append(thread)
+            self._spawned = True
+
+    def submit(self, task: Callable[[], None]) -> None:
+        """Run ``task`` on one of the request threads, starting them on first use."""
+        if self._closed:
+            raise NetworkError("the HTTP client has been closed")
+        self._ensure_started()
+        self._queue.put(task)
+
+    def _loop(self) -> None:
+        while True:
+            task = self._queue.get()
+            if task is None:
+                return
+            try:
+                task()
+            except BaseException:  # pragma: no cover - futures capture their own errors
+                _log.exception("an HTTP worker raised")
+            finally:
+                self._queue.task_done()
+
+    def shutdown(self, wait: bool = False) -> None:
+        """Stop the request threads once their current task is done."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        for _ in self._threads:
+            self._queue.put(None)
+        if wait:
+            for thread in self._threads:
+                thread.join(timeout=5)
+
+    def __len__(self) -> int:
+        return len(self._threads)
+
+
+def _gzip_bytes(body: bytes) -> bytes:
+    """gzip a request body (``zlib.compress`` cannot ask for the gzip format)."""
+    import gzip
+
+    return gzip.compress(body, 6)
+
+
+def _decompress(body: bytes, encoding: str) -> bytes:
+    """Undo ``Content-Encoding`` on a body that was compressed anyway.
+
+    The client advertises ``Accept-Encoding: gzip, deflate`` and also sends
+    ``Accept-Encoding: identity`` when the caller sets the header by hand. A
+    server that compresses regardless used to hand the caller gzip bytes as
+    ``response.text``; this decodes them, and falls back to the raw body when
+    the stream is truncated or otherwise unreadable (a partial body beats an
+    exception the app cannot act on).
+    """
+    name = encoding.strip().casefold()
+    if not name or name == "identity":
+        return body
+    if not body:
+        return body
+    try:
+        if name in ("gzip", "x-gzip"):
+            return zlib.decompress(body, 16 + zlib.MAX_WBITS)
+        if name == "deflate":
+            try:
+                return zlib.decompress(body)
+            except zlib.error:
+                return zlib.decompress(body, -zlib.MAX_WBITS)
+    except zlib.error as exc:
+        _log.warning("could not decode a %s response body (%s); returning it as-is", name, exc)
+        return body
+    _log.debug("unknown Content-Encoding %r; returning the body as-is", encoding)
+    return body
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -167,6 +517,7 @@ class _PolicyRedirectHandler(urllib.request.HTTPRedirectHandler):
         headers: Any,
         newurl: str,
     ) -> urllib.request.Request | None:
+        """Follow a redirect only when the policy allows the destination."""
         scheme = urllib.parse.urlsplit(newurl).scheme
         if scheme not in ("http", "https"):
             raise NetworkError(f"Redirect to unsupported URL scheme blocked: {newurl!r}")
@@ -213,6 +564,12 @@ class Response:
     elapsed: float = 0.0
     encoding: str = "utf-8"
     from_cache: bool = False
+    #: ``True`` when the body was **not** read: use ``iter_content()`` and call
+    #: ``close()`` (or use the response as a context manager) when done.
+    stream: bool = False
+    #: The reader behind a streaming response; other responses leave it None.
+    _reader: Callable[[int], bytes] | None = field(default=None, repr=False, compare=False)
+    _closer: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         # A server may send any junk in ``charset=…``. Decoding with a codec
@@ -225,7 +582,8 @@ class Response:
         except (LookupError, TypeError):
             _log.warning(
                 "unknown charset %r for %s; decoding the body as utf-8",
-                self.encoding, self.url,
+                self.encoding,
+                self.url,
             )
             object.__setattr__(self, "encoding", "utf-8")
 
@@ -254,6 +612,42 @@ class Response:
                 f"Response from {self.url} is not valid JSON: {exc}",
                 hint=f"First bytes of the body: {preview!r}",
             ) from exc
+
+    def iter_content(self, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
+        """Yield the body in chunks.
+
+        For ``stream=True`` responses the bytes are read from the socket as
+        they arrive and the connection is held until the iterator is done, so
+        a 30 MB download no longer sits in memory three times over. A response
+        that was fully read (the default) simply yields its content in slices.
+        """
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        if self._reader is None:
+            for start in range(0, len(self.content), chunk_size):
+                yield self.content[start : start + chunk_size]
+            return
+        try:
+            while True:
+                chunk = self._reader(chunk_size)
+                if not chunk:
+                    return
+                yield chunk
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        """Release the connection behind a streaming response (idempotent)."""
+        closer = self._closer
+        object.__setattr__(self, "_closer", None)
+        if closer is not None:
+            closer()
+
+    def __enter__(self) -> Response:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
 
     def raise_for_status(self) -> Response:
         """Return ``self``, or raise :class:`NetworkError` for 4xx/5xx."""
@@ -445,11 +839,11 @@ class HttpFuture:
 
 
 #: Per-request options accepted by the verbs (they are forwarded to ``request``).
-_REQUEST_OPTIONS = frozenset({"json", "data", "headers", "timeout", "retry_safe"})
-#: Options that exist, but on ``HttpClient(...)`` instead of on each request.
-_CLIENT_OPTIONS = frozenset(
-    {"retries", "backoff", "cache", "security", "user_agent", "base_url"}
+_REQUEST_OPTIONS = frozenset(
+    {"json", "data", "files", "compress", "headers", "timeout", "retry_safe", "stream"}
 )
+#: Options that exist, but on ``HttpClient(...)`` instead of on each request.
+_CLIENT_OPTIONS = frozenset({"retries", "backoff", "cache", "security", "user_agent", "base_url"})
 
 
 def _check_request_options(verb: str, kwargs: Mapping[str, Any]) -> None:
@@ -487,6 +881,14 @@ class HttpClient:
     timeout: float = DEFAULT_TIMEOUT
     retries: int = 0
     backoff: float = 0.5
+    #: A deadline for the whole call -- every retry and every backoff sleep
+    #: included. ``timeout`` bounds one attempt: with ``timeout=2, retries=3``
+    #: a single ``get()`` used to take 8.4 s. ``None`` keeps the old behaviour.
+    timeout_budget: float | None = None
+    #: Redirect hops followed before the response is returned as-is.
+    max_redirects: int = 10
+    #: Worker threads for the ``*_async`` verbs (default: twice the CPU count).
+    max_workers: int | None = None
     user_agent: str = f"PyMobile/{__import__('pymobile').__version__}"
     cache: HttpCache | None = field(default=None, repr=False)
     security: HttpSecurityPolicy = field(default_factory=HttpSecurityPolicy)
@@ -495,9 +897,17 @@ class HttpClient:
     deliver: Callable[[Callable[[], None]], None] | None = field(
         default=None, repr=False, compare=False
     )
+    #: Idle keep-alive sockets, one per scheme/host/port (see _ConnectionPool).
+    _pool: _ConnectionPool = field(
+        default_factory=lambda: _ConnectionPool(), repr=False, compare=False, init=False
+    )
+    _budget_started: float = field(default=0.0, repr=False, compare=False, init=False)
+    _workers: _RequestPool = field(
+        default_factory=lambda: _RequestPool(32), repr=False, compare=False, init=False
+    )
 
     def __post_init__(self) -> None:
-        # Validation for common mistakes (BUG-27, BUG-28) + new checks
+        # Validation for the common mistakes + the options that used to slip through
         if not isinstance(self.timeout, (int, float)):
             raise TypeError(f"timeout must be a number, got {type(self.timeout).__name__!r}")
         if self.timeout <= 0:
@@ -515,18 +925,30 @@ class HttpClient:
                 f"retries must be >= 0, got {self.retries}; "
                 "pass 0 for no retries, 2 for two retries"
             )
+        if self.timeout_budget is not None:
+            if not isinstance(self.timeout_budget, (int, float)) or isinstance(
+                self.timeout_budget, bool
+            ):
+                raise TypeError(
+                    f"timeout_budget must be a number or None, got "
+                    f"{type(self.timeout_budget).__name__!r}"
+                )
+            if self.timeout_budget <= 0:
+                raise ValueError(f"timeout_budget must be positive, got {self.timeout_budget}")
+        if isinstance(self.max_redirects, bool) or not isinstance(self.max_redirects, int):
+            raise TypeError("max_redirects must be an int")
+        if self.max_redirects < 0:
+            raise ValueError("max_redirects must be >= 0")
         if not isinstance(self.backoff, (int, float)):
             raise TypeError(f"backoff must be a number, got {type(self.backoff).__name__!r}")
         if self.backoff < 0:
             raise ValueError(f"backoff must be >= 0, got {self.backoff}")
         if self.base_url is not None and not isinstance(self.base_url, str):
-            raise TypeError(
-                f"base_url must be a string, got {type(self.base_url).__name__!r}"
-            )
+            raise TypeError(f"base_url must be a string, got {type(self.base_url).__name__!r}")
         if isinstance(self.base_url, str) and self.base_url.strip() == "" and self.base_url != "":
             raise ValueError(
                 "base_url must not be only whitespace; "
-                "pass \"\" for no base URL or a URL like https://api.example.com"
+                'pass "" for no base URL or a URL like https://api.example.com'
             )
         # Docs historically showed ``HttpClient(cache=app.storage)``. A
         # ``Storage`` is adopted **as the same instance** (see HttpCache): the
@@ -535,6 +957,7 @@ class HttpClient:
         # other's keys ("settings change loses the cache, cache write loses
         # the settings"). Anything else with a ``path`` is a location, not an
         # owner, and gets its own file-backed cache.
+        self._workers = _RequestPool(_http_worker_count(self.max_workers))
         cache = self.cache
         if cache is None or isinstance(cache, HttpCache):
             return
@@ -595,7 +1018,7 @@ class HttpClient:
             else:
                 future._complete(result, None)
 
-        threading.Thread(target=run, name=f"pymobile-http-{method}", daemon=True).start()
+        self._workers.submit(run)
         return future
 
     # -- cached GET --------------------------------------------------------
@@ -659,11 +1082,15 @@ class HttpClient:
         params: Params | None = None,
         json: Any = None,
         data: bytes | str | Mapping[str, Any] | None = None,
+        files: Mapping[str, Any] | None = None,
+        compress: bool = False,
         headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
         retry_safe: bool | None = None,
+        stream: bool = False,
     ) -> Response:
-        """Send a request and return a :class:`Response`.
+        (
+            """Send a request and return a :class:`Response`.
 
         Raises :class:`~pymobile.errors.NetworkError` on transport failures;
         HTTP error statuses are returned, not raised (use
@@ -671,13 +1098,34 @@ class HttpClient:
 
         ``retry_safe=True`` permits retries for non-idempotent verbs; the
         default retries only GET/HEAD/OPTIONS.
+
+        ``stream=True`` returns as soon as the headers are in, with the body
+        left on the socket: read it with ``response.iter_content()``, which
+        also releases the connection.
         """
+            ""
+        )
         if json is not None and data is not None:
             raise ValueError("pass either json= or data=, not both")
+        if files is not None and json is not None:
+            raise ValueError("pass files= with data=, not with json=")
 
         final_url = self._build_url(url, params)
-        body, content_type = self._encode_body(json, data)
+        body: bytes | None
+        content_type: str | None
+        if files is not None:
+            body, content_type = _encode_multipart(
+                data if isinstance(data, Mapping) else None, files
+            )
+        else:
+            body, content_type = self._encode_body(json, data)
         request_headers = self._merge_headers(headers, content_type)
+        if compress and body is not None and len(body) >= COMPRESS_THRESHOLD:
+            # gzip the *request*: a 30 MB JSON payload on a phone uplink is
+            # mostly repetition. Skipped for tiny bodies, where the header and
+            # the gzip framing cost more than they save.
+            body = _gzip_bytes(body)
+            request_headers["Content-Encoding"] = "gzip"
         attempts = max(0, self.retries) + 1
         # Never replay a non-idempotent verb implicitly: a retried POST could
         # perform its side effect twice. Callers opt in per request.
@@ -690,17 +1138,20 @@ class HttpClient:
         if not allowed:
             attempts = 1
         last_error: Exception | None = None
+        self._budget_started = time.monotonic()
 
         for attempt in range(1, attempts + 1):
             started = time.monotonic()
             try:
-                response = self._send(method.upper(), final_url, body, request_headers, timeout)
+                response = self._send(
+                    method.upper(), final_url, body, request_headers, timeout, stream=stream
+                )
             except NetworkError as exc:
                 last_error = exc
                 if attempt >= attempts:
                     raise
                 self._sleep(attempt)
-                _log.debug("retrying %s %s (%s)", method, final_url, exc)
+                _log.debug("retrying %s %s (%s)", method, redact_url(final_url), exc)
                 continue
 
             elapsed = time.monotonic() - started
@@ -711,12 +1162,26 @@ class HttpClient:
                 url=response.url,
                 elapsed=elapsed,
                 encoding=response.encoding,
+                stream=response.stream,
+                _reader=response._reader,
+                _closer=response._closer,
             )
             if response.status in _RETRY_STATUSES and attempt < attempts:
                 self._sleep(attempt)
-                _log.debug("retrying %s %s after HTTP %s", method, final_url, response.status)
+                _log.debug(
+                    "retrying %s %s after HTTP %s",
+                    method,
+                    redact_url(final_url),
+                    response.status,
+                )
                 continue
-            _log.debug("%s %s -> %s in %.0f ms", method, final_url, response.status, elapsed * 1000)
+            _log.debug(
+                "%s %s -> %s in %.0f ms",
+                method,
+                redact_url(final_url),
+                response.status,
+                elapsed * 1000,
+            )
             return response
 
         raise NetworkError(str(last_error) if last_error else "Request failed")
@@ -728,45 +1193,236 @@ class HttpClient:
         body: bytes | None,
         headers: dict[str, str],
         timeout: float | None,
+        *,
+        stream: bool = False,
     ) -> Response:
-        """One transport attempt."""
-        request = urllib.request.Request(url, data=body, method=method)
-        for key, value in headers.items():
-            request.add_header(key, value)
-        handlers: list[Any] = [_PolicyRedirectHandler(self.security)]
-        if urllib.parse.urlsplit(url).scheme == "https":
-            # ``ssl`` is imported here and nowhere else at module level: a
-            # build packaged with --no-ssl ships no ssl module at all, and an
-            # app that never speaks HTTPS must still start offline instead of
-            # dying on an import error inside pymobile.core.net.http.
-            handlers.insert(0, urllib.request.HTTPSHandler(context=_ssl_context()))
-        opener = urllib.request.build_opener(*handlers)
+        """One transport attempt, on a pooled keep-alive connection.
+
+        ``timeout`` is a **deadline for the whole attempt**, not for each read:
+        a server that dribbles one byte a second used to keep a request alive
+        far past the timeout the caller asked for. It is enforced on the
+        socket and, for the body, by checking the elapsed time while reading.
+        """
+        if self.timeout_budget is not None:
+            remaining_budget = self.timeout_budget - (time.monotonic() - self._budget_started)
+            if remaining_budget <= 0:
+                raise NetworkError(
+                    f"Request to {url} ran past the {self.timeout_budget:g}s budget "
+                    f"({self.retries} retr{'y' if self.retries == 1 else 'ies'} included)",
+                    hint=(
+                        "Raise HttpClient(timeout_budget=...) or lower `retries`; "
+                        "the budget covers retries and backoff, `timeout` covers one attempt."
+                    ),
+                )
+            effective = remaining_budget if timeout is None else min(timeout, remaining_budget)
+        else:
+            effective = timeout if timeout is not None else self.timeout
+        deadline = time.monotonic() + effective
+
+        parsed = urllib.parse.urlsplit(url)
+        scheme = parsed.scheme
+        host = parsed.hostname or ""
+        port = parsed.port
+        target = parsed.path or "/"
+        if parsed.query:
+            target = f"{target}?{parsed.query}"
+        pool_key = (scheme, host, port)
+        connection = self._pool.acquire(scheme, host, port, effective)
+        request_headers = dict(headers)
+        request_headers.setdefault("Host", parsed.netloc)
+        request_headers.setdefault("Accept-Encoding", ACCEPT_ENCODING)
         try:
-            with opener.open(
-                request,
-                timeout=timeout if timeout is not None else self.timeout,
-            ) as raw:
-                return self._to_response(raw.geturl(), raw.status, dict(raw.headers), raw.read())
-        except urllib.error.HTTPError as exc:  # 4xx/5xx are valid responses here
-            payload = exc.read() if hasattr(exc, "read") else b""
-            # The error describes the *final* request in a redirect chain:
-            # reporting the URL we started from made every
-            # 302 → 404 look like it came from the original path.
-            final_url = exc.geturl() if hasattr(exc, "geturl") else ""
-            return self._to_response(
-                final_url or url, int(exc.code), dict(exc.headers or {}), payload
+            connection.request(method, target, body=body, headers=request_headers)
+            raw = connection.getresponse()
+            status = raw.status
+            response_headers = {key: value for key, value in raw.getheaders()}
+            # A redirect we are about to follow: its body is not part of the
+            # answer, and an unframed one (``HTTP/1.1`` without
+            # ``Content-Length``) would block the read until the server closes.
+            # Dropping the socket is what lets the hop happen at all.
+            following = (
+                status in _REDIRECT_STATUSES
+                and bool(_header_value(response_headers, "location"))
+                and self.max_redirects > 0
             )
-        except urllib.error.URLError as exc:
+            if following:
+                payload = b""
+                # Close the response before the socket: the file object holds
+                # its own reference, and a socket closed while the file is open
+                # leaves the server waiting on a connection we think is gone.
+                raw.close()
+                self._pool.discard(connection)
+            elif stream:
+                # Leave the body on the socket; iter_content() reads it and
+                # hands the connection back. Nothing may return early here.
+                payload = b""
+                reader = raw.read
+                closer = functools.partial(self._release_stream, pool_key, connection, raw)
+            else:
+                payload = raw.read()
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"body not received within {effective:g}s")
+                if raw.will_close:
+                    self._pool.discard(connection)
+                else:
+                    self._pool.release(*pool_key, connection)
+            final_url = url
+        except TimeoutError as exc:
+            self._pool.discard(connection)
             raise NetworkError(
-                f"Could not reach {url}: {exc.reason}",
+                f"Request to {url} timed out after {effective:g}s",
+                hint=(
+                    "Raise HttpClient(timeout=...) for slow servers; "
+                    "the timeout covers the whole request."
+                ),
+            ) from exc
+        except http.client.IncompleteRead as exc:
+            # The socket worked and the body stopped early: reporting "could
+            # not reach" there was misleading, and leaking IncompleteRead made
+            # the failure impossible for an app to handle.
+            self._pool.discard(connection)
+            raise NetworkError(f"Could not read {url}: {exc}") from exc
+        except (http.client.HTTPException, OSError) as exc:
+            self._pool.discard(connection)
+            raise NetworkError(
+                f"Could not reach {url}: {exc}",
                 hint="Check connectivity and the INTERNET permission in your project config.",
             ) from exc
-        except TimeoutError as exc:
-            raise NetworkError(f"Request to {url} timed out") from exc
-        except (http.client.HTTPException, OSError) as exc:
+
+        redirects = 0
+        while (
+            status in _REDIRECT_STATUSES
+            and (location := _header_value(response_headers, "location"))
+            and redirects < self.max_redirects
+        ):
+            final_url = urllib.parse.urljoin(final_url, location)
+            self._check_redirect(final_url, url)
+            redirects += 1
+            if status in _SEE_OTHER_STATUSES:
+                # A browser turns a 301/302/303 into a GET and drops the body;
+                # replaying a POST to the new location would post twice.
+                method, body = "GET", None
+                request_headers.pop("Content-Type", None)
+            response_headers, status, payload = self._follow(
+                method,
+                final_url,
+                body,
+                request_headers,
+                deadline,
+                effective,
+                hop=redirects,
+                max_redirects=self.max_redirects,
+            )
+
+        lowered = {key.lower(): value for key, value in response_headers.items()}
+        if stream and not following:
+            # A compressed stream would have to be inflated chunk by chunk to be
+            # useful, and a truncated one is not detectable here; ask for the
+            # plain body instead and hand back what the socket delivered.
+            return Response(
+                status=status,
+                headers=lowered,
+                content=b"",
+                url=final_url,
+                encoding=_charset_from_headers(lowered) or "utf-8",
+                stream=True,
+                _reader=reader,
+                _closer=closer,
+            )
+        encoding = _header_value(response_headers, "content-encoding")
+        if encoding:
+            payload = _decompress(payload, encoding)
+            # The bytes are no longer in that encoding: leaving the header in
+            # place would make a caller that re-serves the body wrong, and
+            # ``Content-Length`` no longer describes what we hold.
+            lowered.pop("content-encoding", None)
+            lowered.pop("content-length", None)
+        charset = _charset_from_headers(lowered) or "utf-8"
+        return Response(
+            status=status, headers=lowered, content=payload, url=final_url, encoding=charset
+        )
+
+    def _follow(
+        self,
+        method: str,
+        url: str,
+        body: bytes | None,
+        headers: Mapping[str, str],
+        deadline: float,
+        effective: float,
+        hop: int = 0,
+        max_redirects: int = 0,
+    ) -> tuple[dict[str, str], int, bytes]:
+        """Send one redirect hop, keeping the method and body for 307/308."""
+        parsed = urllib.parse.urlsplit(url)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise NetworkError(f"Request to {url} timed out after {effective:g}s")
+        connection = self._pool.acquire(
+            parsed.scheme, parsed.hostname or "", parsed.port, remaining
+        )
+        hop_headers = dict(headers)
+        hop_headers["Host"] = parsed.netloc
+        target = parsed.path or "/"
+        if parsed.query:
+            target = f"{target}?{parsed.query}"
+        # No ``Connection`` header: a 302 whose body is omitted (so the socket
+        # stays usable) and one that closes the socket are both legal, and the
+        # server decides. ``will_close`` below records which one happened.
+        hop_headers.pop("Connection", None)
+        try:
+            connection.request(method, target, body=body, headers=hop_headers)
+            raw = connection.getresponse()
+            status = raw.status
+            response_headers = {key: value for key, value in raw.getheaders()}
+            following = (
+                status in _REDIRECT_STATUSES
+                and bool(_header_value(response_headers, "location"))
+                and hop < max_redirects
+            )
+            if following:
+                payload = b""
+                raw.close()
+                self._pool.discard(connection)
+                return response_headers, status, payload
+            payload = raw.read()
+        except (http.client.HTTPException, OSError, TimeoutError) as exc:
+            self._pool.discard(connection)
+            raise NetworkError(f"Could not follow redirect to {url}: {exc}") from exc
+        if raw.will_close:
+            self._pool.discard(connection)
+        else:
+            self._pool.release(parsed.scheme, parsed.hostname or "", parsed.port, connection)
+        return response_headers, status, payload
+
+    def _release_stream(
+        self,
+        pool_key: tuple[str, str, int | None],
+        connection: http.client.HTTPConnection,
+        raw: http.client.HTTPResponse,
+    ) -> None:
+        """Close a streamed response and return or drop its connection."""
+        try:
+            raw.close()
+        finally:
+            self._pool.release(*pool_key, connection)
+
+    def _check_redirect(self, target: str, source: str) -> None:
+        """Re-check the security policy on every hop and drop credentials cross-origin.
+
+        Ported from the ``urllib`` redirect handler: a server (or whoever
+        controls it) must not be able to bounce a request to a blocked host,
+        downgrade it to plain HTTP, or carry its credentials to another origin.
+        """
+        scheme = urllib.parse.urlsplit(target).scheme
+        if scheme not in ("http", "https"):
+            raise NetworkError(f"Redirect to unsupported URL scheme blocked: {target!r}")
+        try:
+            self.security.validate(target)
+        except NetworkError as exc:
             raise NetworkError(
-                f"Could not read {url}: {exc}",
-                hint="Check connectivity and the INTERNET permission in your project config.",
+                f"Redirect from {source} to {target} blocked: {exc}",
+                hint="Add the target host to HttpSecurityPolicy.allowed_hosts if it is trusted.",
             ) from exc
 
     @staticmethod
@@ -777,6 +1433,17 @@ class HttpClient:
         return Response(
             status=status, headers=normalized, content=content, url=url, encoding=encoding
         )
+
+    def close(self) -> None:
+        """Close idle sockets and stop the async workers."""
+        self._pool.close()
+        self._workers.shutdown()
+
+    def __enter__(self) -> HttpClient:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
 
     # -- helpers -----------------------------------------------------------
     def _build_url(self, url: str, params: Params | None) -> str:
@@ -841,9 +1508,7 @@ class HttpClient:
             time.sleep(self.backoff * (2 ** (attempt - 1)))
 
 
-def _credential_variant(
-    headers: Mapping[str, str], extra: frozenset[str] = frozenset()
-) -> str:
+def _credential_variant(headers: Mapping[str, str], extra: frozenset[str] = frozenset()) -> str:
     """Fingerprint of the credentials a request carries ('' when it has none).
 
     ``extra`` are the policy's additional credential header names, so the
@@ -851,8 +1516,7 @@ def _credential_variant(
     """
     names = _DEFAULT_CREDENTIAL_HEADERS | extra
     parts = sorted(
-        f"{key.lower()}:{value}" for key, value in headers.items()
-        if key.lower() in names
+        f"{key.lower()}:{value}" for key, value in headers.items() if key.lower() in names
     )
     if not parts:
         return ""

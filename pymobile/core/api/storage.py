@@ -29,6 +29,7 @@ overridable for tests.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import tempfile
@@ -66,19 +67,35 @@ class _StoreState:
 
     Two ``Storage`` objects on the same file used to keep independent
     snapshots: whichever wrote last saved *its* copy of the whole file and
-    silently reverted the other's changes (PM-01). One shared data dict under
+    silently reverted the other's changes. One shared data dict under
     one re-entrant lock removes that class of loss; namespaces are views on
     top, not separate owners.
     """
 
-    __slots__ = ("data", "lock", "status", "error", "disk_stamp", "tx_depth",
-                 "tx_dirty", "__weakref__")
+    __slots__ = (
+        "data",
+        "lock",
+        "status",
+        "error",
+        "disk_stamp",
+        "tx_depth",
+        "tx_dirty",
+        "path",
+        "write_count",
+        "__weakref__",
+    )
 
-    def __init__(self) -> None:
+    def __init__(self, path: Path) -> None:
+        #: Where this state lives on disk: a deferred write has to know.
+        self.path = path
         self.data: dict[str, Any] = {}
         self.lock = threading.RLock()
         self.status = _UNLOADED
         self.error: BaseException | None = None
+        #: How many times this file has been written. A counter, not a timer:
+        #: "one file write per burst" is what the batching promise means, and a
+        #: count means the same thing on a laptop and on a shared CI runner.
+        self.write_count = 0
         #: (mtime_ns, size) of the file as we last read or wrote it — used to
         #: notice another process writing the same store.
         self.disk_stamp: tuple[int, int] | None = None
@@ -91,7 +108,30 @@ class _StoreState:
 #: file is gone the state goes with it, and the next ``Storage`` reloads from
 #: disk — which is the source of truth anyway.
 _BACKENDS: weakref.WeakValueDictionary[Path, _StoreState] = weakref.WeakValueDictionary()
+#: Stores that failed permanently, kept alive for the process.
+#:
+#: The registry above is weak, so a failed state was garbage-collected as soon
+#: as the ``Storage`` that raised went out of scope — and the next open of the
+#: same file quietly tried again instead of refusing. That made the documented
+#: "a failure is sticky" true only on CPython builds where the object happened
+#: to survive (3.12/3.13), and false on 3.10, where CI caught it.
+_FAILED_STATES: dict[Path, _StoreState] = {}
+_FAILED_LIMIT = 128
 _BACKENDS_LOCK = threading.Lock()
+#: Deferred stores that still have to be written when the interpreter exits.
+_EXITING: list[weakref.ReferenceType[_StoreState]] = []
+
+
+def _flush_all_on_exit() -> None:
+    with _BACKENDS_LOCK:
+        pending, _EXITING[:] = list(_EXITING), []
+    for reference in pending:
+        state = reference()
+        if state is not None:
+            _flush_on_exit(state)
+
+
+atexit.register(_flush_all_on_exit)
 
 
 def _canonical(path: Path) -> Path:
@@ -105,11 +145,45 @@ def _canonical(path: Path) -> Path:
 def _state_for(path: Path) -> _StoreState:
     key = _canonical(path)
     with _BACKENDS_LOCK:
-        state = _BACKENDS.get(key)
+        state = _FAILED_STATES.get(key) or _BACKENDS.get(key)
         if state is None:
-            state = _StoreState()
+            state = _StoreState(key)
             _BACKENDS[key] = state
         return state
+
+
+def _remember_failure(state: _StoreState) -> None:
+    """Pin a failed store so the next open of the file is refused too."""
+    with _BACKENDS_LOCK:
+        _FAILED_STATES[state.path] = state
+        while len(_FAILED_STATES) > _FAILED_LIMIT:  # pragma: no cover - pathological
+            _FAILED_STATES.pop(next(iter(_FAILED_STATES)))
+
+
+def _flush_on_exit(state: _StoreState) -> None:
+    """Last chance for a deferred store: write what is still pending.
+
+    A short-lived script that sets three keys and exits has no ``save()`` call
+    and no ``with`` block; without this its writes would sit in a timer that
+    the interpreter kills at shutdown. Failures are logged, never raised from
+    an interpreter hook.
+    """
+    try:
+        with state.lock:
+            if not state.tx_dirty or state.status != _READY:
+                return
+            state.tx_dirty = False
+            payload = json.dumps(state.data, ensure_ascii=False, indent=2)
+            fd, temp_name = tempfile.mkstemp(
+                dir=str(state.path.parent), suffix=".tmp", prefix=state.path.name
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, state.path)
+    except Exception:  # pragma: no cover - shutdown path, nothing else to do
+        pass
 
 
 DEFAULT_STORE_FILENAME = "pymobile_store.json"
@@ -183,6 +257,12 @@ class Storage:
         # writes through one are visible to the other, and clearing the cache
         # cannot roll back the auth namespace
 
+    A store created with ``deferred=True`` batches writes: ``set`` marks the
+    state dirty and one save follows ``defer_seconds`` later, so a burst of
+    writes costs one file write instead of one per call. ``save()``,
+    ``transaction()`` and ``flush()`` write immediately; the pending write is
+    also flushed when the last reference to the store goes away.
+
     Individual operations are atomic. A read-modify-write **sequence** written
     by hand is not — use :meth:`update`, :meth:`increment` or the
     :meth:`transaction` context manager when several steps must be one unit.
@@ -196,7 +276,10 @@ class Storage:
     __slots__ = (
         "_path",
         "_state",
+        "_timer",
         "namespace",
+        "_deferred",
+        "defer_seconds",
         "_schema_version",
         "_migrations",
     )
@@ -206,6 +289,8 @@ class Storage:
         path: str | Path | None = None,
         *,
         namespace: str | None = None,
+        deferred: bool = False,
+        defer_seconds: float = 0.05,
         schema_version: int = 0,
         migrations: Mapping[int, Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
     ) -> None:
@@ -228,14 +313,32 @@ class Storage:
         )
         for version in self._migrations:
             if isinstance(version, bool) or not isinstance(version, int) or version < 1:
-                raise ValueError("migration keys are the target version, an int >= 1")
+                raise ValueError(
+                    "migration keys are the stored version the migration upgrades, "
+                    "an int >= 1 (ModelStore uses the same convention)"
+                )
             if version > schema_version:
                 raise ValueError(
-                    f"migration {version} reaches past schema_version {schema_version}"
+                    f"migration {version} reaches past schema_version {schema_version} "
+                    "(ModelStore keys its migrations the same way, by the version "
+                    "they upgrade to)"
                 )
         # Shared per file: the data, the lock, the load lifecycle and the
         # transaction depth all live on the backend, not on this object.
         self._state = _state_for(self._path)
+        # ``deferred=True`` batches several writes into one save. Without it a
+        # store with 5000 keys rewrote ~90 KB of JSON on every ``set``: 1 ms
+        # per write, 12.9 s for 4000 of them.
+        self._deferred = bool(deferred)
+        self._timer: threading.Timer | None = None
+        if self._deferred:
+            # A short script has no save() and no `with` block; flush at exit.
+            _EXITING.append(weakref.ref(self._state))
+        if not isinstance(defer_seconds, (int, float)) or isinstance(defer_seconds, bool):
+            raise TypeError("defer_seconds must be a number")
+        if defer_seconds <= 0:
+            raise ValueError("defer_seconds must be positive")
+        self.defer_seconds = float(defer_seconds)
         # Load now: a store that cannot be opened (newer schema, unreadable
         # file, failing migration) must fail where it is created, not at some
         # later first access deep inside the app.
@@ -247,6 +350,11 @@ class Storage:
     def path(self) -> Path:
         """Filesystem location of the store."""
         return self._path
+
+    @property
+    def write_count(self) -> int:
+        """How many times the backing file has been written this process."""
+        return self._state.write_count
 
     def _stamp(self) -> tuple[int, int] | None:
         try:
@@ -290,6 +398,7 @@ class Storage:
                 else:
                     state.status = _FAILED
                     state.error = exc
+                    _remember_failure(state)
                 raise
             state.status = _READY
 
@@ -302,12 +411,12 @@ class Storage:
         except FileNotFoundError:
             # A brand-new store: initialise it *now*, schema stamp included,
             # so the first migration runs before any user write instead of
-            # ambush-ing the next launch (PM-03).
+            # ambushing the next launch.
             self._migrate()
             return
         except UnicodeDecodeError as exc:
             # Not valid UTF-8 is corruption, same as unparsable JSON: keep the
-            # original bytes aside instead of failing every launch (PM-08).
+            # original bytes aside instead of failing every launch.
             self._quarantine(exc)
             text = None
         except OSError as exc:
@@ -333,9 +442,7 @@ class Storage:
 
     def _quarantine(self, reason: Exception) -> None:
         """Move an unparsable store aside instead of letting a write replace it."""
-        backup = self._path.with_name(
-            f"{self._path.name}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
-        )
+        backup = self._path.with_name(f"{self._path.name}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}")
         try:
             os.replace(self._path, backup)
         except OSError as exc:
@@ -347,7 +454,9 @@ class Storage:
             raise error from exc
         _log.warning(
             "store %s could not be parsed (%s); it was moved to %s and the store starts empty",
-            self._path, reason, backup,
+            self._path,
+            reason,
+            backup,
         )
 
     def save(self) -> None:
@@ -361,6 +470,13 @@ class Storage:
         """
         with self._state.lock:
             self._load()
+            self._cancel_timer()
+            if self._state.tx_dirty:
+                # A deferred write is already "made": save() must put it on
+                # disk rather than queue a second copy behind it.
+                self._state.tx_dirty = False
+                self._write_locked()
+                return
             self._persist()
 
     def _persist(self) -> None:
@@ -368,8 +484,48 @@ class Storage:
         state = self._state
         if state.tx_depth:
             state.tx_dirty = True
+        elif self._deferred:
+            self._schedule_flush_locked()
         else:
             self._write_locked()
+
+    def _schedule_flush_locked(self) -> None:
+        """Arm (or re-arm) the debounce timer; caller holds the lock."""
+        state = self._state
+        state.tx_dirty = True
+        if self._timer is not None:
+            self._timer.cancel()
+        timer = threading.Timer(self.defer_seconds, self._flush_timer)
+        timer.daemon = True
+        self._timer = timer
+        timer.start()
+
+    def _flush_timer(self) -> None:
+        """Write whatever the deferred store is holding, if anything."""
+        with self._state.lock:
+            if not self._state.tx_dirty:
+                return
+            self._state.tx_dirty = False
+            self._write_locked()
+
+    def flush(self) -> None:
+        """Write pending changes now, even on a deferred store.
+
+        Called by :meth:`save`, by :meth:`transaction`, and by ``App.stop``
+        (through ``save``), so an app that goes to the background does not
+        lose the last few hundred milliseconds of writes.
+        """
+        with self._state.lock:
+            self._load()
+            self._cancel_timer()
+            if self._state.tx_dirty:
+                self._state.tx_dirty = False
+                self._write_locked()
+
+    def _cancel_timer(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
 
     def _save_locked(self) -> None:
         """Backward-compatible name used by subclasses/tests; caller holds the lock."""
@@ -378,6 +534,7 @@ class Storage:
     def _write_locked(self) -> None:
         """Atomically and durably persist the in-memory store; caller holds the lock."""
         state = self._state
+        state.write_count += 1
         # Serialise first: a bad value must fail before any file is touched.
         try:
             payload = json.dumps(state.data, ensure_ascii=False, indent=2)
@@ -391,7 +548,8 @@ class Storage:
         if state.disk_stamp is not None and stamp is not None and stamp != state.disk_stamp:
             _log.warning(
                 "store %s was modified by another process since it was loaded; "
-                "those changes are being overwritten", self._path,
+                "those changes are being overwritten",
+                self._path,
             )
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -445,9 +603,7 @@ class Storage:
         prefix = self._scope_prefix()
         if not prefix:
             return dict(data)
-        return {
-            key[len(prefix):]: value for key, value in data.items() if key.startswith(prefix)
-        }
+        return {key[len(prefix) :]: value for key, value in data.items() if key.startswith(prefix)}
 
     def _migrate(self) -> None:
         """Bring the loaded data up to :attr:`schema_version`; caller holds the lock.
@@ -485,7 +641,8 @@ class Storage:
                     raise PyMobileError(
                         f"no migration to schema {version} in {self._path}",
                         hint=(
-                            "Migrations are keyed by the version they reach: "
+                            "Migrations are keyed by the version being upgraded "
+                            "to (the same convention as ModelStore): "
                             "Storage(migrations={1: step_one, 2: step_two}, "
                             f"schema_version={self._schema_version})"
                         ),
@@ -525,7 +682,7 @@ class Storage:
         prefix = self._scope_prefix()
         hidden = self._meta_key("__schema_version__")
         return [
-            key[len(prefix):] if prefix else key
+            key[len(prefix) :] if prefix else key
             for key in self._state.data
             if (not prefix or key.startswith(prefix)) and key != hidden
         ]
@@ -676,6 +833,7 @@ class Storage:
                 state.tx_depth -= 1
             if state.tx_depth == 0 and state.tx_dirty:
                 state.tx_dirty = False
+                self._cancel_timer()
                 try:
                     self._write_locked()
                 except BaseException:
@@ -750,6 +908,7 @@ class Storage:
         zero", but silently turning the string ``"5"`` into ``1`` lost data that
         came back from JSON, so numeric strings are parsed first.
         """
+
         def bump(current: Any) -> float:
             if isinstance(current, bool):
                 return amount
@@ -790,7 +949,7 @@ class Storage:
             self._load()
             return [
                 (
-                    self._full_key(key)[len(self._scope_prefix()):],
+                    self._full_key(key)[len(self._scope_prefix()) :],
                     _copy(self._state.data[self._full_key(key)]),
                 )
                 for key in self._visible_keys()

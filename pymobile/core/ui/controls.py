@@ -41,16 +41,19 @@ class Icon(Widget):
 
     @property
     def name(self) -> str:
+        """The icon name, one of :data:`~pymobile.core.ui.drawing.ICON_NAMES`."""
         return self._name
 
     @name.setter
     def name(self, value: str) -> None:
+        """The icon name, one of :data:`~pymobile.core.ui.drawing.ICON_NAMES`."""
         icon_drawing(value)
         if value != self._name:
             self._name = value
             self.invalidate()
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the name, the colour and the size, plus the drawing to paint."""
         positive_int(self.size, "size")
         color = self.color or self.style.color or theme_color(self, "TEXT")
         return {
@@ -62,6 +65,7 @@ class Icon(Widget):
         }
 
     def to_dict(self) -> WidgetNode:
+        """The serialised icon, sized like its square artwork."""
         node = super().to_dict()
         if node["type"] == self.type_name:
             node["style"] = {"width": self.size, "height": self.size, **node.get("style", {})}
@@ -101,16 +105,19 @@ class IconButton(Button):
 
     @property
     def name(self) -> str:
+        """The icon name drawn inside the button."""
         return self._name
 
     @name.setter
     def name(self, value: str) -> None:
+        """The icon name drawn inside the button."""
         icon_drawing(value)
         if value != self._name:
             self._name = value
             self.invalidate()
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the drawing, the size and the background colour."""
         if positive_int(self.size, "size") < 48:
             raise ValueError("IconButton size must be at least 48 dp")
         if not self.label.strip():
@@ -126,6 +133,7 @@ class IconButton(Button):
         }
 
     def to_dict(self) -> WidgetNode:
+        """The serialised button; it raises when there is no accessible label."""
         node = super().to_dict()
         if node["type"] == self.type_name:
             node["style"] = {
@@ -147,12 +155,14 @@ class FloatingActionButton(IconButton):
         super().__init__(name, size=size, **kwargs)
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the drawing, its size and the background colour."""
         props = super().props()
         props["background"] = self.background or theme_color(self, "PRIMARY")
         props["drawing"] = icon_drawing(self.name, self.color or "#FFFFFF")
         return props
 
     def to_dict(self) -> WidgetNode:
+        """The serialised action button, with the elevation a FAB is drawn at."""
         node = super().to_dict()
         node.setdefault("style", {}).setdefault("elevation", 6)
         return node
@@ -193,25 +203,30 @@ class AutoComplete(TextInput):
 
     @property
     def options(self) -> tuple[str, ...]:
+        """The suggestions to offer, in the order they are shown."""
         return self._options
 
     @options.setter
     def options(self, value: Sequence[str]) -> None:
+        """The suggestions to offer, in the order they are shown."""
         self.set_options(value)
 
     def set_options(self, options: Sequence[str]) -> None:
+        """Replace the suggestions, re-rendering the field."""
         values = self._validate_options(options)
         if values != self._options:
             self._options = values
             self.invalidate()
 
     def suggestions(self, query: str | None = None) -> tuple[str, ...]:
+        """The options that match ``query``, or all of them when it is empty."""
         text = self.value if query is None else query
         if len(text) < self.threshold:
             return ()
         return tuple(o for o in self.options if text.casefold() in o.casefold())
 
     def select(self, value: str) -> None:
+        """Choose one of the suggestions and notify ``on_select``."""
         if value not in self.options:
             raise ValueError(f"{value!r} is not an autocomplete option")
         self.set_value(value)
@@ -227,6 +242,7 @@ class AutoComplete(TextInput):
             super()._ui_set_value(value)
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: value, suggestions, threshold and the select callback."""
         positive_int(self.threshold, "threshold")
         return {
             **super().props(),
@@ -272,14 +288,17 @@ class RangeSlider(Widget):
 
     @property
     def minimum(self) -> float:
+        """The lowest value either handle can take."""
         return self._minimum
 
     @property
     def maximum(self) -> float:
+        """The highest value either handle can take."""
         return self._maximum
 
     @property
     def step(self) -> float:
+        """The distance between the values a handle can take."""
         return self._step
 
     def _snap(self, value: float) -> float:
@@ -299,21 +318,26 @@ class RangeSlider(Widget):
 
     @property
     def value(self) -> tuple[float, float]:
+        """The chosen range as ``(low, high)``."""
         return self._value
 
     @value.setter
     def value(self, value: Sequence[float]) -> None:
+        """The chosen range as ``(low, high)``."""
         self.set_value(value)
 
     @property
     def low(self) -> float:
+        """The lower end of the range."""
         return self._value[0]
 
     @property
     def high(self) -> float:
+        """The upper end of the range."""
         return self._value[1]
 
     def set_value(self, value: Sequence[float]) -> None:
+        """Set both ends of the range, keeping them inside the bounds and ordered."""
         new = self._normalise(value)
         if new != self._value:
             self._value = new
@@ -330,6 +354,7 @@ class RangeSlider(Widget):
         self.set_value(decoded)
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: both ends, the bounds and the change callback."""
         return {
             **super().props(),
             "low": self.low,
@@ -342,6 +367,7 @@ class RangeSlider(Widget):
         }
 
     def to_dict(self) -> WidgetNode:
+        """The serialised slider, full width and tall enough for its handles."""
         node = super().to_dict()
         node["style"] = {"height": 64, **node.get("style", {})}
         return node
@@ -398,14 +424,17 @@ class PageView(Container):
 
     @property
     def item_count(self) -> int:
+        """How many pages the view holds."""
         return self._count
 
     @property
     def value(self) -> int:
+        """The index of the page on screen."""
         return self._value
 
     @value.setter
     def value(self, value: int) -> None:
+        """The index of the page on screen."""
         self.select(value)
 
     def _validate_index(self, value: int) -> int:
@@ -422,6 +451,7 @@ class PageView(Container):
         return page
 
     def select(self, index: int) -> None:
+        """Show the page at ``index`` and notify ``on_select``."""
         index = self._validate_index(index)
         if index == self._value:
             return
@@ -439,15 +469,18 @@ class PageView(Container):
             self.on_select(index)
 
     def set_value(self, value: int) -> None:
+        """Show the page at ``value`` (the bridge's name for :meth:`select`)."""
         self.select(value)
 
     def next(self) -> None:
+        """Swipe to the next page, if there is one."""
         if self.value < self.item_count - 1:
             self.select(self.value + 1)
         elif self.loop:
             self.select(0)
 
     def previous(self) -> None:
+        """Swipe to the previous page, if there is one."""
         if self.value > 0:
             self.select(self.value - 1)
         elif self.loop:
@@ -461,12 +494,15 @@ class PageView(Container):
                 raise ValueError("page index is out of range") from None
 
     def add(self, child: Widget) -> Widget:
+        """Add a page after the current ones."""
         raise ValueError("PageView owns its pages; construct a new pager to replace the page set")
 
     def clear(self) -> None:
+        """Remove every page, leaving the view empty."""
         raise ValueError("PageView needs a page; use select()")
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the page count, the index and the select callback."""
         positive_int(self.height, "height")
         return {
             **super().props(),
@@ -479,6 +515,7 @@ class PageView(Container):
 
     def to_dict(self) -> WidgetNode:
         # Screen.refresh() detaches the old tree. Restore ownership of a kept pager.
+        """The serialised view; it keeps only the page on screen."""
         for node in self.walk():
             for child in node.children:
                 child._parent = node

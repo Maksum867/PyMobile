@@ -81,7 +81,7 @@ __all__ = [
 
 _log = get_logger("i18n")
 
-#: File stems that do not look like language tags (П-14).  When a user passes
+#: File stems that do not look like language tags.  When a user passes
 #: ``messages.json`` they usually meant ``uk.json``/``en.json`` and would
 #: otherwise end up with a catalogue registered under ``"messages"``, which
 #: every ``t(...)`` call silently misses.
@@ -103,7 +103,7 @@ def _warn_non_language_stem(stem: str) -> None:
         _log.warning(
             "the catalogue file %r does not look like a language tag "
             "(got %r). Rename it to a BCP-47 code like uk.json / en.json so "
-            "translations.use(\"uk\") can find it, or pass language= explicitly.",
+            'translations.use("uk") can find it, or pass language= explicitly.',
             stem + ".json",
             stem,
         )
@@ -410,6 +410,7 @@ class Translations:
 
     @missing.setter
     def missing(self, policy: str) -> None:
+        """How a missing key is handled: ``marker``, ``key``, ``empty`` or a template."""
         if not isinstance(policy, str) or not policy.strip():
             raise ValueError(
                 "missing must be 'marker', 'key', 'empty' or a template containing {key}"
@@ -448,7 +449,7 @@ class Translations:
         object is kept as-is and warned about at load time. ``flatten=True`` is
         accepted for compatibility and means the same as the default.
         """
-        # П-13: a Path/str passed where a mapping is expected used to surface
+        # A Path/str passed where a mapping is expected used to surface
         # as ``AttributeError: 'PosixPath' object has no attribute 'items'``
         # — point the caller at ``load_file``/``load_dir`` instead.
         if isinstance(messages, (str, Path)):
@@ -458,9 +459,7 @@ class Translations:
                 "translations.load_dir(directory) for a whole directory."
             )
         if not isinstance(messages, Mapping):
-            raise TypeError(
-                f"messages must be a mapping, got {type(messages).__name__!r}"
-            )
+            raise TypeError(f"messages must be a mapping, got {type(messages).__name__!r}")
         tag = normalise_language(language)
         if not tag:
             raise ValueError("language must not be empty")
@@ -485,9 +484,7 @@ class Translations:
         self._noted_nested.add(tag)
         shown = ", ".join(repr(name) for name in nested[:3])
         more = f" (+{len(nested) - 3} more)" if len(nested) > 3 else ""
-        example = next(
-            (key for key in flattened if "." in key), ""
-        )
+        example = next((key for key in flattened if "." in key), "")
         example_note = f" (for example {example!r})" if example else ""
         _log.debug(
             "catalogue %r stores nested objects under %s%s; keys are flat, so the "
@@ -539,15 +536,12 @@ class Translations:
         reading, like :meth:`load`.
         """
         if not isinstance(catalogues, Mapping):
-            raise TypeError(
-                f"catalogues must be a mapping, got {type(catalogues).__name__!r}"
-            )
+            raise TypeError(f"catalogues must be a mapping, got {type(catalogues).__name__!r}")
         loaded: list[str] = []
         for lang, messages in catalogues.items():
             if not isinstance(messages, Mapping):
                 raise TypeError(
-                    f"messages for {lang!r} must be mapping, "
-                    f"got {type(messages).__name__!r}"
+                    f"messages for {lang!r} must be mapping, got {type(messages).__name__!r}"
                 )
             self.load(messages, language=lang, flatten=flatten)
             loaded.append(normalise_language(lang))
@@ -565,13 +559,13 @@ class Translations:
         """
         file = Path(path)
         tag = normalise_language(language or file.stem)
-        # П-14: a file named ``messages.json`` / ``strings.json`` / ``i18n.json``
+        # A file named ``messages.json`` / ``strings.json`` / ``i18n.json``
         # is a common Windows/mobile convention that does NOT look like a
         # language tag — silently registering it under ``"messages"`` makes
         # every ``t(...)`` miss. Warn once per stem instead.
         _warn_non_language_stem(file.stem)
         try:
-            # П-18: ``utf-8-sig`` transparently strips a UTF-8 BOM, which
+            # ``utf-8-sig`` transparently strips a UTF-8 BOM, which
             # Notepad and other Windows editors prepend; without this the
             # JSON parser raised ``ValueError: Unexpected UTF-8 BOM``.
             data = json.loads(file.read_text(encoding="utf-8-sig"))

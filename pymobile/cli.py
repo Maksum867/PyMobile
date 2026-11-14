@@ -24,13 +24,17 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from . import __version__ as __version__
+from .cli_errors import _describe_user_error, _user_code_location  # noqa: F401
 from .cli_tools import cmd_complete, cmd_completion, cmd_init, cmd_schema
+
+# Re-exported for callers and tests that replace the pipeline; cli_build reads
+# it from this module at call time.
 from .compiler.pipeline import BuildPipeline
 from .core.config import ProjectConfig, load_config
 from .errors import PyMobileError
 from .log import configure, get_logger, supports_color
 
-__all__ = ["main", "build_parser"]
+__all__ = ["main", "build_parser", "BuildPipeline"]
 
 _log = get_logger("cli")
 
@@ -140,114 +144,11 @@ def _warn_if_output_is_ignored(config: ProjectConfig) -> None:
     _out.hint("use `--output apk` (the default) or remove the ignore rule")
 
 
-def cmd_build(args: argparse.Namespace) -> int:
-    """Compile the project into an APK."""
-    config = _load(args)
-    if args.icon:
-        config.icon = args.icon
-    if args.output:
-        config.output_dir = args.output
-    if getattr(args, "optimize", False):
-        config.optimize = True
-    if getattr(args, "no_optimize", False):
-        config.optimize = False
-    if getattr(args, "minimal_stdlib", False):
-        config.minimal_stdlib = True
-    if getattr(args, "no_ssl", False):
-        config.no_ssl = True
-    if getattr(args, "abi", None):
-        # One APK per ABI: arm64-v8a for phones, x86_64 for the emulator.
-        config.abis = [args.abi]
-    config.validate()
+def cmd_build(*args: Any, **kwargs: Any) -> Any:
+    """Compatibility entry point; the implementation is in cli_build."""
+    from . import cli_build
 
-    if args.clean:
-        _clean(config)
-
-    if getattr(args, "ks_pass", None) or getattr(args, "key_pass", None):
-        _out.warn(
-            "passwords on the command line end up in shell history and `ps`; "
-            "prefer PYMOBILE_KS_PASS / PYMOBILE_KEY_PASS"
-        )
-
-    _warn_if_output_is_ignored(config)
-    native = getattr(args, "native", False)
-    if native and not getattr(args, "no_check", False) and _has_files(config.root):
-        from .compiler.precheck import check_project, format_finding
-
-        findings = check_project(config.root, run_app=False)
-        if findings:
-            for finding in findings:
-                print(format_finding(finding, config.root))
-            _out.error(
-                f"{len(findings)} problem(s) found; the build was stopped. "
-                "Fix them, or pass --no-check to build anyway."
-            )
-            return 1
-    if native:
-        _out.info("native build: this may take a few minutes on the first run")
-    else:
-        _out.warn(
-            "This is a structural build — not installable on a device. "
-            f"Use --native for a real APK (requires Android SDK: {_invocation()} setup-sdk)"
-        )
-    pipeline = BuildPipeline(
-        config,
-        use_cache=not args.no_cache and not args.clean,
-        native=native,
-        check_startup=getattr(args, "check_startup", None),
-        on_stage=lambda stage: _out.info(f"{stage}…") if args.verbose else None,
-        keystore=Path(args.keystore) if getattr(args, "keystore", None) else None,
-        keystore_password=getattr(args, "ks_pass", None),
-        key_alias=getattr(args, "key_alias", None),
-        key_password=getattr(args, "key_pass", None),
-    )
-    try:
-        result = pipeline.run()
-    except Exception as exc:
-        from .compiler.startup import StartupCheckError
-        from .compiler.toolchain import ToolchainError
-        from .compiler.widgets import MissingRendererError
-
-        if isinstance(exc, ToolchainError):
-            hint = getattr(exc, "hint", None) or ""
-            if "setup-sdk" not in hint:
-                hint = (f"{hint} " if hint else "") + (
-                    f"Run `{_invocation()} setup-sdk` to install it automatically."
-                )
-            raise type(exc)(str(exc), hint=hint.strip()) from exc
-        if native and not isinstance(exc, (MissingRendererError, StartupCheckError)):
-            from .errors import PyMobileError as _PyErr
-
-            if isinstance(exc, _PyErr) and exc.hint and "setup-sdk" not in exc.hint:
-                exc.hint = f"{exc.hint} (for native: {_invocation()} setup-sdk)"
-            elif isinstance(exc, _PyErr) and not exc.hint:
-                exc.hint = f"Run `{_invocation()} setup-sdk` to install the Android SDK."
-        raise
-
-    for warning in result.warnings:
-        _out.warn(warning)
-
-    if result.cached:
-        size = (
-            f"{result.size / (1024 * 1024):.1f} MB"
-            if result.size >= 1024 * 1024
-            else f"{result.size_kb:.1f} KB"
-        )
-        _out.ok(f"up to date: {result.apk.name} ({size})")
-        _out.hint("use --clean to force a full rebuild")
-        return 0
-
-    _out.ok(result.summary())
-    _out.field("apk", result.apk)
-    _out.field("icon", "default" if result.icon_is_default else config.icon)
-    if result.native:
-        _out.field("install", f"{_invocation()} install {result.apk}")
-        if config.abis and config.abis[0] == "x86_64":
-            _out.hint("x86_64 build: for the Android Studio emulator, not for a phone")
-    if args.verbose:
-        for timing in result.timings:
-            _out.field(timing.name, f"{timing.seconds * 1000:.0f} ms")
-    return 0
+    return cli_build.cmd_build(*args, **kwargs)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -490,7 +391,15 @@ def _execute(config: ProjectConfig, entry: Path) -> dict[str, object]:
     if str(config.source_path) not in sys.path:
         sys.path.insert(0, str(config.source_path))
     namespace: dict[str, object] = {"__name__": "__main__", "__file__": str(entry)}
-    exec(compile(entry.read_text(encoding="utf-8"), str(entry), "exec"), namespace)
+    try:
+        exec(compile(entry.read_text(encoding="utf-8"), str(entry), "exec"), namespace)
+    except PyMobileError:
+        raise
+    except Exception as exc:
+        # A plain NameError used to reach main()'s catch-all and print
+        # "unexpected error" with no file and no line, while `pymobile check`
+        # named both. Same information, same place.
+        raise _describe_user_error(exc, entry) from exc
 
     from .core.app import App
 

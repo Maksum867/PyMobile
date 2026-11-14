@@ -18,7 +18,7 @@ Build it with ``pymobile build``.
 
 from __future__ import annotations
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 __author__ = "MAKSYM KHLYSTUN"
 __license__ = "MIT"
 
@@ -67,6 +67,7 @@ from .core.ui import (
     Banner,
     BarChart,
     BatteryLevel,
+    Border,
     BottomNavigation,
     BottomSheet,
     Button,
@@ -81,6 +82,7 @@ from .core.ui import (
     Color,
     ColorPicker,
     Column,
+    Computed,
     ConfirmDialog,
     ConnectionStatus,
     Container,
@@ -99,6 +101,7 @@ from .core.ui import (
     FloatingActionButton,
     Form,
     FormField,
+    Gradient,
     Grid,
     Icon,
     IconButton,
@@ -154,6 +157,7 @@ from .core.ui import (
     TreeNode,
     TreeView,
     UiIssue,
+    Value,
     Widget,
     Wrap,
     audit_ui,
@@ -233,7 +237,6 @@ __all__ = [
     "Polygon",
     "Rect",
     "Shape",
-
     "__version__",
     # application
     "App",
@@ -334,6 +337,10 @@ __all__ = [
     "Color",
     "Align",
     "EdgeInsets",
+    "Border",
+    "Value",
+    "Computed",
+    "Gradient",
     "Divider",
     "Expanded",
     "Flexible",

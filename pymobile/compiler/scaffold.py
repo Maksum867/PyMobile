@@ -117,9 +117,7 @@ def slugify(name: str) -> str:
     transliterated = name.lower().translate(_CYRILLIC)
     # Then drop the diacritics from whatever Latin is left (é → e).
     ascii_only = (
-        unicodedata.normalize("NFKD", transliterated)
-        .encode("ascii", "ignore")
-        .decode("ascii")
+        unicodedata.normalize("NFKD", transliterated).encode("ascii", "ignore").decode("ascii")
     )
     slug = re.sub(r"[^a-z0-9]+", "", ascii_only)
     if not slug:

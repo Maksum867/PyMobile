@@ -68,17 +68,15 @@ class Notifications:
         if not isinstance(title, str):
             raise TypeError(
                 f"notification title must be a string, got {type(title).__name__!r}; "
-                f"write notify(\"Title\", \"Body\") not notify({title!r}, ...)"
+                f'write notify("Title", "Body") not notify({title!r}, ...)'
             )
         if not title:
             raise ValueError(
                 "notification title must not be empty; "
-                "pass e.g. notify(\"Update\", \"Download complete\")"
+                'pass e.g. notify("Update", "Download complete")'
             )
         if not isinstance(body, str):
-            raise TypeError(
-                f"notification body must be a string, got {type(body).__name__!r}"
-            )
+            raise TypeError(f"notification body must be a string, got {type(body).__name__!r}")
         if notification_id is not None and not isinstance(notification_id, int):
             raise TypeError(
                 f"notification_id must be an int, got {type(notification_id).__name__!r}; "

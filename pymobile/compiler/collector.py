@@ -148,6 +148,39 @@ def _is_excluded(relative: Path, patterns: Sequence[str]) -> bool:
     return False
 
 
+#: File names that are credentials often enough to keep out of an APK even
+#: when the project does not exclude them: a shell profile, a cloud key, a
+#: local editor secret. The default `exclude` covers the common patterns; this
+#: is the last line for the ones a user is unlikely to think about.
+_CREDENTIAL_NAMES = frozenset(
+    {
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        ".git-credentials",
+        ".htpasswd",
+        "known_hosts",
+        "local.properties",
+    }
+)
+
+#: Suffixes that hold a private key or a packaged certificate.
+_CREDENTIAL_SUFFIXES = frozenset({".p12", ".pfx", ".ovpn", ".key", ".pem"})
+
+
+def is_credential_file(path: Path) -> bool:
+    """Whether ``path`` looks like a credential that must not ship in an APK."""
+    name = path.name.lower()
+    return (
+        name in _CREDENTIAL_NAMES
+        or name.startswith("credentials.")
+        or name.startswith("secrets.")
+        or name.startswith("id_rsa")
+        or name.startswith("id_ed25519")
+        or path.suffix.lower() in _CREDENTIAL_SUFFIXES
+    )
+
+
 def collect_sources(
     source_dir: Path,
     entrypoint: Path,
@@ -158,6 +191,10 @@ def collect_sources(
     """Walk ``source_dir`` and return the set of files to package.
 
     ``include_suffixes`` defaults to Python sources plus common asset types.
+    Credential-looking files (``.netrc``, ``credentials.json``, ``*.pem``) and
+    the contents of ``secret/``-style folders are skipped outright, so an APK
+    never carries a token just because the project did not think to exclude
+    one; the build reports each skipped file in its warnings.
     """
     source_dir = source_dir.resolve()
     if not source_dir.is_dir():
@@ -187,6 +224,8 @@ def collect_sources(
         if path.suffix.lower() not in suffixes:
             continue
         if _is_excluded(relative, exclude):
+            continue
+        if is_credential_file(relative):
             continue
         collected.append(path)
 

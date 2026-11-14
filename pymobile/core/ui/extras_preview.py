@@ -74,6 +74,7 @@ document.addEventListener('click', function (e) {
 def render_extra_html(
     node: dict[str, Any], render: Callable[[dict[str, Any]], str], css: str
 ) -> str:
+    """The browser markup for the widget types the main renderer cannot draw."""
     kind, props = node["type"], node.get("props", {})
     wid = escape(str(node.get("id", "")), quote=True)
     disabled = "" if node.get("enabled", True) else " disabled"
@@ -195,10 +196,63 @@ _ICON_GLYPHS: dict[str, str] = {
     "share": "⇧",
     "star": "★",
     "user": "👤",
+    # The second batch: a plain glyph for every bundled icon, so the text
+    # preview says "bell" with a bell and not with ``[icon:bell]``.
+    "battery": "▮",
+    "bell": "🔔",
+    "bookmark": "🔖",
+    "camera": "📷",
+    "cart": "🛒",
+    "check_circle": "✔",
+    "clock": "🕒",
+    "cloud": "☁",
+    "close_circle": "⊗",
+    "copy": "⧉",
+    "drag": "⠿",
+    "eye": "👁",
+    "eye_off": "🚫",
+    "file": "🗋",
+    "filter": "⏷",
+    "flag": "⚑",
+    "folder": "📁",
+    "gift": "🎁",
+    "grid": "▦",
+    "help": "?",
+    "image": "🖼",
+    "list": "☷",
+    "location": "📍",
+    "lock": "🔒",
+    "login": "⇥",
+    "logout": "⇤",
+    "mail": "✉",
+    "mic": "🎤",
+    "minus_circle": "⊖",
+    "more": "⋯",
+    "music": "♪",
+    "pause": "❚❚",
+    "phone": "📞",
+    "play": "▶",
+    "plus_circle": "⊕",
+    "print": "🖨",
+    "qr": "▩",
+    "redo": "↷",
+    "signal": "▁▄▂",
+    "sort": "⇅",
+    "stop": "■",
+    "sync": "⟲",
+    "tag": "🏷",
+    "undo": "↶",
+    "unlock": "🔓",
+    "upload": "⤒",
+    "video": "🎬",
+    "volume": "🔊",
+    "warning": "⚠",
+    "wifi": "📶",
 }
 
 
 def extra_ascii(node: dict[str, Any]) -> list[str]:
+    """The text-preview lines for the widget types the text renderer cannot draw."""
     kind, props = node["type"], node.get("props", {})
     if kind == "Icon":
         name = str(props.get("name", ""))
@@ -273,6 +327,7 @@ def _tk_color(color: str, fallback: str) -> str:
 def paint_tk(
     canvas: Any, drawing: dict[str, Any], width: float, height: float, *, button: bool = False
 ) -> None:
+    """Draw ``drawing`` onto a Tk canvas, scaled to fit the space it was given."""
     canvas.delete("drawing")
     logical_w, logical_h = float(drawing["width"]), float(drawing["height"])
     scale = min(width / logical_w, height / logical_h)
@@ -349,6 +404,7 @@ def paint_tk(
 
 
 def build_extra_gui(preview: Any, parent: Any, node: dict[str, Any], background: str) -> None:
+    """Create the Tk widgets for the widget types the main Tk renderer cannot draw."""
     tk, props, kind = preview._tk, node.get("props", {}), node["type"]
     wid = str(node["id"])
     enabled = bool(node.get("enabled", True))
@@ -553,6 +609,7 @@ def build_extra_gui(preview: Any, parent: Any, node: dict[str, Any], background:
 
 
 def patch_extra_gui(preview: Any, node: dict[str, Any]) -> None:
+    """Update an already built extras widget in place instead of rebuilding it."""
     wid, props = str(node["id"]), node.get("props", {})
     data = preview._extra_states.get(wid)
     if data is None:
@@ -586,6 +643,7 @@ def patch_extra_gui(preview: Any, node: dict[str, Any]) -> None:
 
 
 def extra_mockup(layout: Any, kind: str, node: dict[str, Any], w: float, fill: bool) -> Any:
+    """The PNG-mockup box for the widget types the main mockup painter cannot draw."""
     from .mockup import _Box, _rgba
 
     props, style = node.get("props", {}), node.get("style", {})

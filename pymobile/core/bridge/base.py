@@ -14,7 +14,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-__all__ = ["Bridge", "BridgeCall", "NotificationSpec", "PickedFile", "pick_filters"]
+__all__ = [
+    "Bridge",
+    "BridgeCall",
+    "NotificationSpec",
+    "PickedFile",
+    "OPENABLE_SCHEMES",
+    "pick_filters",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,9 +220,7 @@ class Bridge(ABC):
         return ""
 
     # -- files -------------------------------------------------------------
-    def pick_file(
-        self, accept: str = "*/*", *, multiple: bool = False
-    ) -> list[PickedFile]:
+    def pick_file(self, accept: str = "*/*", *, multiple: bool = False) -> list[PickedFile]:
         """Let the user choose one or more files; empty when they cancel.
 
         Not abstract: a bridge with no picker (a desktop preview) returns an
@@ -242,14 +247,69 @@ class Bridge(ABC):
         """Open the system share sheet; ``False`` when nothing could share it."""
         return False
 
+    # -- secrets -----------------------------------------------------------
+    def store_secret(self, name: str, value: str) -> bool:
+        """Store ``value`` under ``name`` behind the platform keystore.
+
+        Not abstract: a bridge with no keystore (a desktop preview) returns
+        ``False`` and the caller decides what to do. On Android the value is
+        encrypted with a key the keystore holds, so it is not readable from a
+        copy of the app's data directory.
+        """
+        raise NotImplementedError(
+            f"the {self.name} bridge cannot store secrets; "
+            "use app.save_secret() on a device or pass a custom bridge"
+        )
+
+    def load_secret(self, name: str) -> str | None:
+        """The secret stored under ``name``, or ``None`` when there is none."""
+        raise NotImplementedError(
+            f"the {self.name} bridge cannot read secrets; "
+            "use app.load_secret() on a device or pass a custom bridge"
+        )
+
+    def delete_secret(self, name: str) -> bool:
+        """Forget ``name``; ``False`` when it did not exist or is unsupported."""
+        raise NotImplementedError(
+            f"the {self.name} bridge cannot delete secrets; "
+            "use app.delete_secret() on a device or pass a custom bridge"
+        )
+
     # -- external ----------------------------------------------------------
     def open_url(self, url: str) -> bool:
         """Open ``url`` in an external viewer (browser).
 
         Returns ``True`` when handled; the default desktop implementation opens
-        the system browser via ``webbrowser``.
+        the system browser via ``webbrowser``. Only ``http``, ``https``,
+        ``mailto`` and ``tel`` are opened: the URL often comes from server data,
+        and a ``file:`` or ``intent:`` link there must not reach the platform.
         """
+        _check_openable_url(url)
         import webbrowser
 
         webbrowser.open(url)
         return True
+
+
+#: Schemes a link from app data may open. ``tel:`` and ``sms:`` dial or compose;
+#: everything else (``file:``, ``intent:``, ``javascript:``, custom schemes) is
+#: refused, because ``Intent.parseUri`` on a hostile string can reach parts of
+#: the system the app never meant to expose.
+OPENABLE_SCHEMES: frozenset[str] = frozenset({"http", "https", "mailto", "tel"})
+
+
+def _check_openable_url(url: str) -> str:
+    """Validate ``url`` for :meth:`Bridge.open_url`; returns the stripped URL."""
+    if not isinstance(url, str):
+        raise TypeError("url must be a string")
+    text = url.strip()
+    if not text:
+        raise ValueError("url must not be empty")
+    scheme = text.split(":", 1)[0].strip().casefold() if ":" in text else ""
+    # A relative path has no scheme and cannot open anything: refuse it here
+    # rather than letting the platform guess.
+    if scheme not in OPENABLE_SCHEMES:
+        raise ValueError(
+            f"refusing to open {text!r}: allowed schemes are {', '.join(sorted(OPENABLE_SCHEMES))}"
+        )
+    return text

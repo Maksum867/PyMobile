@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -57,13 +57,17 @@ _WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 def _parse_options(options: Sequence[Any]) -> tuple[list[str], list[str]]:
     """Normalise selection-widget options into parallel ``(values, labels)``.
 
-    П-11: ``Dropdown``/``SegmentedButtons``/``BottomNavigation`` previously
+    ``Dropdown``/``SegmentedButtons``/``BottomNavigation`` previously
     treated every option as both value and label, which breaks i18n — a
     translated label sent back from the front end would not match any value
     after a language switch. Accepting ``(value, label)`` pairs keeps the
     internal value stable while showing a localised label. A plain string
     ``"x"`` is shorthand for ``("x", "x")``.
     """
+    if isinstance(options, Mapping):
+        # A whole mapping is the same shorthand as a list of single-item ones:
+        # ``SegmentedButtons({"all": "All", "mine": "Mine"})``.
+        options = list(options.items())
     if not options:
         raise ValueError(
             "options must not be empty; pass at least one option, "
@@ -75,6 +79,18 @@ def _parse_options(options: Sequence[Any]) -> tuple[list[str], list[str]]:
         if isinstance(opt, str):
             values.append(opt)
             labels.append(opt)
+        elif isinstance(opt, Mapping) and len(opt) == 1:
+            # ``{"all": "All"}`` — the shape ``MultiSelect`` and ``TabView``
+            # already accept. SegmentedButtons used to read only the key, so a
+            # localised label silently turned into its internal value.
+            key, label = next(iter(opt.items()))
+            if not isinstance(key, str) or not isinstance(label, str):
+                raise ValueError(
+                    f"options must be strings, (value, label) pairs or single-item "
+                    f"{{value: label}} mappings of strings, got {opt!r}"
+                )
+            values.append(key)
+            labels.append(label)
         elif (
             isinstance(opt, (tuple, list))
             and len(opt) == 2
@@ -177,6 +193,7 @@ class Label(Widget):
 
     @text.setter
     def text(self, value: str) -> None:
+        """The label's text; assigning it re-renders the label."""
         value = "" if value is None else str(value)
         if value != self._text:
             self._text = value
@@ -187,6 +204,7 @@ class Label(Widget):
         self.text = text
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the text after a transform or an overflow rule."""
         return {**super().props(), "text": self._text}
 
 
@@ -249,6 +267,7 @@ class Button(Widget):
 
     @text.setter
     def text(self, value: str) -> None:
+        """The caption on the button; assigning it re-renders the button."""
         value = "" if value is None else str(value)
         if value != self._text:
             self._text = value
@@ -264,6 +283,7 @@ class Button(Widget):
             self.on_press()
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the caption, the variant and the press callback."""
         return {
             **super().props(),
             "text": self._text,
@@ -272,8 +292,34 @@ class Button(Widget):
         }
 
 
+#: ``TextInput(keyboard=…)`` values, each mapped to an Android input type on the
+#: device and to an ``<input type=…>``/``inputmode`` in the browser preview.
+KEYBOARD_TYPES = {
+    "text": "text",
+    "email": "email",
+    "phone": "phone",
+    "number": "number",
+    "decimal": "decimal",
+    "url": "url",
+    "password": "password",
+    "search": "search",
+    "multiline": "multiline",
+}
+
+#: What the keyboard's action key says; ``None`` keeps the platform default
+#: (a newline for a multiline field, "Done" otherwise).
+IME_ACTIONS = ("done", "go", "next", "search", "send", "previous", "none")
+
+
 class TextInput(Widget):
-    """Single- or multi-line text field."""
+    """Single- or multi-line text field.
+
+    ``keyboard`` picks the soft keyboard the field asks for (``"email"``,
+    ``"number"``, ``"phone"``, ``"url"``, ``"decimal"``, ``"search"``,
+    ``"password"``), ``ime_action`` the label of its action key, and
+    ``on_submit`` fires when that key is pressed — the Enter key on a desktop
+    preview, the ⌨ action on a phone. ``submit()`` triggers it from code.
+    """
 
     type_name = "TextInput"
     __slots__ = (
@@ -283,6 +329,9 @@ class TextInput(Widget):
         "password",
         "max_length",
         "on_change",
+        "on_submit",
+        "keyboard",
+        "ime_action",
         "_revision",
     )
 
@@ -295,6 +344,9 @@ class TextInput(Widget):
         password: bool = False,
         max_length: int | None = None,
         on_change: Callable[[str], None] | None = None,
+        on_submit: Callable[[str], object] | None = None,
+        keyboard: str | None = None,
+        ime_action: str | None = None,
         **kwargs: Any,
     ) -> None:
         # Deprecated alias: maxlength (HTML style) -> max_length
@@ -310,6 +362,36 @@ class TextInput(Widget):
             )
             max_length = kwargs.pop("maxlength")
         super().__init__(**kwargs)
+        if keyboard is not None:
+            if not isinstance(keyboard, str) or keyboard.lower() not in KEYBOARD_TYPES:
+                raise ValueError(
+                    f"invalid keyboard {keyboard!r}; expected one of: " + ", ".join(KEYBOARD_TYPES)
+                )
+            keyboard = keyboard.lower()
+            # ``password`` and ``multiline`` keep working as they always did; a
+            # keyboard that contradicts them is a mistake worth naming rather
+            # than silently preferring one of the two.
+            if keyboard == "password" and multiline:
+                raise ValueError("a multiline field cannot use the password keyboard")
+            if keyboard != "password" and password:
+                raise ValueError("password=True and keyboard=… disagree; pick one")
+            if keyboard != "multiline" and multiline:
+                raise ValueError("multiline=True and keyboard=… disagree; pick one")
+            password = password or keyboard == "password"
+            multiline = multiline or keyboard == "multiline"
+        if ime_action is not None:
+            if not isinstance(ime_action, str) or ime_action.lower() not in IME_ACTIONS:
+                raise ValueError(
+                    f"invalid ime_action {ime_action!r}; expected one of: " + ", ".join(IME_ACTIONS)
+                )
+            ime_action = ime_action.lower()
+            if ime_action != "none" and on_submit is None:
+                # The key would be relabelled and then do nothing, which reads
+                # as a broken button rather than a missing callback.
+                raise ValueError(
+                    f"ime_action={ime_action!r} relabels the keyboard's action key; "
+                    "pass on_submit=… so that key does something"
+                )
         if max_length is not None and max_length <= 0:
             raise ValueError("max_length must be positive")
         # None means "empty field", not the four characters of str(None): the
@@ -324,6 +406,9 @@ class TextInput(Widget):
         self.password = password
         self.max_length = max_length
         self.on_change = on_change
+        self.on_submit = on_submit
+        self.keyboard = keyboard
+        self.ime_action = ime_action
         # Bumped whenever the value is changed by code rather than by typing,
         # so the device renderer knows to apply it even to a focused field.
         self._revision = 0
@@ -335,6 +420,7 @@ class TextInput(Widget):
 
     @value.setter
     def value(self, value: str) -> None:
+        """The text in the field; assigning it behaves like a user edit."""
         self.set_value(value)
 
     def set_value(self, value: str) -> None:
@@ -376,7 +462,32 @@ class TextInput(Widget):
         """Empty the field (also while it has focus on the device)."""
         self.set_value("")
 
+    def capture_state(self) -> dict[str, Any]:
+        """Keep what the user typed across a rebuild of the screen."""
+        if not self._value:
+            # An empty field is the default; replaying it would only risk
+            # overwriting a value the new build deliberately set.
+            return {}
+        return {"value": self._value}
+
+    def restore_state(self, state: Mapping[str, Any]) -> None:
+        """Take back the text a rebuilt screen's new field should show."""
+        value = state.get("value")
+        if isinstance(value, str) and value != self._value:
+            self._apply(value, from_ui=True)
+
+    def submit(self) -> None:
+        """Run the submit handler as the keyboard's action key would.
+
+        A disabled field does not submit: the key is not reachable from the
+        device either, and a stale handler firing would be a surprise.
+        """
+        if not self.enabled or self.on_submit is None:
+            return
+        self.on_submit(self._value)
+
     def props(self) -> dict[str, Any]:
+        """The serialised props: value, placeholder, keyboard, submit action and limits."""
         return {
             **super().props(),
             "value": self._value,
@@ -385,6 +496,9 @@ class TextInput(Widget):
             "password": self.password,
             "max_length": self.max_length,
             "on_change": callback_name(self.on_change),
+            "on_submit": callback_name(self.on_submit),
+            "keyboard": self.keyboard or ("multiline" if self.multiline else "text"),
+            "ime_action": self.ime_action,
             "revision": self._revision,
         }
 
@@ -434,6 +548,7 @@ class Image(Widget):
 
     @source.setter
     def source(self, value: str) -> None:
+        """The image address: ``asset://``, ``file://``, ``http(s)://`` or a data URI."""
         if not value:
             raise ValueError("image source must not be empty")
         self._validate_source(value)
@@ -448,6 +563,7 @@ class Image(Widget):
 
     @fit.setter
     def fit(self, value: str) -> None:
+        """How the picture fills its box: cover, contain, fill, none or scale-down."""
         if value not in self.FITS:
             raise ValueError(f"fit must be one of {', '.join(self.FITS)}")
         if value != self._fit:
@@ -509,6 +625,7 @@ class Image(Widget):
             )
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: source, fit mode, caption and the decorative flag."""
         props = {**super().props(), "source": self.source, "fit": self.fit}
         if self.decorative:
             props["decorative"] = True
@@ -539,6 +656,15 @@ class Switch(Widget):
         self.set_checked(not self.checked)
         return self.checked
 
+    def capture_state(self) -> dict[str, Any]:
+        """Carry the toggle across a rebuild of the screen."""
+        return {"checked": self._checked} if self._checked else {}
+
+    def restore_state(self, state: Mapping[str, Any]) -> None:
+        """Re-apply a toggle the rebuilt screen's new switch should show."""
+        if state.get("checked") is True:
+            self.set_checked(True)
+
     @property
     def checked(self) -> bool:
         """Whether the switch is on; assigning to it schedules a redraw."""
@@ -546,6 +672,7 @@ class Switch(Widget):
 
     @checked.setter
     def checked(self, value: bool) -> None:
+        """Whether the switch is on; assigning it behaves like a user toggle."""
         self.set_checked(value)
 
     def set_checked(self, checked: bool) -> None:
@@ -565,6 +692,7 @@ class Switch(Widget):
                 self.on_toggle(checked)
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the on/off state and the toggle callback."""
         return {
             **super().props(),
             "checked": self._checked,
@@ -603,6 +731,7 @@ class ProgressBar(Widget):
 
     @value.setter
     def value(self, value: float) -> None:
+        """How far the bar has filled; assigning it behaves like a progress update."""
         self.set_value(value)
 
     def set_value(self, value: float) -> None:
@@ -618,6 +747,7 @@ class ProgressBar(Widget):
         return self._value / self.maximum
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: value, maximum and the indeterminate flag."""
         return {
             **super().props(),
             "value": self._value,
@@ -639,6 +769,7 @@ class Spacer(Widget):
         self.size = size
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the space the spacer takes."""
         return {**super().props(), "size": self.size}
 
 
@@ -705,6 +836,7 @@ class Slider(Widget):
 
     @value.setter
     def value(self, value: float) -> None:
+        """The position of the handle; assigning it behaves like a drag."""
         self.set_value(value)
 
     @property
@@ -721,7 +853,18 @@ class Slider(Widget):
             if self.on_change is not None and not in_build_scope():
                 self.on_change(clamped)
 
+    def capture_state(self) -> dict[str, Any]:
+        """Carry the thumb position across a rebuild of the screen."""
+        return {"value": self._value}
+
+    def restore_state(self, state: Mapping[str, Any]) -> None:
+        """Put a rebuilt screen's new slider where the old one was."""
+        value = state.get("value")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            self.set_value(float(value))
+
     def props(self) -> dict[str, Any]:
+        """The serialised props: value plus the bounds, step and change callback."""
         return {
             **super().props(),
             "value": self._value,
@@ -762,10 +905,20 @@ class Checkbox(Widget):
 
     @text.setter
     def text(self, value: str) -> None:
+        """The caption beside the box."""
         value = str(value)
         if self._text != value:
             self._text = value
             self.invalidate()
+
+    def capture_state(self) -> dict[str, Any]:
+        """Carry the tick across a rebuild of the screen."""
+        return {"checked": self._checked} if self._checked else {}
+
+    def restore_state(self, state: Mapping[str, Any]) -> None:
+        """Re-apply a tick the rebuilt screen's new box should show."""
+        if state.get("checked") is True:
+            self.set_checked(True)
 
     @property
     def checked(self) -> bool:
@@ -774,6 +927,7 @@ class Checkbox(Widget):
 
     @checked.setter
     def checked(self, value: bool) -> None:
+        """Whether the box is ticked; assigning it behaves like a click."""
         self.set_checked(value)
 
     def set_checked(self, checked: bool) -> None:
@@ -797,6 +951,7 @@ class Checkbox(Widget):
         return self._checked
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the caption, the ticked state and the toggle callback."""
         return {
             **super().props(),
             "checked": self._checked,
@@ -842,6 +997,7 @@ class RatingBar(Widget):
 
     @rating.setter
     def rating(self, value: float) -> None:
+        """How many stars are filled; assigning it behaves like a rating change."""
         self.set_value(value)
 
     @property
@@ -851,6 +1007,7 @@ class RatingBar(Widget):
 
     @value.setter
     def value(self, value: float) -> None:
+        """How many stars are filled (the bridge's name for :attr:`rating`)."""
         self.set_value(value)
 
     def set_value(self, value: float) -> None:
@@ -863,6 +1020,7 @@ class RatingBar(Widget):
                 self.on_change(clamped)
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the rating, the star count and the change callback."""
         return {
             **super().props(),
             "rating": self._rating,
@@ -881,7 +1039,7 @@ class Dropdown(Widget):
     or a ``(value, label)`` pair — the stable machine-readable value is what
     :attr:`value` carries (and what ``on_select`` receives), while ``label``
     is the text rendered. This keeps localised labels from leaking into
-    program logic (П-11).
+    program logic.
     """
 
     type_name = "Dropdown"
@@ -913,6 +1071,7 @@ class Dropdown(Widget):
 
     @value.setter
     def value(self, value: str) -> None:
+        """The value of the chosen option; assigning it behaves like picking it."""
         self.select(value)
 
     def select(self, value: str) -> None:
@@ -929,10 +1088,21 @@ class Dropdown(Widget):
         """Generic setter used by the app's ``change`` event handler."""
         self.select(value)
 
+    def capture_state(self) -> dict[str, Any]:
+        """Carry the choice across a rebuild of the screen."""
+        return {"value": self._value}
+
+    def restore_state(self, state: Mapping[str, Any]) -> None:
+        """Re-select a rebuilt screen's new dropdown, when the option still exists."""
+        value = state.get("value")
+        if isinstance(value, str) and value in self.options:
+            self.select(value)
+
     def props(self) -> dict[str, Any]:
+        """The serialised props: the option values, their labels and the select callback."""
         return {
             **super().props(),
-            # П-11: ``options`` stays the list of *values* (backwards compatible),
+            # ``options`` stays the list of *values* (backwards compatible),
             # ``labels`` is the matching list of visible, possibly localised
             # labels — renderers fall back to the value when no label is given
             # (a plain string option means value == label).
@@ -969,6 +1139,7 @@ class Chip(Widget):
 
     @text.setter
     def text(self, value: str) -> None:
+        """The caption inside the chip."""
         if value != self._text:
             self._text = value
             self.invalidate()
@@ -980,9 +1151,11 @@ class Chip(Widget):
 
     @selected.setter
     def selected(self, value: bool) -> None:
+        """Whether the chip is in its selected look."""
         self.set_selected(value)
 
     def set_selected(self, value: bool) -> None:
+        """Select or deselect the chip and re-render it."""
         if value != self._selected:
             self._selected = value
             self.invalidate()
@@ -993,6 +1166,7 @@ class Chip(Widget):
             self.on_press()
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the caption, the selected state and the press callback."""
         return {
             **super().props(),
             "text": self._text,
@@ -1027,17 +1201,20 @@ class Badge(Widget):
 
     @text.setter
     def text(self, value: str | int) -> None:
+        """The short text or number on the badge."""
         value = str(value)
         if value != self._text:
             self._text = value
             self.invalidate()
 
     def to_dict(self) -> WidgetNode:
+        """The serialised badge, sized around its text."""
         node = super().to_dict()
         node["style"] = {**{"width": "wrap", "corner_radius": 999}, **node.get("style", {})}
         return node
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: text and the two colours, corrected for contrast."""
         return {
             **super().props(),
             "text": self._text,
@@ -1091,6 +1268,7 @@ class Stepper(Widget):
 
     @value.setter
     def value(self, value: int) -> None:
+        """The number in the stepper; assigning it behaves like pressing plus or minus."""
         self.set_value(value)
 
     def set_value(self, value: int) -> None:
@@ -1113,6 +1291,7 @@ class Stepper(Widget):
         return self._value
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the number plus the bounds, step and change callback."""
         return {
             **super().props(),
             "value": self._value,
@@ -1156,9 +1335,11 @@ class SearchBar(Widget):
 
     @value.setter
     def value(self, value: str) -> None:
+        """The text in the search field; assigning it updates the field."""
         self.set_value(value)
 
     def set_value(self, value: str) -> None:
+        """Put ``value`` in the field, raising the change event but not the search one."""
         self._apply(value, from_ui=False)
 
     def _ui_set_value(self, value: str) -> None:
@@ -1189,6 +1370,7 @@ class SearchBar(Widget):
         self.set_value("")
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the query, the placeholder, the revision and the two callbacks."""
         return {
             **super().props(),
             "value": self._value,
@@ -1225,6 +1407,7 @@ class RadioButton(Widget):
 
     @text.setter
     def text(self, value: str) -> None:
+        """The caption beside the radio button."""
         if value != self._text:
             self._text = value
             self.invalidate()
@@ -1236,9 +1419,11 @@ class RadioButton(Widget):
 
     @selected.setter
     def selected(self, value: bool) -> None:
+        """Whether this radio button is the chosen one."""
         self.set_selected(value)
 
     def set_selected(self, value: bool) -> None:
+        """Mark the radio button as chosen or not, and re-render it."""
         if value != self._selected:
             self._selected = value
             self.invalidate()
@@ -1258,7 +1443,17 @@ class RadioButton(Widget):
         if self.on_press is not None:
             self.on_press()
 
+    def capture_state(self) -> dict[str, Any]:
+        """Carry the choice across a rebuild of the screen."""
+        return {"selected": True} if self._selected else {}
+
+    def restore_state(self, state: Mapping[str, Any]) -> None:
+        """Re-select a rebuilt screen's new radio."""
+        if state.get("selected") is True:
+            self.set_selected(True)
+
     def props(self) -> dict[str, Any]:
+        """The serialised props: the caption, the chosen state and the press callback."""
         return {
             **super().props(),
             "text": self._text,
@@ -1327,7 +1522,7 @@ class RadioGroup(Container):
         self._select_silent(chosen)
         self.invalidate()
         # A selection made while the tree is being built (build()) stays
-        # silent, like every other set_value() in this module (BUG-25).
+        # silent, like every other set_value() in this module.
         if self.on_select is not None and not in_build_scope():
             self.on_select(chosen.text)
 
@@ -1362,11 +1557,13 @@ class RadioGroup(Container):
         self.select(value)
 
     def add(self, child: Widget) -> Widget:
+        """Add a radio button to the group; anything else is rejected."""
         if not isinstance(child, RadioButton):
             raise ValueError("RadioGroup children must be RadioButton instances")
         return super().add(child)
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the chosen index and value of the group."""
         return {**super().props(), "value": self.value, "selected_index": self.selected_index}
 
 
@@ -1376,7 +1573,7 @@ class SegmentedButtons(Widget):
     ``options`` is the ordered list of choices; ``value`` is the selected one.
     ``on_select`` fires when the selection changes (``on_change`` is a
     deprecated alias of it). Options support ``(value, label)`` pairs for
-    stable values with localised labels (П-11).
+    stable values with localised labels.
 
     **Long labels.** The options share one line, each as wide as its text. When
     they do not fit — five translated labels on a 360 dp phone — the bar scrolls
@@ -1416,6 +1613,7 @@ class SegmentedButtons(Widget):
 
     @value.setter
     def value(self, value: str) -> None:
+        """The value of the chosen segment; assigning it behaves like picking it."""
         self.select(value)
 
     def select(self, value: str) -> None:
@@ -1429,9 +1627,21 @@ class SegmentedButtons(Widget):
                 self.on_select(value)
 
     def set_value(self, value: str) -> None:
+        """Choose the segment called ``value`` (the bridge's name for :meth:`select`)."""
         self.select(value)
 
+    def capture_state(self) -> dict[str, Any]:
+        """Carry the selected segment across a rebuild of the screen."""
+        return {"value": self._value}
+
+    def restore_state(self, state: Mapping[str, Any]) -> None:
+        """Re-select a rebuilt screen's new segment, when it still exists."""
+        value = state.get("value")
+        if isinstance(value, str) and value in self.options:
+            self.select(value)
+
     def props(self) -> dict[str, Any]:
+        """The serialised props: the segments, their labels and the select callback."""
         return {
             **super().props(),
             "options": list(self.options),
@@ -1483,9 +1693,11 @@ class ProgressText(Widget):
 
     @value.setter
     def value(self, value: float) -> None:
+        """How far the bar has filled, clamped to the allowed range."""
         self.set_value(value)
 
     def set_value(self, value: float) -> None:
+        """Move the bar to ``value``, clamped to ``minimum``..``maximum``, and re-render it."""
         clamped = max(0.0, min(float(value), self.maximum))
         if clamped != self._value:
             self._value = clamped
@@ -1516,6 +1728,7 @@ class ProgressText(Widget):
         return f"{self.label} {body}".strip() if self.label else body
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the value, the bounds, the format string and the caption."""
         return {
             **super().props(),
             "value": self._value,
@@ -1526,8 +1739,48 @@ class ProgressText(Widget):
         }
 
 
+#: Schemes a Link may carry. Data from a server or a text field ends up in
+#: ``url`` sooner or later, and everything outside this list — ``javascript:``,
+#: ``file:``, ``intent:`` — is a way to run something instead of opening a page.
+LINK_SCHEMES = frozenset({"http", "https", "mailto", "tel", "sms", "geo"})
+
+
+def _validated_url(url: str) -> str:
+    """Return ``url`` if its scheme is allowed, else raise ``ValueError``.
+
+    A URL with no scheme is a relative path (``/help``, ``docs/index.html``)
+    and stays allowed: apps use those against the packaged assets. Anything
+    with a scheme has to be one of :data:`LINK_SCHEMES`.
+    """
+    text = str(url).strip()
+    if not text:
+        return ""
+    scheme, separator, _ = text.partition(":")
+    if not separator:
+        return text
+    # A Windows path (``C:\notes``) and a relative path are not schemes.
+    normalised = scheme.strip().lower()
+    if normalised in LINK_SCHEMES:
+        return text
+    if len(normalised) == 1 and normalised.isalpha():  # a drive letter
+        return text
+    raise ValueError(
+        f"refusing to open {text!r}: a Link may use "
+        + ", ".join(sorted(scheme + ":" for scheme in LINK_SCHEMES))
+        + " or a relative path. Pass the value through your own check if the "
+        "scheme really is intended, and open it with app.bridge.open_url()."
+    )
+
+
 class Link(Widget):
-    """A tappable text styled as a hyperlink."""
+    """A tappable text styled as a hyperlink.
+
+    ``url`` accepts ``http``/``https``/``mailto``/``tel``/``sms``/``geo`` and
+    relative paths. Any other scheme is refused when the widget is built: a URL
+    that came from a server or a text field should not be able to decide that
+    the "link" runs ``javascript:`` — the preview wrote it into ``href`` and a
+    tap opened ``intent:`` URLs on the device.
+    """
 
     type_name = "Link"
     __slots__ = ("_text", "url", "on_press")
@@ -1542,7 +1795,7 @@ class Link(Widget):
     ) -> None:
         super().__init__(**kwargs)
         self._text = text
-        self.url = url
+        self.url = _validated_url(url)
         self.on_press = on_press
 
     @property
@@ -1552,6 +1805,7 @@ class Link(Widget):
 
     @text.setter
     def text(self, value: str) -> None:
+        """The caption the user sees and taps."""
         if value != self._text:
             self._text = value
             self.invalidate()
@@ -1580,6 +1834,7 @@ class Link(Widget):
             self.on_press()
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the caption, the validated URL and the press callback."""
         return {
             **super().props(),
             "text": self._text,
@@ -1637,6 +1892,7 @@ class DataTable(Widget):
         self.invalidate()
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the header cells and the rows."""
         return {
             **super().props(),
             "headers": list(self.headers),
@@ -1728,6 +1984,7 @@ class Avatar(Widget):
         self.background = Color.validate(background) if background is not None else None
 
     def to_dict(self) -> WidgetNode:
+        """The serialised avatar, sized by its diameter."""
         node = super().to_dict()
         node["style"] = {
             **{"width": self.size, "height": self.size, "corner_radius": self.size / 2},
@@ -1736,6 +1993,7 @@ class Avatar(Widget):
         return node
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the photo, the initials, the size and the colours."""
         return {
             **super().props(),
             "source": self.source,

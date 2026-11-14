@@ -386,9 +386,7 @@ class TestFlatKeys:
         assert catalogue.get("stats.balance") == "Баланс"
         assert catalogue.get("stats.income") == "Дохід"
 
-    def test_the_same_catalogue_is_reported_once(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_the_same_catalogue_is_reported_once(self, capsys: pytest.CaptureFixture[str]) -> None:
         from pymobile.logging import configure
 
         configure("debug")

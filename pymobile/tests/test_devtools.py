@@ -295,8 +295,8 @@ class TestWebPreviewServer:
         try:
             base = f"http://127.0.0.1:{port}"
             page = urllib.request.urlopen(base, timeout=5).read().decode()
-            assert "--phone-bg" in page         # the rules read the variables
-            assert "applyChrome" in page        # and the poll loop rewrites them
+            assert "--phone-bg" in page  # the rules read the variables
+            assert "applyChrome" in page  # and the poll loop rewrites them
 
             light = json.loads(urllib.request.urlopen(f"{base}/state", timeout=5).read())
             assert light["chrome"]["phone_bg"] == "#FFFFFF"

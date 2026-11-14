@@ -27,7 +27,9 @@ class _MockupContext(ABC):
         fill: bool,
         force_h: float | None = None,
         axis: str = "v",
-    ) -> _Box | None: ...
+    ) -> _Box | None:
+        """Lay out one node: its box, or ``None`` when it takes no space."""
+        ...
 
     @abstractmethod
     def _padding(

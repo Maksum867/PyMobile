@@ -31,6 +31,121 @@ settings and appointments require the owner.
 Contributors who change renderer Java, packaging or release behaviour should
 also read the release gates below.
 
+### Adding a widget to the previews
+
+The browser preview and the Tk window draw a widget in two places, each split
+by widget family:
+
+- `pymobile/core/ui/web.py` — a `_html_<family>` helper per family, picked
+  through the `_HTML_RENDERERS` table. A helper that draws several kinds keeps
+  one `if kind == ...` guard per kind, so the dispatcher can share it.
+- `pymobile/core/ui/gui.py` — a `_build_<family>` method per family, picked
+  through `_TK_BUILDERS`. It returns `True` when it drew the node and `False`
+  when the node belongs to another guard in the same helper.
+
+Both take a small `_RenderContext`/`_BuildContext` instead of a dozen
+parameters, so adding a field does not touch every helper.
+
+### Adding a widget: the whole list
+
+A widget type reaches five places. `pymobile/tests/test_renderer_parity_between_python_and_java.py`
+fails, with the missing name, when one of them is forgotten — that test is the
+CI half that does not need an SDK.
+
+| Step | File | What to add |
+| --- | --- | --- |
+| 1. The widget | `core/ui/components.py`, `controls.py`, `layout.py` or `patterns.py` | the class, its validated properties and `props()` |
+| 2. The capability row | `core/ui/registry.py`, `WIDGET_CAPABILITIES` | `WidgetCapability("Name", web=True, gui=True)` — `android=` stays `False` until step 5 lands |
+| 3. The previews | `core/ui/web.py`, `core/ui/gui.py`, `core/ui/extras_preview.py` | one helper plus one `_HTML_RENDERERS` / `_TK_BUILDERS` entry |
+| 4. The text and PNG previews | `core/ui/preview.py`, `core/ui/extras_preview.py` | the ASCII form and, if it draws, `extra_mockup` |
+| 5. The phone | `resources/android/java/ViewBuilder.java` (and a `View*.java` file) | `case "Name":`, then `python -m pymobile.compiler.rebuild_dex` and `--check`; needs javac, d8 and `android.jar`, not an NDK |
+| 6. The evidence | `pymobile/tests/`, `CHANGELOG.md` | a test named for the behaviour, and one line under the release |
+
+Steps 1–4 and 6 need no Android tooling at all; that is a complete, reviewable
+pull request on its own, with the capability row declaring `android=False` and
+`pymobile run` warning that the phone will draw a placeholder. Step 5 turns the
+same change into native parity, and is where the rebuild commands from the
+release gates apply.
+
+## Where to start, and where to ask
+
+Three doors, in the order most people use them:
+
+| You have | Go to |
+| --- | --- |
+| a question ("how do I …") | GitHub **Discussions → Q&A**. Issues are for things that are wrong, discussions are for things that are unclear. |
+| a small fix, no Android needed | the [`good first issue`](../../issues?q=is%3Aissue+label%3A%22good+first+issue%22) label. Each one names the file and the test. |
+| a bug you can reproduce | the **Bug report** form; it asks for `python -m pymobile doctor` output, which saves a round trip. |
+
+Nothing here needs permission before you start. Comment on an issue you are
+taking so two people do not write the same patch, and open the pull request when
+it is green rather than when it is perfect — review is faster than a perfect
+patch written in the dark.
+
+New to the project *and* to Python? Read
+[TUTORIAL.md](TUTORIAL.md) first (fifteen minutes, no SDK) and
+[BEGINNER-MISTAKES.md](BEGINNER-MISTAKES.md) second. Every snippet in both is
+checked by tests — the imports against the real package and the commands
+against the real CLI — so neither can quietly rot.
+
+## First contribution in ten minutes
+
+The first useful change does not need an Android device, an SDK, or an
+understanding of the renderers. This is the shortest path from a clean checkout
+to a merged patch.
+
+1. **Pick something small.** The issues labelled `good first issue` are written
+   for exactly this: a docstring, a clearer error message, one test that pins a
+   behaviour down. Comment on the issue so nobody duplicates the fix.
+2. **Get the checkout running.**
+   ```sh
+   git clone https://github.com/Maksum867/PyMobile.git
+   cd PyMobile
+   python -m venv .venv
+   . .venv/bin/activate          # Windows: .venv\Scripts\activate
+   python -m pip install -e ".[dev]"
+   python -m pytest -q           # the whole suite, about 90 s
+   ```
+   Tk previews and PNG snapshots skip themselves when there is no display or no
+   Pillow; a skipped test is not a passed test.
+3. **Find where the change goes.** Most tasks touch one of:
+   - `pymobile/core/ui/components.py`, `controls.py`, `layout.py` — a widget and
+     the props it serialises;
+   - `pymobile/core/ui/patterns.py` — a composed widget (card, form, calendar);
+   - `pymobile/core/ui/web.py` and `gui.py` — the browser and Tk previews, one
+     `_html_*` / `_build_*` helper per widget family (see below);
+   - `pymobile/core/bridge/` — what the framework asks the phone for;
+   - `pymobile/cli*.py` — one module per command family (`cli_build.py` build,
+     `cli_preview.py` preview/dev/watch, `cli_device.py` adb/emulator/install);
+     `cli.py` holds the shared helpers and a replaceable pass-through per
+     command;
+   - `README.md` and `docs/` — behaviour that has changed.
+4. **Write the test first.** `pymobile/tests/` has one file per behaviour, and
+   the name says what is checked (`test_http_connections_and_encoding.py`, not
+   `test_audit_round_5.py`). Copy the closest file, run it alone
+   (`python -m pytest pymobile/tests/your_file.py -q`), then run the full suite.
+5. **Open the pull request.** Describe the problem, the change and the exact
+   commands you ran. A maintainer reviews for correctness first, style second;
+   a review question is not a rejection.
+
+Things that make a patch easy to accept: the smallest diff that fixes the
+problem, a test that fails before the fix and passes after it, a CHANGELOG line
+for anything a user can notice, and no unrelated reformatting. Things that make
+it hard: a whole-file reformat, a new dependency, or a change to
+`resources/android/prebuilt/` without the rebuild commands from the release
+gates.
+
+### Where a good first task usually lives
+
+| Task | Files | Checks |
+| --- | --- | --- |
+| An error message that does not say what to do | the raising module, `pymobile/tests/` | `pytest`, `ruff`, `mypy` |
+| A docstring on a public function | the module, `pymobile/` | `ruff`, `mypy` |
+| A README paragraph that is out of date | `README.md`, `CHANGELOG.md` | read it as a newcomer |
+| A web-preview look that is wrong | `core/ui/web.py`, `core/ui/extras_preview.py` | `pymobile preview --web` |
+| A Tk preview that is wrong | `core/ui/gui.py` | `pymobile run --gui` (needs a display) |
+| A widget the phone draws wrongly | `resources/android/java/View*.java` | **not** a first task: needs the SDK and a device |
+
 ## Compatibility and adoption
 
 - Treat 0.x as alpha. Consumers should pin an exact version and validate upgrades
@@ -64,7 +179,7 @@ also read the release gates below.
    It is a consistency check, not a cryptographic authenticity or device test.
 4. Run real SDK builds and signature/prebuilt/cache regressions:
    ```sh
-   PYMOBILE_NATIVE_TESTS=1 python -m pytest pymobile/tests/test_remaining_p_fixes.py
+   PYMOBILE_NATIVE_TESTS=1 python -m pytest pymobile/tests/test_native_build_gates.py
    ```
    Set ANDROID_HOME/JAVA_HOME as needed. Standard native builds validate startup;
    do not use `--skip-startup-check` merely to make release gates green.
@@ -93,8 +208,15 @@ also read the release gates below.
   only if that file exists in the checkout; it is not a required release gate.
   The Android diagnostics upload is best-effort (`if-no-files-found: warn`) and
   warns instead of failing when no device artifacts were produced.
+- Every third-party action is pinned to a commit SHA, with the release it came
+  from in a trailing comment (`# v4.1.7`). A tag is a moving target: whoever
+  owns the action can repoint it and run new code with this repository's
+  token. Dependabot proposes the SHA bumps weekly, one grouped PR, so keeping
+  the pins current costs a review rather than a rewrite. Verify a new SHA
+  against the upstream repository (`git ls-remote --tags https://github.com/…`)
+  before merging — the comment is a note, not proof.
 
-## Maintainer continuity (owner actions)
+## Maintainer continuity (owner actions — skip on your first patch)
 
 - Nominate and obtain consent from a second reviewer with Android/runtime
   knowledge. Update CODEOWNERS only with real, consenting collaborators; do not
@@ -109,7 +231,7 @@ also read the release gates below.
   schedule. State actual support commitments publicly; do not imply an SLA that
   no maintainer has agreed to provide.
 
-## Publication boundary
+## Publication boundary (owner actions — skip on your first patch)
 
 Local patches cannot appoint upstream maintainers, create upstream issues
 without access, configure protections or update the live PyPI page. The files
@@ -159,7 +281,7 @@ Run checks from the repository root. During development, run a focused test firs
 then the full suite before requesting review:
 
 ```sh
-python -m pytest pymobile/tests/test_remaining_p_fixes.py
+python -m pytest pymobile/tests/test_native_build_gates.py
 python -m pytest
 python -m ruff check pymobile
 python -m mypy pymobile
@@ -190,6 +312,33 @@ tracebacks. Review their output before sharing: paths, identifiers or applicatio
 logs can contain private information. Test UI changes with
 [`check-ui`](ACCESSIBILITY.md#automated-audit) and, when relevant, on Android.
 
+### Errors that name the mistake
+
+A user does not read the framework source. Every error the framework raises on
+purpose must name the thing the user wrote, and say what to write instead:
+
+- Name the user's own syntax, not a private attribute. `Column(Label("a"),
+  "text")` used to fail with `'str' object has no attribute '_parent'`; it now
+  says the string is not a child and shows `Column(Label('text'))`. A screen
+  whose `__init__` forgot `super().__init__()` says so, with the lines that fix
+  it, instead of `'Home' object has no attribute '_root'`.
+- Prefer the shape the user typed. A handler written with parentheses
+  (`on_press=self.on_tap()`) is a static mistake: `pymobile check` reports it at
+  its line and column, because the call runs once while the tree is built and
+  the button then silently does nothing.
+- Keep a sentence per cause. `None` in a container is usually a conditional
+  expression, a bare function is usually a factory missing its parentheses, a
+  list inside a list is flattened one level only — say which one it is.
+- Do not change the exception type callers catch. New child validation raises a
+  plain `TypeError`, and `WidgetTypeError` stays about `find()`/`get()`; an
+  existing test's expected wording (`children must be Widget instances`) is kept
+  where it was already part of the contract.
+- Add the regression test to the file that already covers that behaviour
+  (`test_child_type_errors.py` for children, `test_precheck.py` for `check`,
+  `test_build_warnings_and_artifact_names.py` for what a build writes and
+  warns about) and quote the sentence the user sees, so a later refactor cannot
+  quietly undo it.
+
 ## Renderer and packaging changes
 
 - Check how the serialized widget tree, event handling, state updates and
@@ -201,6 +350,40 @@ logs can contain private information. Test UI changes with
 - A Java renderer change needs the rebuilt dex and its provenance manifest to
   agree with the sources; use the rebuild and check commands in the release
   gates. The manifest detects drift, not malicious substitution.
+- The APK name carries the build mode: `build --native` writes
+  `app-0.1.0.apk`, a structural `build` writes `app-0.1.0-debug.apk` (plus the
+  ABI for a non-arm64 target). A non-installable artifact must never occupy the
+  name `pymobile install` looks for — that produced a signature error instead of
+  the real cause.
+- Anything that ships inside the APK is public: credential-looking files are
+  filtered in `collector.is_credential_file()` and listed in the build
+  warnings, so a new "copy everything" path must call it too. Debug switches go
+  into the manifest only for `--debug` (`ManifestBuilder(debuggable=True)`),
+  never by default, and must be part of `build_mode()` so the cache cannot
+  hand a debug artifact to a release build.
+- The window lifecycle is a wire contract: `MainActivity.onDestroy` sends
+  `dispatchEvent("", "__lifecycle__", "stop")` and `onCreate` sends
+  `"resume"`; `App._lifecycle()` handles both. Do not add a new JNI entry point
+  for this — `libpymobile.so` ships prebuilt and rebuilding it needs an NDK, so
+  `dispatchEvent` (the one call every released bridge has) carries the event.
+  Anything queued behind a stop is dropped, and `App.save_state()` must stay
+  cheap: it runs on the UI thread during teardown.
+- `--bundle` builds the `.aab` from the same artifacts as the APK and verifies
+  it with bundletool. A change to the manifest, the resource pipeline or the
+  asset layout must be checked with a real `build --native --bundle` and
+  `bundletool validate`, not only with the ZIP-layout unit tests; the bundle
+  layout (`base/manifest`, `base/dex`, `base/res`, `base/lib/<abi>`) is
+  stricter than an APK's. `toolchain.find_toolchain()` follows
+  `sdk_installer.SDK_PLATFORM` — never `target_sdk` — because the manifest
+  level and the compiled level must agree.
+- The adaptive icon is generated, not committed: `icon.write_adaptive_icon()`
+  writes the three layers plus `mipmap-anydpi-v26`, and the manifest addresses
+  `@mipmap/ic_launcher`. A renamed resource must be renamed in all three
+  places (icon, manifest, the notification fallback in `core/bridge/jni.py`).
+- `target_sdk` above the platform installed by `setup-sdk`
+  (`sdk_installer.SDK_PLATFORM`, currently `android-35`) cannot be compiled
+  against; the build warns about it. Raising `SDK_PLATFORM` means changing
+  `MINIMAL_PACKAGES` and verifying a real native build.
 - JNI rebuilding is separate from rebuilding the renderer dex and requires the
   NDK. For work that needs it, see the [native build guide](../README.md#building-an-apk).
   Record SDK/JDK/NDK and device details and avoid claiming an unrun native check.

@@ -336,7 +336,10 @@ final class AdvancedViews {
                 paint.setStyle(Paint.Style.FILL);
             }
             paint.setColor(text); paint.setAlpha(isEnabled() ? 255 : 100);
-            paint.setTextSize(12 * getResources().getDisplayMetrics().scaledDensity);
+            // scaledDensity is deprecated from API 34; it is density × the
+            // user's font scale, which is exactly what sp means.
+            android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
+            paint.setTextSize(12 * metrics.density * getResources().getConfiguration().fontScale);
             paint.setTextAlign(Paint.Align.CENTER);
             String values = String.format(Locale.ROOT, "%s – %s", low, high);
             canvas.drawText(values, getWidth() / 2f, getPaddingTop() + 53 * density, paint);

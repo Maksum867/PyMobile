@@ -19,6 +19,8 @@ def text_value(value: object) -> str:
     and widgets coerce their own text props on the way in.
     """
     return "" if value is None else str(value)
+
+
 WidgetProps: TypeAlias = dict[str, SerializedValue]
 StyleNode: TypeAlias = dict[str, SerializedValue]
 

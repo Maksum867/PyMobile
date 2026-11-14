@@ -146,6 +146,18 @@ def build_parser(
         help="explicitly bypass the native startup check for Android-only startup; "
         "prints an unverified-launch warning",
     )
+    build.add_argument(
+        "--bundle",
+        action="store_true",
+        help="also write the .aab Google Play requires (implies --native); verified "
+        "with bundletool when a JDK and bundletool.jar are available",
+    )
+    build.add_argument(
+        "--debug",
+        action="store_true",
+        help="mark a native APK debuggable (adb run-as, Layout Inspector, Android Studio "
+        "debugger); never combine it with a release keystore",
+    )
     build.add_argument("--clean", action="store_true", help="rebuild from scratch")
     build.add_argument("--no-cache", action="store_true", help="ignore the incremental cache")
     build.add_argument("--optimize", action="store_true", help="ship bytecode instead of sources")
@@ -232,6 +244,18 @@ def build_parser(
             "with --web: accept requests whose Origin is this URL (repeatable; "
             "'*' accepts every origin). Needed when a portal embeds the preview "
             "or a proxy rewrites the origin"
+        ),
+    )
+    run.add_argument(
+        "--allow-host",
+        metavar="HOST",
+        action="append",
+        default=[],
+        help=(
+            "with --web: also accept this Host name on a preview without a "
+            "token (repeatable). Only a reverse proxy needs it: by default a "
+            "local preview answers to localhost, 127.0.0.1 and [::1] only, "
+            "which is what blocks DNS-rebinding pages"
         ),
     )
     run.add_argument(

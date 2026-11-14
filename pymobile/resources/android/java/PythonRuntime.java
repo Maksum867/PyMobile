@@ -63,6 +63,32 @@ public class PythonRuntime {
         }
     }
 
+    /** True while Python owns this process (the activity may be gone). */
+    static boolean isRunning() {
+        return state == State.RUNNING || pythonAlreadyRunning();
+    }
+
+    /**
+     * Tell Python that the window is going away, without stopping Python.
+     *
+     * The event loop receives a ``__lifecycle__``/``stop`` event: the app saves
+     * its state (``Screen.on_stop``) and stops handling input, while the
+     * interpreter — and with it every screen, job and timer — stays alive for
+     * the next Activity. A finished app does not come back, so the loop is
+     * stopped as well.
+     */
+    static void stopForRecreate() {
+        if (!isRunning()) {
+            return;
+        }
+        // dispatchEvent() is the one call every shipped libpymobile.so exposes
+        // (the bridge is prebuilt; new JNI functions would need an NDK and a
+        // rebuild). "" as the widget id is already how a back gesture and the
+        // wake ping travel, and the event loop dispatches "__lifecycle__"
+        // before any widget lookup, so no widget can be asked for "" .
+        Native.dispatchEvent("", "__lifecycle__", "stop");
+    }
+
     /** Extract assets if needed and run the entry point on the calling thread. */
     public static synchronized int run(Context context, String entrypoint) {
         if (state == State.RUNNING || pythonAlreadyRunning()) {

@@ -1,4 +1,3 @@
-
 """Developer conveniences: config schema, tab completion, interactive init, build check."""
 
 from __future__ import annotations

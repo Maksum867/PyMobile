@@ -71,6 +71,7 @@ class Dialog(Container):
 
     @title.setter
     def title(self, value: str) -> None:
+        """The heading shown at the top of the dialog."""
         if value != self._title:
             self._title = value
             self.invalidate()
@@ -98,6 +99,7 @@ class Dialog(Container):
         self.close()
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the title, the spacing and the sheet flag."""
         props = {**super().props(), "title": self._title, "sheet": self.sheet}
         if not props.get("spacing"):
             props.pop("spacing", None)
@@ -135,10 +137,12 @@ class AlertDialog(Dialog):
 
     @property
     def message(self) -> str:
+        """The message inside the alert."""
         return self._message_label.text
 
     @message.setter
     def message(self, value: str) -> None:
+        """The message inside the alert."""
         self._message_label.text = value
 
     def acknowledge(self) -> None:
@@ -156,6 +160,7 @@ class AlertDialog(Dialog):
             self.on_acknowledge()
 
     def dismiss(self) -> None:
+        """Close the alert as if the user had acknowledged it."""
         self.acknowledge()
 
 
@@ -204,10 +209,12 @@ class ConfirmDialog(Dialog):
 
     @property
     def message(self) -> str:
+        """The question the dialog asks."""
         return self._message_label.text
 
     @message.setter
     def message(self, value: str) -> None:
+        """The question the dialog asks."""
         self._message_label.text = value
 
     def confirm(self) -> None:
@@ -235,6 +242,7 @@ class ConfirmDialog(Dialog):
             self.on_cancel()
 
     def dismiss(self) -> None:
+        """Close the dialog as if the user had cancelled."""
         self.cancel()
 
 

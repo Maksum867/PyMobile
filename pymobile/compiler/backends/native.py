@@ -30,7 +30,8 @@ from ...core.config import ProjectConfig
 from ...errors import PyMobileError, ResourceError
 from ...log import get_logger
 from ...resources import resource_path
-from ..manifest import build_manifest
+from ..icon import round_icon_xml, write_adaptive_icon
+from ..manifest import build_manifest, network_security_config
 from ..packager import FIXED_TIMESTAMP
 from ..toolchain import Toolchain
 
@@ -169,6 +170,7 @@ def debug_keystore_path(package: str) -> Path:
     folder = Path(base).expanduser() if base else Path.home() / ".pymobile" / "keystores"
     return folder / f"{package}-debug.jks"
 
+
 #: Parts of the standard library that are never needed on a phone.
 #:
 #: ``config-*`` is matched by prefix rather than by name: the directory is
@@ -209,6 +211,26 @@ MINIMAL_STDLIB_EXCLUDES = (
     "pydoc.py",
     "this.py",
     "antigravity.py",
+    # An app on a phone has no terminal, no GUI toolkit and no use for the
+    # developer tooling around tkinter/idlelib. Shipping them was most of what
+    # made a minimal build only 0.5 MB smaller than a full one.
+    "tkinter",
+    "idlelib",
+    "turtledemo",
+    "ensurepip",
+    "lib2to3",
+    "asyncio",
+    "concurrent",
+    "multiprocessing",
+    "cgi.py",
+    "pipes.py",
+    "smtplib.py",
+    "ftplib.py",
+    "telnetlib.py",
+    "imaplib.py",
+    "poplib.py",
+    "nntplib.py",
+    "distutils",
 )
 
 #: Dropped by ``--no-ssl`` alongside the OpenSSL shared libraries.
@@ -281,6 +303,7 @@ def format_javac_failure(
     directory when the overlay is what failed), and the most common causes are
     named explicitly.
     """
+
     def relative(name: str) -> str:
         """Drop the scratch-directory prefix; a build path is noise to a user."""
         if root is None:
@@ -298,9 +321,7 @@ def format_javac_failure(
     errors = [line for line in diagnostics if ": error:" in line]
     count = len(errors)
     summary = (
-        f"javac reported {count} error{'s' if count != 1 else ''}"
-        if count
-        else "javac failed"
+        f"javac reported {count} error{'s' if count != 1 else ''}" if count else "javac failed"
     )
     shown = (errors or diagnostics)[:6]
     more = ""
@@ -384,10 +405,13 @@ class NativeBackend:
         key_alias: str | None = None,
         key_password: str | None = None,
         abi: str = "arm64-v8a",
+        debuggable: bool = False,
     ) -> None:
         self.config = config
         self.toolchain = toolchain
         self.python_runtime = python_runtime
+        #: ``android:debuggable="true"`` — ``build --native --debug`` only.
+        self.debuggable = debuggable
         self.app_name = _literal_app_name(config.entrypoint_path) or config.name
         #: True when the caller supplied a keystore path (release signing).
         self._release_keystore = keystore is not None
@@ -415,6 +439,9 @@ class NativeBackend:
         #: Assets that are generated rather than copied from a file:
         #: ``assets/pymobile.properties`` and the entry-point bootstrap.
         self._extra_assets: dict[str, bytes] = {}
+        #: Assets written by the last :meth:`collect_assets` call (read by the
+        #: ``--bundle`` stage).
+        self.last_assets: dict[str, Path] = {}
         #: Entry point as declared in pymobile.toml, and how it was packaged.
         self._entrypoint = "main.py"
         self._entrypoint_type = "py"
@@ -423,13 +450,28 @@ class NativeBackend:
         self._payload_digest = ""
 
     # -- 0. entry point ----------------------------------------------------
+    @property
+    def entrypoint_name(self) -> str:
+        """The entry point recorded for the launcher (see ``set_entrypoint``)."""
+        return self._entrypoint
+
+    @property
+    def entrypoint_type(self) -> str:
+        """``py`` or ``pyc``: how the entry point was packaged."""
+        return self._entrypoint_type
+
+    @property
+    def payload_digest(self) -> str:
+        """The payload digest the launcher compares to decide re-extraction."""
+        return self._payload_digest
+
     def set_payload_digest(self, digest: str) -> None:
         """Record the build fingerprint the launcher uses as an install stamp.
 
         ``PythonRuntime`` extracts its Python payload once per versionCode.
         ``edit → build → adb install -r`` keeps versionCode at 1, so the APK
         was replaced and the old application files stayed on disk behind a
-        successful reinstall (PM-29). The digest makes the stamp change
+        successful reinstall. The digest makes the stamp change
         whenever the packaged content does.
         """
         self._payload_digest = digest[:32]
@@ -659,8 +701,7 @@ else:
                 # the prefix keeps the stage name in the message.
                 raise PyMobileError(
                     f"could not compile the project Java overlay: {error}",
-                    hint=error.hint
-                    or "Check the Java sources in the project's java/ directory.",
+                    hint=error.hint or "Check the Java sources in the project's java/ directory.",
                 ) from error
             detail = f" {error.hint}" if error.hint else ""
             self.warnings.append(f"falling back to the prebuilt dex:{detail}")
@@ -745,23 +786,23 @@ else:
             _run(
                 [
                     self.toolchain.javac,
-                "-source",
-                "8",
-                "-target",
-                "8",
-                # Sources may contain non-ASCII UI strings; javac defaults to
-                # the platform encoding, which is often US-ASCII in containers.
-                "-encoding",
-                "UTF-8",
-                "-nowarn",
-                "-bootclasspath",
-                self.toolchain.platform_jar,
-                "-classpath",
-                self.toolchain.platform_jar,
-                "-d",
-                classes,
-                *sorted(src.rglob("*.java")),
-            ],
+                    "-source",
+                    "8",
+                    "-target",
+                    "8",
+                    # Sources may contain non-ASCII UI strings; javac defaults to
+                    # the platform encoding, which is often US-ASCII in containers.
+                    "-encoding",
+                    "UTF-8",
+                    "-nowarn",
+                    "-bootclasspath",
+                    self.toolchain.platform_jar,
+                    "-classpath",
+                    self.toolchain.platform_jar,
+                    "-d",
+                    classes,
+                    *sorted(src.rglob("*.java")),
+                ],
                 step="javac",
                 java_home=self.toolchain.java_home,
             )
@@ -773,9 +814,7 @@ else:
             summary, hint = format_javac_failure(
                 error.hint or str(error), overlay=is_overlay, root=src
             )
-            source = (
-                "the project's java/ overlay" if is_overlay else "the launcher sources"
-            )
+            source = "the project's java/ overlay" if is_overlay else "the launcher sources"
             raise PyMobileError(f"{summary} while compiling {source}", hint=hint) from error
 
         # Feed d8 a single jar rather than every .class path: it keeps the
@@ -811,11 +850,21 @@ else:
         """Compile resources and link the base APK with a binary manifest."""
         res = workdir / "res"
         for density, icon in icons.items():
-            target = res / f"mipmap-{density}" / "icon.png"
+            target = res / f"mipmap-{density}" / "ic_launcher.png"
             target.parent.mkdir(parents=True, exist_ok=True)
             # The icon stage may already have written straight into res/.
             if icon.resolve() != target.resolve():
                 shutil.copy2(icon, target)
+
+        # Adaptive icon (Android 8+): legacy squares alone are shrunk into a
+        # white tile by launchers that mask icons, and Android 13+ has nothing
+        # to tint without a monochrome layer.
+        source = next(iter(icons.values()), None)
+        if source is not None:
+            write_adaptive_icon(source, res)
+            anydpi = res / "mipmap-anydpi-v26"
+            anydpi.mkdir(parents=True, exist_ok=True)
+            (anydpi / "ic_launcher_round.xml").write_text(round_icon_xml(), encoding="utf-8")
 
         values = res / "values"
         values.mkdir(parents=True, exist_ok=True)
@@ -827,6 +876,13 @@ else:
             encoding="utf-8",
         )
 
+        if self.config.network_pins:
+            xml_dir = res / "xml"
+            xml_dir.mkdir(parents=True, exist_ok=True)
+            (xml_dir / "network_security_config.xml").write_text(
+                network_security_config(self.config.network_pins), encoding="utf-8"
+            )
+
         flat = workdir / "flat"
         flat.mkdir(parents=True, exist_ok=True)
         _run([self.toolchain.aapt2, "compile", "--dir", res, "-o", flat], step="aapt2 compile")
@@ -837,6 +893,7 @@ else:
                 self.config,
                 activity="org.pymobile.app.MainActivity",
                 app_name=self.app_name,
+                debuggable=self.debuggable,
             ),
             encoding="utf-8",
         )
@@ -881,7 +938,12 @@ else:
         return False
 
     def collect_assets(self, sources: list[tuple[str, Path]]) -> dict[str, Path]:
-        """Map archive paths to files for the stdlib and the application."""
+        """Map archive paths to files for the stdlib and the application.
+
+        The map is also kept on the backend (``last_assets``) because the
+        ``--bundle`` stage writes the same files into ``base/assets/`` and must
+        not walk the runtime a second time.
+        """
         assets: dict[str, Path] = {}
 
         stdlib = self.python_runtime / "lib" / "python3.14"
@@ -921,6 +983,9 @@ else:
         shim = self._entrypoint_shim(sources)
         if shim is not None:
             self._extra_assets["assets/app/main.py"] = shim
+        # The bundle stage writes exactly these files into base/assets/; keeping
+        # the map here avoids walking the stdlib a second time.
+        self.last_assets = dict(assets)
         return assets
 
     def _entrypoint_shim(self, sources: list[tuple[str, Path]]) -> bytes | None:
@@ -947,9 +1012,7 @@ else:
                 "will not be used until the launcher is rebuilt from its Java sources."
             )
             return None
-        _log.debug(
-            "adding a main.py bootstrap for the declared entry point %s", self._entrypoint
-        )
+        _log.debug("adding a main.py bootstrap for the declared entry point %s", self._entrypoint)
         return (
             self._LAUNCHER_SHIM
             % {
@@ -1004,13 +1067,19 @@ else:
                     data,
                 )
             archive.writestr(entry("classes.dex"), dex.read_bytes())
-            for library in sorted(native_dir.glob("*.so")):
+            # ``native_dir`` is either one ABI's directory (lib/<abi>/) or the
+            # shared lib/ root when the pipeline built more than one ABI; the
+            # archive path keeps the ABI component either way.
+            for library in sorted(native_dir.rglob("*.so")):
+                relative = library.relative_to(native_dir)
+                name = (
+                    f"lib/{relative.as_posix()}"
+                    if len(relative.parts) > 1
+                    else f"lib/{self.abi}/{library.name}"
+                )
                 # Native libraries must be stored uncompressed and page-aligned
                 # so Android can load them directly from the APK.
-                archive.writestr(
-                    entry(f"lib/{self.abi}/{library.name}", stored=True, mode=0o755),
-                    library.read_bytes(),
-                )
+                archive.writestr(entry(name, stored=True, mode=0o755), library.read_bytes())
             for name, path in sorted(assets.items()):
                 archive.writestr(entry(name), path.read_bytes())
             for name, payload in sorted(self._extra_assets.items()):
@@ -1274,8 +1343,10 @@ def _literal_app_name(entrypoint: Path) -> str | None:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        function = node.func.id if isinstance(node.func, ast.Name) else (
-            node.func.attr if isinstance(node.func, ast.Attribute) else ""
+        function = (
+            node.func.id
+            if isinstance(node.func, ast.Name)
+            else (node.func.attr if isinstance(node.func, ast.Attribute) else "")
         )
         if function != "App":
             continue

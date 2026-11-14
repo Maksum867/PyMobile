@@ -286,6 +286,7 @@ class Countdown(Label):
 
     @property
     def running(self) -> bool:
+        """Whether the countdown is still ticking."""
         return self._job is not None
 
     def start(self) -> None:
@@ -491,6 +492,7 @@ class SignaturePad(Widget):
         super().__init__(**kwargs)
 
     def props(self) -> WidgetProps:
+        """The serialised props: the strokes, their colour and width."""
         return {
             **super().props(),
             "height": self.pad_height,
@@ -507,6 +509,7 @@ class SignaturePad(Widget):
 
     @property
     def is_empty(self) -> bool:
+        """Whether the pad has no strokes yet."""
         return not self._strokes
 
     def clear(self) -> None:

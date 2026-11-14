@@ -163,9 +163,7 @@ def register_widget_type(
         raise ValueError("type_name must be a non-empty string")
     if type_name in widget_types():
         raise ValueError(f"{type_name!r} is a built-in widget type")
-    capability = WidgetCapability(
-        type_name, android=android, web=web, gui=gui, ascii=ascii
-    )
+    capability = WidgetCapability(type_name, android=android, web=web, gui=gui, ascii=ascii)
     _declared[type_name] = capability
     return capability
 
@@ -184,9 +182,7 @@ def supported_by(renderer: str) -> frozenset[str]:
         raise ValueError(f"unknown renderer: {renderer!r}")
     capabilities = (*WIDGET_CAPABILITIES, *_declared.values())
     return frozenset(
-        capability.type_name
-        for capability in capabilities
-        if bool(getattr(capability, renderer))
+        capability.type_name for capability in capabilities if bool(getattr(capability, renderer))
     )
 
 
@@ -289,8 +285,7 @@ def register_preview_renderer(
         raise ValueError("type_name must be a non-empty string")
     if renderer not in PREVIEW_RENDERERS:
         raise ValueError(
-            f"unknown preview renderer {renderer!r}; expected one of "
-            f"{', '.join(PREVIEW_RENDERERS)}"
+            f"unknown preview renderer {renderer!r}; expected one of {', '.join(PREVIEW_RENDERERS)}"
         )
     if not callable(draw):
         raise TypeError(
@@ -320,8 +315,7 @@ def preview_renderer(type_name: str, renderer: str) -> Callable[..., Any] | None
     """The function registered for ``type_name`` in ``renderer``, or ``None``."""
     if renderer not in PREVIEW_RENDERERS:
         raise ValueError(
-            f"unknown preview renderer {renderer!r}; expected one of "
-            f"{', '.join(PREVIEW_RENDERERS)}"
+            f"unknown preview renderer {renderer!r}; expected one of {', '.join(PREVIEW_RENDERERS)}"
         )
     return _preview.get((type_name, renderer))
 

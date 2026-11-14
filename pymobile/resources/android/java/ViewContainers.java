@@ -296,15 +296,15 @@ final class ViewContainers {
                 @Override
                 public android.view.WindowInsets onApplyWindowInsets(
                         View view, android.view.WindowInsets insets) {
+                    int left = owner.styles.insetLeft(insets);
+                    int top = owner.styles.insetTop(insets);
+                    int right = owner.styles.insetRight(insets);
+                    int bottom = owner.styles.insetBottom(insets);
                     view.setPadding(
-                            Math.max(minimum, props.optBoolean("left", true)
-                                    ? insets.getSystemWindowInsetLeft() : 0),
-                            Math.max(minimum, props.optBoolean("top", true)
-                                    ? insets.getSystemWindowInsetTop() : 0),
-                            Math.max(minimum, props.optBoolean("right", true)
-                                    ? insets.getSystemWindowInsetRight() : 0),
-                            Math.max(minimum, props.optBoolean("bottom", true)
-                                    ? insets.getSystemWindowInsetBottom() : 0));
+                            Math.max(minimum, props.optBoolean("left", true) ? left : 0),
+                            Math.max(minimum, props.optBoolean("top", true) ? top : 0),
+                            Math.max(minimum, props.optBoolean("right", true) ? right : 0),
+                            Math.max(minimum, props.optBoolean("bottom", true) ? bottom : 0));
                     return insets;
                 }
             });

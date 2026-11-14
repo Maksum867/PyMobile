@@ -94,10 +94,12 @@ class _Chart(Widget):
 
     @property
     def data(self) -> tuple[float, ...]:
+        """The plotted values, with the keys of a mapping turned into labels."""
         return self._data
 
     @data.setter
     def data(self, value: Data) -> None:
+        """The plotted values, with the keys of a mapping turned into labels."""
         labels = (
             None
             if isinstance(value, Mapping)
@@ -107,9 +109,11 @@ class _Chart(Widget):
 
     @property
     def labels(self) -> tuple[str, ...]:
+        """The label under each plotted value."""
         return self._labels
 
     def set_data(self, data: Data, *, labels: Sequence[str] | None = None) -> None:
+        """Plot ``data``, re-rendering the chart when anything changed."""
         values, names = self._validate(data, labels)
         if (values, names) != (self._data, self._labels):
             self._data, self._labels = values, names
@@ -268,6 +272,7 @@ class _Chart(Widget):
         return {"width": width, "height": height, "shapes": shapes}
 
     def props(self) -> dict[str, Any]:
+        """The serialised props: the values, their labels, the bars and the height."""
         if positive_int(self.height, "height") < 80:
             raise ValueError("chart height must be at least 80 dp")
         label = self.title or f"{self.chart_kind} chart"
@@ -284,6 +289,7 @@ class _Chart(Widget):
         }
 
     def to_dict(self) -> WidgetNode:
+        """The serialised chart, tall enough for its bars."""
         node = super().to_dict()
         node["style"] = {"height": self.height, **node.get("style", {})}
         return node

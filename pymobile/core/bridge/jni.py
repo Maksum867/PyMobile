@@ -82,6 +82,7 @@ class JNIBridge(Bridge):
         return self._activity.getApplicationContext()
 
     def is_available(self) -> bool:
+        """Whether the pyjnius bindings can be imported in this runtime."""
         try:
             import jnius  # type: ignore[import-not-found]  # noqa: F401
         except ImportError:
@@ -92,6 +93,7 @@ class JNIBridge(Bridge):
     def ensure_channel(  # pragma: no cover - device-only path
         self, channel_id: str, channel_name: str, importance: int = IMPORTANCE_DEFAULT
     ) -> None:
+        """Create the notification channel, which Android 8 and newer require."""
         build_version = self._autoclass("android.os.Build$VERSION")
         if build_version.SDK_INT < 26:  # channels landed in Oreo
             return
@@ -103,6 +105,7 @@ class JNIBridge(Bridge):
         manager.createNotificationChannel(channel)
 
     def notify(self, spec: NotificationSpec) -> None:  # pragma: no cover - device-only path
+        """Build and post the notification through the platform builder."""
         self.ensure_channel(spec.channel_id, spec.channel_name, IMPORTANCE_DEFAULT)
         builder_cls = self._autoclass("android.app.Notification$Builder")
         build_version = self._autoclass("android.os.Build$VERSION")
@@ -126,7 +129,11 @@ class JNIBridge(Bridge):
         """Resolve a drawable name to a resource id, falling back to the app icon."""
         resources = self._context.getResources()
         package = self._context.getPackageName()
-        for candidate, kind in ((name, "drawable"), ("icon", "mipmap"), ("icon", "drawable")):
+        for candidate, kind in (
+            (name, "drawable"),
+            ("ic_launcher", "mipmap"),
+            ("ic_launcher", "drawable"),
+        ):
             if not candidate:
                 continue
             found = resources.getIdentifier(candidate, kind, package)
@@ -135,6 +142,7 @@ class JNIBridge(Bridge):
         return int(self._autoclass("android.R$drawable").ic_dialog_info)
 
     def cancel_notification(self, notification_id: int) -> None:  # pragma: no cover
+        """Remove the notification with ``notification_id``."""
         manager = self._context.getSystemService(
             self._autoclass("android.content.Context").NOTIFICATION_SERVICE
         )
@@ -153,6 +161,7 @@ class JNIBridge(Bridge):
     def vibrate(  # pragma: no cover - device-only path
         self, milliseconds: int, amplitude: int = DEFAULT_AMPLITUDE
     ) -> None:
+        """Vibrate once for ``milliseconds`` at the given amplitude."""
         build_version = self._autoclass("android.os.Build$VERSION")
         if build_version.SDK_INT >= 26:
             effect_cls = self._autoclass("android.os.VibrationEffect")
@@ -163,6 +172,7 @@ class JNIBridge(Bridge):
     def vibrate_pattern(  # pragma: no cover - device-only path
         self, pattern: list[int], repeat: int = -1
     ) -> None:
+        """Vibrate in the given on/off pattern, repeating it ``repeat`` times."""
         build_version = self._autoclass("android.os.Build$VERSION")
         if build_version.SDK_INT >= 26:
             effect_cls = self._autoclass("android.os.VibrationEffect")
@@ -171,10 +181,12 @@ class JNIBridge(Bridge):
             self._vibrator.vibrate(pattern, repeat)
 
     def cancel_vibration(self) -> None:  # pragma: no cover - device-only path
+        """Stop any vibration in progress."""
         self._vibrator.cancel()
 
     # -- permissions -------------------------------------------------------
     def has_permission(self, permission: str) -> bool:  # pragma: no cover - device-only path
+        """Whether the runtime permission is currently granted."""
         package_manager = self._autoclass("android.content.pm.PackageManager")
         result = self._context.checkSelfPermission(permission)
         return int(result) == int(package_manager.PERMISSION_GRANTED)
@@ -252,9 +264,7 @@ class JNIBridge(Bridge):
         bridge = self
 
         class _PermissionListener(PythonJavaClass):  # type: ignore[misc]
-            __javainterfaces__: ClassVar[list[str]] = [
-                "org/pymobile/app/PermissionListener"
-            ]
+            __javainterfaces__: ClassVar[list[str]] = ["org/pymobile/app/PermissionListener"]
             __javacontext__: ClassVar[str] = "app"
 
             @java_method(  # type: ignore[untyped-decorator]
@@ -267,6 +277,7 @@ class JNIBridge(Bridge):
                 grant_results_j: Any,
                 _rationale_asked: bool,
             ) -> None:
+                """Collect the answers, finish the future and drop the listener."""
                 names = list(permissions_j) if permissions_j is not None else []
                 grants = list(grant_results_j) if grant_results_j is not None else []
                 # PackageManager.PERMISSION_GRANTED == 0; anything else is denied.
@@ -283,6 +294,7 @@ class JNIBridge(Bridge):
 
     # -- ui ----------------------------------------------------------------
     def toast(self, message: str, long: bool = False) -> None:  # pragma: no cover
+        """Show a short system message on the UI thread."""
         toast_cls = self._autoclass("android.widget.Toast")
         duration = toast_cls.LENGTH_LONG if long else toast_cls.LENGTH_SHORT
         self._run_on_ui(lambda: toast_cls.makeText(self._context, message, duration).show())
@@ -307,6 +319,7 @@ class JNIBridge(Bridge):
 
             @java_method("()V")  # type: ignore[untyped-decorator]
             def run(self) -> None:
+                """Run the posted action on the UI thread, then forget it."""
                 try:
                     action()
                 finally:
@@ -355,10 +368,12 @@ class PermissionFuture:
 
     @property
     def done(self) -> bool:
+        """Whether every requested permission has been answered."""
         return self._done.is_set()
 
     @property
     def result(self) -> dict[str, bool]:
+        """The answers as a permission-to-bool mapping, waiting for them if needed."""
         return dict(self._result)
 
     def wait(self, timeout: float | None = None) -> dict[str, bool]:

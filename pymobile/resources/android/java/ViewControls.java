@@ -543,9 +543,147 @@ final class ViewControls {
             return;
         }
         owner.imageSources.put(image, source);
-        image.setImageBitmap(loadLocalImage(source));
+        loadLocalImage(image, source);
     }
 
+    /**
+     * Decode an image off the UI thread, scaled to the view.
+     *
+     * ``decodeFile`` on the UI thread was the whole cost of showing a photo: a
+     * camera JPEG is 12–48 MP, which stalls a frame for hundreds of
+     * milliseconds and allocates the full bitmap (a 48 MP ARGB buffer is
+     * ~190 MB, so a big enough photo was an OutOfMemoryError, not a stutter).
+     * Now the decode happens on a worker thread with ``inSampleSize`` computed
+     * from the view's measured size.
+     */
+    void loadLocalImage(final ImageView image, final String source) {
+        final java.io.File file = resolveImageFile(source);
+        if (file == null) {
+            image.setImageBitmap(null);
+            return;
+        }
+        final int targetWidth = image.getWidth() > 0 ? image.getWidth() : owner.dp(320);
+        final int targetHeight = image.getHeight() > 0 ? image.getHeight() : owner.dp(320);
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final android.graphics.Bitmap bitmap =
+                        decodeScaled(file, targetWidth, targetHeight);
+                image.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        // The view may have been recycled for another source
+                        // while the decode was running.
+                        if (!source.equals(owner.imageSources.get(image))) {
+                            return;
+                        }
+                        if (bitmap == null) {
+                            android.util.Log.w("pymobile", "Image decode failed: " + source);
+                            image.setImageBitmap(null);
+                        } else {
+                            image.setImageBitmap(bitmap);
+                        }
+                    }
+                });
+            }
+        }, "pymobile-image").start();
+    }
+
+    /** Local file for a source, or null after logging why there is none. */
+    private java.io.File resolveImageFile(String source) {
+        try {
+            java.io.File file = new java.io.File(source);
+            if (!file.isAbsolute()) {
+                file = new java.io.File(owner.context.getFilesDir(), "pymobile/app/" + source);
+            }
+            if (file.exists()) {
+                return file;
+            }
+            if (source.startsWith("http://") || source.startsWith("https://")
+                    || source.startsWith("data:")) {
+                // The Python-side validator accepts http(s)/data sources, but
+                // this renderer only draws local files. Surface that instead of
+                // silently showing an empty view.
+                android.util.Log.w("pymobile", "Image source not supported on "
+                        + "device (only local files): "
+                        + source.substring(0, Math.min(source.length(), 64)));
+            } else {
+                android.util.Log.w("pymobile", "Image file not found: " + source);
+            }
+        } catch (RuntimeException error) {
+            android.util.Log.w("pymobile", "Image failed to load: " + source, error);
+        }
+        return null;
+    }
+
+    /** Decode at most ``targetWidth``×``targetHeight``, honouring EXIF rotation. */
+    android.graphics.Bitmap decodeScaled(java.io.File file, int targetWidth, int targetHeight) {
+        try {
+            android.graphics.BitmapFactory.Options bounds =
+                    new android.graphics.BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            android.graphics.BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                return null;
+            }
+            android.graphics.BitmapFactory.Options options =
+                    new android.graphics.BitmapFactory.Options();
+            options.inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight,
+                    targetWidth, targetHeight);
+            android.graphics.Bitmap bitmap =
+                    android.graphics.BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+            if (bitmap == null) {
+                return null;
+            }
+            return rotateForExif(file, bitmap);
+        } catch (RuntimeException error) {
+            android.util.Log.w("pymobile", "Image failed to load: " + file, error);
+            return null;
+        } catch (OutOfMemoryError error) {
+            // A photo that still does not fit: better an empty view than a crash.
+            android.util.Log.w("pymobile", "Image too large: " + file);
+            return null;
+        }
+    }
+
+    /** Power-of-two subsample that keeps the image at or above the view size. */
+    static int sampleSize(int width, int height, int targetWidth, int targetHeight) {
+        int sample = 1;
+        if (targetWidth <= 0 || targetHeight <= 0) {
+            return sample;
+        }
+        while (width / (sample * 2) >= targetWidth && height / (sample * 2) >= targetHeight) {
+            sample *= 2;
+        }
+        return sample;
+    }
+
+    /** Apply the camera's EXIF orientation; Android does not do it for you. */
+    private android.graphics.Bitmap rotateForExif(java.io.File file, android.graphics.Bitmap bitmap) {
+        try {
+            android.media.ExifInterface exif = new android.media.ExifInterface(file.getAbsolutePath());
+            int orientation = exif.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION,
+                    android.media.ExifInterface.ORIENTATION_NORMAL);
+            int degrees = orientation == android.media.ExifInterface.ORIENTATION_ROTATE_90 ? 90
+                    : orientation == android.media.ExifInterface.ORIENTATION_ROTATE_180 ? 180
+                    : orientation == android.media.ExifInterface.ORIENTATION_ROTATE_270 ? 270 : 0;
+            if (degrees == 0) {
+                return bitmap;
+            }
+            android.graphics.Matrix matrix = new android.graphics.Matrix();
+            matrix.postRotate(degrees);
+            android.graphics.Bitmap rotated = android.graphics.Bitmap.createBitmap(
+                    bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
+            if (rotated != bitmap) {
+                bitmap.recycle();
+            }
+            return rotated;
+        } catch (java.io.IOException error) {
+            return bitmap;  // no EXIF (a PNG, a screenshot): draw as is
+        }
+    }
+
+    /** Kept for callers that want the bitmap synchronously (tests, previews). */
     android.graphics.Bitmap loadLocalImage(String source) {
         try {
             java.io.File file = new java.io.File(source);
@@ -553,13 +691,7 @@ final class ViewControls {
                 file = new java.io.File(owner.context.getFilesDir(), "pymobile/app/" + source);
             }
             if (file.exists()) {
-                android.graphics.Bitmap bitmap =
-                        android.graphics.BitmapFactory.decodeFile(file.getAbsolutePath());
-                if (bitmap == null) {
-                    android.util.Log.w("pymobile", "Image decode failed: " + source);
-                } else {
-                    return bitmap;
-                }
+                return android.graphics.BitmapFactory.decodeFile(file.getAbsolutePath());
             } else if (source.startsWith("http://") || source.startsWith("https://")
                     || source.startsWith("data:")) {
                 // The Python-side validator accepts http(s)/data sources, but

@@ -170,9 +170,7 @@ def scan_custom_widgets(files: Iterable[Path]) -> CustomWidgets:
                 widgets.add(name)
                 changed = True
     types = {
-        type_name
-        for name, _, type_name in definitions
-        if name in widgets and type_name is not None
+        type_name for name, _, type_name in definitions if name in widgets and type_name is not None
     } - widget_types()
     return CustomWidgets(frozenset(types), frozenset(declared), frozenset(preview_only))
 
@@ -232,22 +230,74 @@ _PROP_KINDS = ("str", "int", "float", "bool", "list")
 #: Attributes every ``Widget`` already has; a prop of that name would clobber them.
 _WIDGET_RESERVED = frozenset(
     {
-        "id", "style", "visible", "enabled", "parent", "children", "screen",
-        "type_name", "props", "on_press",
+        "id",
+        "style",
+        "visible",
+        "enabled",
+        "parent",
+        "children",
+        "screen",
+        "type_name",
+        "props",
+        "on_press",
     }
 )
 #: Locals of ``build()`` / ``updateNode()`` a generated variable must not shadow.
-_RESERVED_LOCALS = frozenset(
-    {"id", "props", "view", "node", "type", "style", "context", "enabled"}
-)
+_RESERVED_LOCALS = frozenset({"id", "props", "view", "node", "type", "style", "context", "enabled"})
 _JAVA_KEYWORDS = frozenset(
     (
-        "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class",
-        "const", "continue", "default", "do", "double", "else", "enum", "extends", "final",
-        "finally", "float", "for", "goto", "if", "implements", "import", "instanceof", "int",
-        "interface", "long", "native", "new", "package", "private", "protected", "public",
-        "return", "short", "static", "strictfp", "super", "switch", "synchronized", "this",
-        "throw", "throws", "transient", "try", "void", "volatile", "while", "true", "false",
+        "abstract",
+        "assert",
+        "boolean",
+        "break",
+        "byte",
+        "case",
+        "catch",
+        "char",
+        "class",
+        "const",
+        "continue",
+        "default",
+        "do",
+        "double",
+        "else",
+        "enum",
+        "extends",
+        "final",
+        "finally",
+        "float",
+        "for",
+        "goto",
+        "if",
+        "implements",
+        "import",
+        "instanceof",
+        "int",
+        "interface",
+        "long",
+        "native",
+        "new",
+        "package",
+        "private",
+        "protected",
+        "public",
+        "return",
+        "short",
+        "static",
+        "strictfp",
+        "super",
+        "switch",
+        "synchronized",
+        "this",
+        "throw",
+        "throws",
+        "transient",
+        "try",
+        "void",
+        "volatile",
+        "while",
+        "true",
+        "false",
         "null",
     )
 )
@@ -468,8 +518,7 @@ def scaffold_widget_sources(type_name: str, props: Sequence[WidgetProp] = ()) ->
         "list": "list[object]",
     }
     parameters = ",\n        ".join(
-        f"{prop.name}: {annotations[prop.kind]} = {prop.default}"
-        for prop in fields
+        f"{prop.name}: {annotations[prop.kind]} = {prop.default}" for prop in fields
     )
     if parameters:
         signature = (
@@ -485,12 +534,14 @@ def scaffold_widget_sources(type_name: str, props: Sequence[WidgetProp] = ()) ->
             "        **kwargs: Any,"
         )
     assignments = "\n".join(
-        f"        self.{prop.name} = list({prop.name})" if prop.kind == "list"
+        f"        self.{prop.name} = list({prop.name})"
+        if prop.kind == "list"
         else f"        self.{prop.name} = {prop.name}"
         for prop in fields
     )
     entries = "\n".join(
-        f'            "{prop.name}": list(self.{prop.name}),' if prop.kind == "list"
+        f'            "{prop.name}": list(self.{prop.name}),'
+        if prop.kind == "list"
         else f'            "{prop.name}": self.{prop.name},'
         for prop in fields
     )
@@ -507,7 +558,7 @@ def scaffold_widget_sources(type_name: str, props: Sequence[WidgetProp] = ()) ->
         "        super().__init__(**kwargs)\n"
         f"{assignments + chr(10) if assignments else ''}"
         "        if on_press is not None and not callable(on_press):\n"
-        "            raise TypeError(\"on_press must be callable or None\")\n"
+        '            raise TypeError("on_press must be callable or None")\n'
         "        self.on_press = on_press\n\n"
         "    def props(self) -> dict[str, Any]:\n"
         "        return {\n"
@@ -525,18 +576,16 @@ def scaffold_widget_sources(type_name: str, props: Sequence[WidgetProp] = ()) ->
     for prop in fields:
         if prop.kind == "str":
             shown.append(
-                f'        if (!{prop.variable}.isEmpty()) '
+                f"        if (!{prop.variable}.isEmpty()) "
                 f'label.append("\\n{prop.name}=").append({prop.variable});'
             )
         elif prop.kind == "list":
             shown.append(
-                f'        if ({prop.variable} != null) '
+                f"        if ({prop.variable} != null) "
                 f'label.append("\\n{prop.name}=").append({prop.variable});'
             )
         else:
-            shown.append(
-                f'        label.append("\\n{prop.name}=").append({prop.variable});'
-            )
+            shown.append(f'        label.append("\\n{prop.name}=").append({prop.variable});')
     java = (
         "package org.pymobile.app.widgets;\n\n"
         "import android.content.Context;\n"
@@ -616,9 +665,7 @@ def python_only_widget_source(type_name: str, props: Sequence[WidgetProp] = ()) 
         f"        {prop.name}: {annotations[prop.kind]} = {prop.default},\n" for prop in props
     )
     helper_args = "".join(f", {name}" for name in names)
-    helper_params = "".join(
-        f",\n    {prop.name}: {annotations[prop.kind]}" for prop in props
-    )
+    helper_params = "".join(f",\n    {prop.name}: {annotations[prop.kind]}" for prop in props)
     needs_sequence = any(prop.kind == "list" for prop in props)
     shapes = "".join(
         f'        Shape("text", x=12, y={24 + 24 * index}, '

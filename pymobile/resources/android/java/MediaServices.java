@@ -267,7 +267,12 @@ final class MediaServices {
 
         Player(Context context, String source, boolean looping) {
             try {
-                player.setAudioStreamType(android.media.AudioManager.STREAM_MUSIC);
+                // setAudioStreamType() is deprecated from API 26; attributes
+                // carry the same information and are what newer releases read.
+                player.setAudioAttributes(new android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build());
                 if (source.startsWith("http://") || source.startsWith("https://")) {
                     player.setDataSource(source);
                 } else {

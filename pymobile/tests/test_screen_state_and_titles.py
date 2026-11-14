@@ -229,3 +229,26 @@ def test_to_dict_reports_the_freshly_translated_title(app: App) -> None:
     translations.use("uk")
     screen.refresh()  # drops the tree; the next to_dict() rebuilds it
     assert screen.to_dict()["screen"] == "Налаштування"
+
+
+def test_a_screen_without_super_init_explains_itself() -> None:
+    class Home(Screen):
+        def __init__(self) -> None:
+            pass  # the mistake: no super().__init__()
+
+    with pytest.raises(AttributeError) as caught:
+        Home().add(Label("hi"))
+    message = str(caught.value)
+    assert "Home.__init__() did not call super().__init__()" in message
+    assert "class Home(Screen)" in message  # the sample that fixes it
+
+
+def test_other_missing_attributes_are_not_disguised() -> None:
+    class Home(Screen):
+        def __init__(self) -> None:
+            super().__init__()
+
+    screen = Home()
+    with pytest.raises(AttributeError) as caught:
+        screen.nonexistent_thing
+    assert str(caught.value) == "nonexistent_thing"

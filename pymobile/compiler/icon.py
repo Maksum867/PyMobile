@@ -4,6 +4,10 @@ Rules:
 
 * a custom icon given in the config is validated and resized to every density;
 * when none is set, the packaged default Android-style icon is used;
+* an **adaptive** icon (``mipmap-anydpi-v26``: a background layer, a foreground
+  layer and a monochrome layer) is written next to the legacy squares, so
+  Android 8+ masks the icon to the launcher's shape instead of shrinking a
+  square into a white tile, and Android 13+ can tint the monochrome one;
 * Pillow is optional — without it a valid single-density icon is still emitted,
   so a build never fails just because an image library is missing.
 """
@@ -18,7 +22,7 @@ from ..errors import ResourceError
 from ..log import get_logger
 from ..resources import default_icon_path
 
-__all__ = ["IconSet", "prepare_icons", "DENSITIES"]
+__all__ = ["IconSet", "prepare_icons", "DENSITIES", "ADAPTIVE_DENSITIES", "write_adaptive_icon"]
 
 _log = get_logger("compiler.icon")
 
@@ -29,6 +33,17 @@ DENSITIES: dict[str, int] = {
     "xhdpi": 96,
     "xxhdpi": 144,
     "xxxhdpi": 192,
+}
+
+#: Edge length of each adaptive layer. The launcher shows the middle 72 of the
+#: 108 units and may mask it to any shape, so the artwork is drawn at that size
+#: and the safe zone keeps the visible part inside a circle of 66 units.
+ADAPTIVE_DENSITIES: dict[str, int] = {
+    "mdpi": 108,
+    "hdpi": 162,
+    "xhdpi": 216,
+    "xxhdpi": 324,
+    "xxxhdpi": 432,
 }
 
 _SUPPORTED_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -66,7 +81,7 @@ def _validate_source(icon: Path) -> None:
 
 
 def prepare_icons(icon: Path | None, output_dir: Path) -> IconSet:
-    """Write ``icon.png`` into ``mipmap-*`` folders under ``output_dir``.
+    """Write ``ic_launcher.png`` into ``mipmap-*`` folders under ``output_dir``.
 
     Falls back to the bundled default when ``icon`` is ``None``.
     """
@@ -101,7 +116,7 @@ def _resize_all(source: Path, output_dir: Path) -> dict[str, Path] | None:
         for density, size in DENSITIES.items():
             target_dir = output_dir / f"mipmap-{density}"
             target_dir.mkdir(parents=True, exist_ok=True)
-            target = target_dir / "icon.png"
+            target = target_dir / "ic_launcher.png"
             rgba.resize((size, size), resample).save(target, format="PNG", optimize=True)
             files[density] = target
     return files
@@ -113,7 +128,104 @@ def _copy_all(source: Path, output_dir: Path) -> dict[str, Path]:
     for density in DENSITIES:
         target_dir = output_dir / f"mipmap-{density}"
         target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / "icon.png"
+        target = target_dir / "ic_launcher.png"
         shutil.copyfile(source, target)
         files[density] = target
     return files
+
+
+def write_adaptive_icon(source: Path, res_dir: Path) -> list[Path]:
+    """Write an Android 8+ adaptive icon built from ``source``.
+
+    Three layers are produced per density:
+
+    * ``ic_launcher_background.png`` — ``source`` scaled to fill the canvas and
+      blurred, so a photo icon still reads as one colour behind the artwork;
+    * ``ic_launcher_foreground.png`` — ``source`` fitted inside the 66/108 safe
+      zone, so no launcher mask can clip it;
+    * ``ic_launcher_monochrome.png`` — the same shape in white on transparent,
+      which Android 13+ tints to the user's theme.
+
+    ``mipmap-anydpi-v26/ic_launcher.xml`` ties them together; the legacy
+    ``mipmap-<density>/icon.png`` files stay for Android 7, which ignores
+    ``-anydpi-v26``. Returns the files written, also when Pillow is missing
+    (then the foreground is a copy of ``source`` and the XML still works).
+    """
+    written: list[Path] = []
+    try:
+        from PIL import Image, ImageFilter
+    except ImportError:
+        Image = None  # type: ignore[assignment]
+
+    for density, size in ADAPTIVE_DENSITIES.items():
+        folder = res_dir / f"mipmap-{density}"
+        folder.mkdir(parents=True, exist_ok=True)
+        if Image is None:
+            for name in ("ic_launcher_background.png", "ic_launcher_foreground.png"):
+                target = folder / name
+                shutil.copyfile(source, target)
+                written.append(target)
+            continue
+
+        resample = getattr(Image, "Resampling", Image).LANCZOS
+        with Image.open(source) as opened:
+            rgba = opened.convert("RGBA")
+
+            background = rgba.resize((size, size), resample)
+            background = background.filter(ImageFilter.GaussianBlur(radius=size / 24))
+            background_path = folder / "ic_launcher_background.png"
+            background.convert("RGB").save(background_path, format="PNG", optimize=True)
+            written.append(background_path)
+
+            safe = round(size * 66 / 108)
+            foreground = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            scaled = rgba.copy()
+            scaled.thumbnail((safe, safe), resample)
+            foreground.alpha_composite(
+                scaled,
+                ((size - scaled.width) // 2, (size - scaled.height) // 2),
+            )
+            foreground_path = folder / "ic_launcher_foreground.png"
+            foreground.save(foreground_path, format="PNG", optimize=True)
+            written.append(foreground_path)
+
+            # A monochrome layer is an alpha mask: Android ignores its colours
+            # and tints whatever is opaque.
+            alpha = foreground.getchannel("A")
+            monochrome = Image.new("RGBA", (size, size), (255, 255, 255, 0))
+            monochrome.putalpha(alpha)
+            monochrome_path = folder / "ic_launcher_monochrome.png"
+            monochrome.save(monochrome_path, format="PNG", optimize=True)
+            written.append(monochrome_path)
+
+    anydpi = res_dir / "mipmap-anydpi-v26"
+    anydpi.mkdir(parents=True, exist_ok=True)
+    xml = anydpi / "ic_launcher.xml"
+    xml.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+        '    <background android:drawable="@mipmap/ic_launcher_background" />\n'
+        '    <foreground android:drawable="@mipmap/ic_launcher_foreground" />\n'
+        '    <monochrome android:drawable="@mipmap/ic_launcher_monochrome" />\n'
+        "</adaptive-icon>\n",
+        encoding="utf-8",
+    )
+    written.append(xml)
+    _log.debug("wrote %d adaptive icon layers", len(written))
+    return written
+
+
+def round_icon_xml() -> str:
+    """``mipmap-anydpi-v26/ic_launcher_round.xml`` — the same layers, round mask.
+
+    Launchers that ask for ``android:roundIcon`` fall back to nothing when the
+    resource is absent, so a round-masked launcher drew the square legacy icon.
+    """
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+        '    <background android:drawable="@mipmap/ic_launcher_background" />\n'
+        '    <foreground android:drawable="@mipmap/ic_launcher_foreground" />\n'
+        '    <monochrome android:drawable="@mipmap/ic_launcher_monochrome" />\n'
+        "</adaptive-icon>\n"
+    )

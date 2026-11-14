@@ -105,6 +105,7 @@ class _Pattern(Column):
                 child._parent = node
 
     def to_dict(self) -> WidgetNode:
+        """The serialised node, after closing any holes left by a removed child."""
         self._repair()
         node = super().to_dict()
         if not self.enabled:
@@ -151,6 +152,7 @@ class Card(_Pattern):
         super().__init__(*contents, style=resolved, **kwargs)
 
     def to_dict(self) -> WidgetNode:
+        """The serialised card, with its title, actions and corner radius."""
         node = super().to_dict()
         if self._theme_background and self.style.background is None:
             node.setdefault("style", {})["background"] = theme_color(self, "SURFACE")
@@ -244,25 +246,31 @@ class FormField(_Pattern):
 
     @property
     def value(self) -> str:
+        """The text the user has typed so far."""
         return self.input.value
 
     @value.setter
     def value(self, value: str) -> None:
+        """The text the user has typed so far."""
         self.input.value = value
 
     def set_value(self, value: str) -> None:
+        """Replace the field's text without running the change callbacks."""
         self.value = value
 
     @property
     def error(self) -> str:
+        """The error message shown under the field, or an empty string."""
         return self._error
 
     @property
     def dirty(self) -> bool:
+        """Whether the value differs from the one the field started with."""
         return self._dirty
 
     @property
     def touched(self) -> bool:
+        """Whether the user has edited the field at least once."""
         return self._touched
 
     def _sync(self) -> None:
@@ -274,6 +282,7 @@ class FormField(_Pattern):
         self._error_widget._visible = bool(self.error)
 
     def set_error(self, error: str | None) -> None:
+        """Show ``error`` under the field, or clear it when it is ``None``."""
         text = "" if error is None else str(error)
         if text != self._error:
             self._error = text
@@ -302,6 +311,7 @@ class FormField(_Pattern):
         return not errors
 
     def reset(self, value: str | None = None) -> None:
+        """Return the field to ``value`` (or the value it started with) and clear its flags."""
         text = self._initial if value is None else str(value)
         if self.input.max_length is not None:
             text = text[: self.input.max_length]
@@ -312,6 +322,7 @@ class FormField(_Pattern):
         self.invalidate()
 
     def to_dict(self) -> WidgetNode:
+        """The serialised field: its label, hint, control and current error."""
         self._sync()
         node = super().to_dict()
         for child in node.get("children", []):
@@ -367,10 +378,12 @@ class Form(_Pattern):
 
     @property
     def values(self) -> dict[str, str]:
+        """The current value of every field, keyed by field name."""
         return {field.name: field.value for field in self.fields}
 
     @property
     def errors(self) -> dict[str, str]:
+        """The current validation errors, keyed by field name."""
         return dict(self._errors)
 
     def set_errors(self, errors: Mapping[str, str]) -> None:
@@ -414,6 +427,7 @@ class Form(_Pattern):
             self.validate()
 
     def validate(self) -> bool:
+        """Run every rule and the form validator, show the errors it found, and report validity."""
         local_errors = self.validator.validate(self.values)
         errors = {**local_errors, **self._external_errors}
         with self._batch():
@@ -425,6 +439,7 @@ class Form(_Pattern):
         return not errors
 
     def submit(self) -> bool:
+        """Validate the form and, when it is valid, call ``on_submit`` with the values."""
         if not self.enabled or not self.validate():
             return False
         if self.on_submit is not None and not in_build_scope():
@@ -432,6 +447,7 @@ class Form(_Pattern):
         return True
 
     def reset(self, values: Mapping[str, str] | None = None) -> None:
+        """Clear every field and error, optionally writing ``values`` first."""
         if values is not None and set(values) - {field.name for field in self.fields}:
             raise ValueError("reset contains unknown field names")
         with self._batch():
@@ -444,6 +460,7 @@ class Form(_Pattern):
     def to_dict(self) -> WidgetNode:
         # Re-evaluate existing messages when the language changes, without
         # changing touched state or firing callbacks during rendering.
+        """The serialised form, including one child per field."""
         if self._errors or self._external_errors:
             local_errors = self.validator.validate(self.values)
             self._errors = {**local_errors, **self._external_errors}
@@ -494,10 +511,12 @@ class TabView(_Pattern):
 
     @property
     def value(self) -> str:
+        """The key of the tab that is currently open."""
         return self._value
 
     @value.setter
     def value(self, value: str) -> None:
+        """The key of the tab that is currently open."""
         self.select(value)
 
     def _update_labels(self, labels: Mapping[str, str]) -> None:
@@ -506,6 +525,7 @@ class TabView(_Pattern):
         self._labels.update({key: str(label) for key, label in labels.items()})
 
     def set_labels(self, labels: Mapping[str, str]) -> None:
+        """Rename the tabs; every key in ``labels`` must already be a tab."""
         self._update_labels(labels)
         self._rebuild()
 
@@ -538,6 +558,7 @@ class TabView(_Pattern):
         self._replace((header, page), notify=notify)
 
     def select(self, key: str) -> None:
+        """Open the tab called ``key`` and notify ``on_select``."""
         if key not in self._tabs:
             raise ValueError(f"unknown tab key {key!r}")
         if key == self._value:
@@ -551,6 +572,7 @@ class TabView(_Pattern):
             self.on_select(key)
 
     def set_value(self, value: str) -> None:
+        """Open the tab called ``value`` (the bridge's name for :meth:`select`)."""
         self.select(value)
 
     def _ui_set_value(self, value: str) -> None:
@@ -559,6 +581,7 @@ class TabView(_Pattern):
 
     def to_dict(self) -> WidgetNode:
         # Recolor kept tab headers without recreating the content/state.
+        """The serialised tab view: the label row, then the open page."""
         header = self.children[0]
         for button, key in zip(header.children[0].children, self._tabs, strict=True):
             object.__setattr__(
@@ -612,10 +635,12 @@ class ExpansionPanel(_Pattern):
 
     @property
     def expanded(self) -> bool:
+        """Whether the panel is open."""
         return self._expanded
 
     @expanded.setter
     def expanded(self, value: bool) -> None:
+        """Whether the panel is open."""
         self.set_expanded(value)
 
     def _sync(self) -> None:
@@ -623,6 +648,7 @@ class ExpansionPanel(_Pattern):
         self._content._visible = self.expanded
 
     def set_expanded(self, value: bool, *, notify: bool = True) -> None:
+        """Open or close the panel, rebuilding it and notifying ``on_toggle``."""
         if not isinstance(value, bool):
             raise TypeError("expanded must be a bool")
         if value != self._expanded:
@@ -633,10 +659,12 @@ class ExpansionPanel(_Pattern):
                 self.on_toggle(value)
 
     def toggle(self) -> None:
+        """Flip the panel between open and closed."""
         if self.enabled:
             self.set_expanded(not self.expanded)
 
     def to_dict(self) -> WidgetNode:
+        """The serialised panel, with its title updated to the open state."""
         self._sync()
         return super().to_dict()
 
@@ -673,6 +701,7 @@ class Accordion(_Pattern):
 
     @property
     def expanded(self) -> tuple[str, ...]:
+        """The ids of the panels that are currently open."""
         return tuple(panel.id for panel in self.panels if panel.expanded)
 
     def _panel_changed(
@@ -744,6 +773,7 @@ class Skeleton(_Pattern):
         super().__init__(*children, **kwargs)
 
     def to_dict(self) -> WidgetNode:
+        """The serialised placeholder, with one bar per line."""
         node = super().to_dict()
         screen = self.screen
         dark = screen is not None and screen.mounted and screen.app.theme.is_dark
@@ -804,13 +834,16 @@ class MultiSelect(_Pattern):
 
     @property
     def value(self) -> tuple[str, ...]:
+        """The keys of the options that are selected, in selection order."""
         return self._value
 
     @value.setter
     def value(self, value: Sequence[str]) -> None:
+        """The keys of the options that are selected, in selection order."""
         self.set_value(value)
 
     def set_value(self, value: Sequence[str]) -> None:
+        """Select the options named in ``value`` and notify ``on_change``."""
         new = self._normalise(value)
         if new != self._value:
             self._value = new
@@ -821,6 +854,7 @@ class MultiSelect(_Pattern):
                 self.on_change(new)
 
     def toggle(self, key: str) -> None:
+        """Select the option ``key`` if it is not selected, otherwise deselect it."""
         if not self.enabled:
             return
         if key not in self._options:
@@ -835,9 +869,11 @@ class MultiSelect(_Pattern):
         self.set_value(tuple(selected))
 
     def clear_selection(self) -> None:
+        """Deselect every option."""
         self.set_value(())
 
     def set_labels(self, labels: Mapping[str, str]) -> None:
+        """Rename the options; every key in ``labels`` must already be an option."""
         if set(labels) - set(self._options):
             raise ValueError("labels contains unknown option keys")
         with self._batch():
@@ -932,17 +968,21 @@ class Calendar(_Pattern):
 
     @property
     def value(self) -> str:
+        """The selected date as ``YYYY-MM-DD``, or an empty string."""
         return self._value
 
     @value.setter
     def value(self, value: str) -> None:
+        """The selected date as ``YYYY-MM-DD``, or an empty string."""
         self.set_value(value)
 
     @property
     def month(self) -> str:
+        """The month on screen as ``YYYY-MM``."""
         return self._month.isoformat()[:7]
 
     def is_disabled(self, date: _dt.date) -> bool:
+        """Whether ``date`` falls on a disabled day or outside the allowed range."""
         return bool(
             (self.minimum and date < self.minimum)
             or (self.maximum and date > self.maximum)
@@ -950,6 +990,7 @@ class Calendar(_Pattern):
         )
 
     def set_value(self, value: str) -> None:
+        """Select an ISO date, refresh the grid and notify ``on_change``."""
         if value:
             parsed = _iso(value)
             if self.is_disabled(parsed):
@@ -969,6 +1010,7 @@ class Calendar(_Pattern):
                 self.on_select(value)
 
     def show_month(self, year: int, month: int) -> None:
+        """Scroll the grid to the given month without changing the selection."""
         if isinstance(year, bool) or isinstance(month, bool):
             raise TypeError("year and month must be ints")
         new = _dt.date(year, month, 1)
@@ -1062,6 +1104,7 @@ class Calendar(_Pattern):
 
     def to_dict(self) -> WidgetNode:
         # Fresh locale/theme descriptions, stable explicit ids and unchanged state.
+        """The serialised calendar, rebuilt for the month on screen."""
         self._rebuild(notify=False)
         return super().to_dict()
 
@@ -1145,14 +1188,17 @@ class DateRangePicker(_Pattern):
 
     @property
     def value(self) -> tuple[str, str]:
+        """The chosen range: one ISO date, or two when both ends are picked."""
         return self._value
 
     @value.setter
     def value(self, value: Sequence[str]) -> None:
+        """The chosen range: one ISO date, or two when both ends are picked."""
         self.set_value(value)
 
     @property
     def complete(self) -> bool:
+        """Whether both ends of the range have been chosen."""
         return bool(self._value[0] and self._value[1])
 
     def _sync(self) -> None:
@@ -1165,6 +1211,7 @@ class DateRangePicker(_Pattern):
         self.calendar._rebuild(notify=False)
 
     def set_value(self, value: Sequence[str]) -> None:
+        """Set the range, refresh the calendar and notify ``on_change``."""
         new = self._normalise(value)
         if new != self._value:
             self._value = new
@@ -1174,6 +1221,7 @@ class DateRangePicker(_Pattern):
                 self.on_change(new)
 
     def select_date(self, value: str) -> None:
+        """Add an ISO date to the range, which closes it once it has two ends."""
         if not self.enabled:
             return
         _iso(value)
@@ -1189,9 +1237,11 @@ class DateRangePicker(_Pattern):
             raise
 
     def clear_selection(self) -> None:
+        """Forget both ends of the range."""
         self.set_value(("", ""))
 
     def to_dict(self) -> WidgetNode:
+        """The serialised picker, with the chosen ends marked in the grid."""
         self._summary._text = (
             f"{self.value[0]} — {self.value[1] or '…'}" if self.value[0] else self.empty_text
         )
@@ -1244,13 +1294,16 @@ class Carousel(_Pattern):
 
     @property
     def value(self) -> int:
+        """The index of the slide on screen."""
         return self.pager.value
 
     @value.setter
     def value(self, value: int) -> None:
+        """The index of the slide on screen."""
         self.pager.select(value)
 
     def set_value(self, value: int) -> None:
+        """Show the slide at ``value``, clamped to the slides that exist."""
         self.value = value
 
     def _sync(self) -> None:
@@ -1265,14 +1318,17 @@ class Carousel(_Pattern):
             self.on_select(value)
 
     def next(self) -> None:
+        """Move to the next slide, wrapping around at the end."""
         if self.enabled:
             self.pager.next()
 
     def previous(self) -> None:
+        """Move to the previous slide, wrapping around at the start."""
         if self.enabled:
             self.pager.previous()
 
     def to_dict(self) -> WidgetNode:
+        """The serialised carousel, showing the current slide."""
         self._sync()
         return super().to_dict()
 
@@ -1495,10 +1551,12 @@ class Pagination(_Pattern):
             self.on_change(page)
 
     def next(self) -> None:
+        """Go to the next page, if there is one."""
         if self.enabled and self.current < self.total_pages:
             self.select(self.current + 1)
 
     def previous(self) -> None:
+        """Go to the previous page, if there is one."""
         if self.enabled and self.current > 1:
             self.select(self.current - 1)
 
