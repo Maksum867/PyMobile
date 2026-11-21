@@ -3,6 +3,20 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.15.1] — 2026-11-21
+
+### Added
+
+- Locale-aware `format_bytes`, `format_relative_time` and `format_list` helpers,
+  with matching translation format specifiers.
+- `Value.debounce()` and `Value.throttle()` for rate-limited updates.
+
+### Fixed
+
+- Generate adaptive launcher icons from the original image rather than a
+  low-resolution icon, and prevent black corners behind transparent artwork.
+- Correct the beginner guide example to bind a `Value`, not a `Label`.
+
 ## [0.15.0] — 2026-11-14
 
 ### Added

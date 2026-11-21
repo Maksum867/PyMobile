@@ -89,7 +89,7 @@ def write_bundle_config(*, version_code: int = 1) -> bytes:
     the manifest — and is accepted so a caller cannot silently drop it.
     """
     del version_code  # the manifest carries it; kept for a stable signature
-    bundletool = _field_bytes(1, _field_bytes(1, b"1.18.1")) + _field_bytes(2, b"0.15.0")
+    bundletool = _field_bytes(1, _field_bytes(1, b"1.18.1")) + _field_bytes(2, b"0.15.1")
     compression = b"".join(
         _field_bytes(1, suffix.encode("ascii")) for suffix in COMPRESSION_SUFFIXES
     )

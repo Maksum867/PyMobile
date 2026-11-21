@@ -28,11 +28,14 @@ from pymobile import (
     TextInput,
     WidgetNotFoundError,
     WidgetTypeError,
+    format_bytes,
     format_currency,
     format_date,
     format_datetime,
+    format_list,
     format_number,
     format_percent,
+    format_relative_time,
     format_time,
 )
 from pymobile.core.bridge.stub import StubBridge
@@ -166,6 +169,81 @@ def test_a_bad_specifier_does_not_crash_the_screen() -> None:
     catalog.load({"due": "до {day:date}"}, language="en")
     catalog.use("en")
     assert catalog.get("due", day=5) == "до {day:date}"
+
+
+def test_format_bytes_uses_the_language_units() -> None:
+    assert format_bytes(1536, language="en") == "1.5 KB"
+    assert format_bytes(999, language="uk") == "999 Б"
+    assert format_bytes(2_621_440, language="uk") == "2,6 МБ"
+    assert format_bytes(1_073_741_824, language="de") == "1,1 GB"
+    assert format_bytes(0) == "0 B"
+    assert format_bytes(-1536) == "-1.5 KB"
+
+
+def test_format_bytes_binary_uses_the_iec_units() -> None:
+    assert format_bytes(1024, binary=True) == "1.0 KiB"
+    assert format_bytes(1024 * 1024, binary=True, language="uk") == "1,0 МіБ"
+    assert format_bytes(1536, decimals=2) == "1.54 KB"
+
+
+def test_format_relative_time_picks_the_plural_form() -> None:
+    now = datetime(2026, 11, 21, 10, 5)
+    assert (
+        format_relative_time(datetime(2026, 11, 21, 10, 0), now=now, language="uk")
+        == "5 хвилин тому"
+    )
+    assert (
+        format_relative_time(datetime(2026, 11, 21, 9, 58), now=now, language="uk")
+        == "7 хвилин тому"
+    )
+    assert (
+        format_relative_time(datetime(2026, 11, 21, 8, 5), now=now, language="uk")
+        == "2 години тому"
+    )
+    assert (
+        format_relative_time(datetime(2026, 11, 21, 8, 0), now=now, language="uk")
+        == "2 години тому"
+    )
+    assert (
+        format_relative_time(datetime(2026, 11, 21, 8, 5), now=now, language="uk")
+        == "2 години тому"
+    )
+    assert (
+        format_relative_time(datetime(2026, 11, 20, 10, 5), now=now, language="uk") == "1 день тому"
+    )
+    assert (
+        format_relative_time(datetime(2026, 11, 21, 10, 5, 30), now=now, language="uk")
+        == "через 1 хвилина"
+    )
+    assert format_relative_time(datetime(2026, 11, 21, 10, 0), now=now) == "5 minutes ago"
+    assert format_relative_time(datetime(2026, 11, 21, 10, 8), now=now) == "in 3 minutes"
+    assert format_relative_time(300, now=now, language="uk") == "5 хвилин тому"
+
+
+def test_format_relative_time_accepts_iso_strings_and_rejects_bad_input() -> None:
+    now = datetime(2026, 11, 21, 10, 5)
+    assert format_relative_time("2026-11-21T10:00:00", now=now) == "5 minutes ago"
+    with pytest.raises(ValueError):
+        format_relative_time("не дата", now=now)
+
+
+def test_format_list_joins_with_the_language_conjunction() -> None:
+    assert format_list(["a", "b", "c"]) == "a, b, and c"
+    assert format_list(["a", "b", "c"], language="uk") == "a, b, та c"
+    assert format_list(["a", "b"], language="de") == "a, und b"
+    assert format_list(["a"]) == "a"
+    assert format_list([]) == ""
+
+
+def test_the_new_specifiers_work_in_catalogues() -> None:
+    catalog = Translations()
+    catalog.load(
+        {"size": "{n:bytes}", "seen": "{t:relative}", "names": "{items:list}"}, language="uk"
+    )
+    catalog.use("uk")
+    assert catalog.get("size", n=1536) == "1,5 КБ"
+    assert catalog.get("names", items=["a", "b", "c"]) == "a, b, та c"
+    assert catalog.get("seen", t=300) == "5 хвилин тому"
 
 
 # --------------------------------------------------------------------------

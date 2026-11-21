@@ -6,6 +6,8 @@ label has to change when the value does.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from pymobile import App, Button, Column, Computed, Label, Screen, TextInput, Value, Widget
@@ -108,3 +110,79 @@ class TestReactiveValues:
         holder["value"] = computed
         # A genuine cycle reads its own previous value rather than recursing.
         assert computed.value == 1
+
+
+class TestRateLimitedValues:
+    """Value.debounce() / Value.throttle(): a search box per keystroke is a bug."""
+
+    def _app(self) -> App:
+        app = App("Rate limited", bridge=StubBridge(verbose=False))
+        app.run(Label(""))
+        return app
+
+    def test_debounce_publishes_only_the_last_of_a_burst(self) -> None:
+        app = self._app()
+        try:
+            query: Value[str] = Value("")
+            seen: list[str] = []
+            query.debounce(40).subscribe(seen.append)
+            query.value = "p"
+            query.value = "py"
+            query.value = "pym"
+            assert seen == []  # nothing published while the typing continues
+            time.sleep(0.2)
+            assert seen == ["pym"]
+        finally:
+            app.stop()
+
+    def test_debounce_follows_a_single_change(self) -> None:
+        app = self._app()
+        try:
+            query: Value[str] = Value("a")
+            seen: list[str] = []
+            query.debounce(30).subscribe(seen.append)
+            query.value = "ab"
+            time.sleep(0.15)
+            assert seen == ["ab"]
+        finally:
+            app.stop()
+
+    def test_throttle_publishes_the_first_change_immediately(self) -> None:
+        app = self._app()
+        try:
+            zoom: Value[int] = Value(1)
+            seen: list[int] = []
+            zoom.throttle(60).subscribe(seen.append)
+            zoom.value = 2
+            assert seen == [2]
+            zoom.value = 3
+            zoom.value = 4
+            assert seen == [2]  # still inside the interval
+            time.sleep(0.2)
+            zoom.value = 5
+            assert seen == [2, 5]
+        finally:
+            app.stop()
+
+    def test_the_limited_value_starts_with_the_current_content(self) -> None:
+        app = self._app()
+        try:
+            query: Value[str] = Value("seed")
+            assert query.debounce(20).value == "seed"
+            assert query.throttle(20).value == "seed"
+        finally:
+            app.stop()
+
+    def test_the_helpers_validate_their_arguments(self) -> None:
+        query: Value[str] = Value("")
+        with pytest.raises(ValueError, match=">= 0"):
+            query.debounce(-1)
+        with pytest.raises(TypeError, match="number of milliseconds"):
+            query.throttle("soon")  # type: ignore[arg-type]
+
+    def test_without_a_running_app_the_limit_does_not_hide_changes(self) -> None:
+        query: Value[str] = Value("")
+        seen: list[str] = []
+        query.debounce(50).subscribe(seen.append)
+        query.value = "typed"
+        assert seen == ["typed"]

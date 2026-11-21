@@ -772,7 +772,9 @@ class BuildPipeline:
 
     def _icons(self, workdir: Path) -> IconSet:
         """Generate launcher icons (custom or default)."""
-        return prepare_icons(self.config.icon_path, workdir / "res")
+        icons = prepare_icons(self.config.icon_path, workdir / "res")
+        self.warnings.extend(icons.warnings)
+        return icons
 
     def _manifest(self) -> str:
         """Render AndroidManifest.xml."""
@@ -1016,7 +1018,7 @@ class BuildPipeline:
         native_dir = self._stage("jni", lambda: self._compile_native_libraries(backend, workdir))
         dex = self._stage("dex", lambda: backend.compile_java(workdir))
         self._verify_renderers(dex)
-        base = self._stage("resources", lambda: backend.link_resources(workdir, icons.files))
+        base = self._stage("resources", lambda: backend.link_resources(workdir, icons))
         assets = self._stage("assets", lambda: backend.collect_assets(entries))
         signed = self._stage(
             "sign",

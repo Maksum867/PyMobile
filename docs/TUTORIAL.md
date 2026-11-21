@@ -14,7 +14,7 @@ and it runs.
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install pymobile
-python -m pymobile --version     # 0.15.0
+python -m pymobile --version     # 0.15.1
 ```
 
 Nothing else, for now. The SDK comes in step 6; the desktop preview runs without

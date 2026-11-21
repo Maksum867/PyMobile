@@ -30,7 +30,7 @@ Write a declarative UI, run one command, install the APK on your phone.
 > open.
 >
 > Good fit for personal apps, internal tools, prototypes and learning. If you
-> depend on it, pin an exact version (`pymobile-framework==0.15.0`) and read the
+> depend on it, pin an exact version (`pymobile-framework==0.15.1`) and read the
 > changelog before upgrading. What may change, and how much notice you get, is
 > written down in the
 > [versioning and deprecation policy](#versioning-and-deprecation-policy). Bug
@@ -1761,6 +1761,56 @@ def on_data_loaded(self) -> None:
 `App("Demo", auto_render=False)` restores the old manual behaviour; in that
 mode the first missed redraw logs a warning rather than leaving you guessing.
 
+### Observable state: `Value` and `Computed`
+
+A screen that keeps its state in fields rebuilds itself for every change. A
+`Value` holds the state and tells whoever is interested, so one label updates
+without a `refresh()`:
+
+```python
+from pymobile import Computed, Value
+
+class Counter(Screen):
+    def __init__(self) -> None:
+        super().__init__()
+        self.taps = Value(0)
+        self.label = Label("0")
+        self.taps.bind(self.label, "text", transform=lambda n: f"Taps: {n}")
+
+    def build(self) -> Widget:
+        return Column(self.label, Button("+1", on_press=self.increment))
+
+    def increment(self) -> None:
+        self.taps.value += 1          # the label redraws itself
+```
+
+`Value` is a box around a value: `.value` reads and writes, `+= 1` works,
+`bind(widget, "text")` pushes every change into a widget, and `subscribe(fn)`
+calls `fn(value)` on each one. Assigning the value it already holds notifies
+nobody. `bind_get(widget, "value")` is the other direction — a field the user
+types into becomes the value, so a `TextInput` can drive a query without a
+callback of its own.
+
+`Computed(lambda: ...)` derives a value from others and recomputes whenever
+one of them changes; reading a `Value` inside the function is what links them.
+`Computed.map(fn)` is a second derived value, and `.bind()` writes either kind
+into a widget.
+
+A field that changes often — a search box — should not ask for work on every
+keystroke. `debounce` waits for the typing to stop; `throttle` publishes at
+most once per interval and reports the first change immediately:
+
+```python
+self.query = Value("")
+self.query.debounce(300).subscribe(self.search)     # one request, after the pause
+self.zoom.throttle(100).bind(self.label, "text", transform=str)
+```
+
+The limited value starts out holding the source's current content and follows
+it from then on; the timers come from the application, so `app.stop()` clears
+them. Without a running application the limit does not hide changes — the
+value follows immediately, which keeps a unit test and a script working.
+
 ---
 
 ## Threads and the UI
@@ -2862,11 +2912,42 @@ translator decides the wording and the code passes raw values:
 t("total", sum=1250, day=date(2026, 10, 1))   # Total: $1,250.00, due October 1, 2026
 ```
 
+Three more helpers cover the strings a phone app writes almost as often —
+a file size, "5 minutes ago", and a list of names:
+
+```python
+from datetime import datetime, timedelta
+from pymobile import format_bytes, format_list, format_relative_time
+
+format_bytes(1536)                     # "1.5 KB"      Ukrainian: "1,5 KB-units"
+format_bytes(1024, binary=True)        # "1.0 KiB"     IEC units, 1024 per step
+format_relative_time(datetime.now() - timedelta(minutes=5), language="uk")
+                                       # "5 minutes ago", in Ukrainian
+format_relative_time(datetime.now() + timedelta(minutes=3), language="uk")
+                                       # "in 3 minutes", in Ukrainian
+format_list(["Kyiv", "Lviv", "Odesa"], language="uk")   # joined with the Ukrainian "and"
+format_list(["a", "b", "c"])           # "a, b, and c"
+```
+
+The examples above are the English output; the same calls with
+`language="uk"` spell the units, the plural forms and the conjunction in
+Ukrainian (the "ago"/"in" words included), and every other language in the
+table does the same for itself.
+
+`format_relative_time` takes a `datetime`, an ISO-8601 string or a number of
+seconds, and reads "ago" for the past and "in …" for the future; the unit and
+its plural form follow the language (Ukrainian distinguishes 1 / 2 / 5 of an
+hour). `format_bytes` shows the amount in the unit that keeps it under a
+thousand, `binary=True` switches to the IEC names, and `format_list` joins
+with the language's own conjunction. All three are locale-aware: the
+separator, the unit names and the conjunction come from the language, not
+from a setting you have to pass.
+
 Specifiers: `number`, `number:2`, `percent`, `percent:1`, `currency:EUR`,
 `date`, `date:long` (`short`/`medium`/`long`/`full`), `time`, `time:medium`,
-`datetime`. Anything else is Python's own format spec (`{x:.2f}`). A value
-that does not fit its specifier is logged and the text is shown unformatted
-rather than crashing the screen.
+`datetime`, `bytes`, `relative`, `list`. Anything else is Python's own format
+spec (`{x:.2f}`). A value that does not fit its specifier is logged and the
+text is shown unformatted rather than crashing the screen.
 
 ---
 
@@ -3521,7 +3602,7 @@ close the window.
 from pymobile import get_diagnostics
 
 info = get_diagnostics()
-# {"framework_version": "0.15.0", "platform": "android",
+# {"framework_version": "0.15.1", "platform": "android",
 #  "python": "3.14.0", "log_level": "debug", "handlers": [...]}
 ```
 

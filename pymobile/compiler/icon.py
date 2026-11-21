@@ -15,7 +15,7 @@ Rules:
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..errors import ResourceError
@@ -46,6 +46,10 @@ ADAPTIVE_DENSITIES: dict[str, int] = {
     "xxxhdpi": 432,
 }
 
+#: Edge of the largest adaptive layer. A source icon smaller than this is
+#: upscaled to draw the layers, which looks soft on high-density screens.
+LARGEST_LAYER_EDGE = max(ADAPTIVE_DENSITIES.values())
+
 _SUPPORTED_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
 
@@ -56,6 +60,9 @@ class IconSet:
     source: Path
     is_default: bool
     files: dict[str, Path]
+    #: Non-fatal problems worth surfacing to the user, e.g. a source smaller
+    #: than the largest adaptive layer.
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def densities(self) -> list[str]:
@@ -95,8 +102,25 @@ def prepare_icons(icon: Path | None, output_dir: Path) -> IconSet:
         resized = _copy_all(source, output_dir)
         _log.debug("Pillow unavailable: icon copied without resizing")
 
+    warnings = _source_warnings(source)
     _log.debug("prepared %d icon densities (default=%s)", len(resized), is_default)
-    return IconSet(source=source, is_default=is_default, files=resized)
+    return IconSet(source=source, is_default=is_default, files=resized, warnings=warnings)
+
+
+def _source_warnings(source: Path) -> list[str]:
+    """Warn when the source cannot fill the largest adaptive layer sharply."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return []
+    with Image.open(source) as image:
+        width, height = image.size
+    if min(width, height) >= LARGEST_LAYER_EDGE:
+        return []
+    return [
+        f"icon source is {width}x{height}; the largest adaptive layer is "
+        f"{LARGEST_LAYER_EDGE}x{LARGEST_LAYER_EDGE}, so it is upscaled and may look soft"
+    ]
 
 
 def _resize_all(source: Path, output_dir: Path) -> dict[str, Path] | None:
@@ -141,6 +165,8 @@ def write_adaptive_icon(source: Path, res_dir: Path) -> list[Path]:
 
     * ``ic_launcher_background.png`` — ``source`` scaled to fill the canvas and
       blurred, so a photo icon still reads as one colour behind the artwork;
+      transparent areas are filled with the artwork's mean colour so a square
+      mask never shows black corners;
     * ``ic_launcher_foreground.png`` — ``source`` fitted inside the 66/108 safe
       zone, so no launcher mask can clip it;
     * ``ic_launcher_monochrome.png`` — the same shape in white on transparent,
@@ -153,9 +179,10 @@ def write_adaptive_icon(source: Path, res_dir: Path) -> list[Path]:
     """
     written: list[Path] = []
     try:
-        from PIL import Image, ImageFilter
+        from PIL import Image, ImageFilter, ImageStat
     except ImportError:
         Image = None  # type: ignore[assignment]
+        ImageStat = None  # type: ignore[assignment]
 
     for density, size in ADAPTIVE_DENSITIES.items():
         folder = res_dir / f"mipmap-{density}"
@@ -171,8 +198,22 @@ def write_adaptive_icon(source: Path, res_dir: Path) -> list[Path]:
         with Image.open(source) as opened:
             rgba = opened.convert("RGBA")
 
+            # A launcher that masks the icon to a square shows whatever sits
+            # behind a transparent corner; dropping the alpha would turn those
+            # corners black, so they are filled with the artwork's own colour.
+            alpha = rgba.getchannel("A")
+            if alpha.getbbox() is None:
+                fill = (255, 255, 255)
+            else:
+                mean = ImageStat.Stat(rgba.convert("RGB"), mask=alpha).mean
+                fill = (round(mean[0]), round(mean[1]), round(mean[2]))
+
             background = rgba.resize((size, size), resample)
             background = background.filter(ImageFilter.GaussianBlur(radius=size / 24))
+            background = Image.alpha_composite(
+                Image.new("RGBA", (size, size), (*fill, 255)),
+                background,
+            )
             background_path = folder / "ic_launcher_background.png"
             background.convert("RGB").save(background_path, format="PNG", optimize=True)
             written.append(background_path)

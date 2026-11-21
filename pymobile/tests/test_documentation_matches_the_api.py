@@ -49,6 +49,43 @@ def test_the_documented_commands_exist() -> None:
             )
 
 
+def test_the_docs_do_not_call_methods_that_do_not_exist() -> None:
+    """Every ``Name(...).method()`` in the docs must be a method that exists.
+
+    ``Label(self.count).bind()`` read like the Value binding API, but ``bind``
+    lives on ``Value``, so the line raised AttributeError for everyone who
+    copied it. A constructor call directly followed by a method call is the
+    shape that rots when a method moves, and these pages are where a beginner
+    copies from.
+    """
+    import pymobile
+
+    pattern = re.compile(r"(?<![\w.])([A-Z][A-Za-z0-9_]*)\(([^()]*)\)\.([a-z_][a-z0-9_]*)\(")
+    checked: list[str] = []
+    for path in (*PAGES, ROOT / "README.md"):
+        text = path.read_text(encoding="utf-8")
+        # ``Path`` names a pymobile canvas shape and pathlib's class in the
+        # same page; a name imported from another module is not ours to check.
+        foreign: set[str] = set()
+        for line in text.splitlines():
+            imported = re.match(r"from\s+([A-Za-z_][\w.]*)\s+import\s+(.+)", line)
+            if imported and not imported.group(1).startswith("pymobile"):
+                foreign.update(
+                    part.strip().split(" as ")[-1].strip() for part in imported.group(2).split(",")
+                )
+        for cls_name, _, method in pattern.findall(text):
+            if cls_name in foreign:
+                continue
+            cls = getattr(pymobile, cls_name, None)
+            if cls is None:
+                continue
+            checked.append(f"{cls_name}.{method}")
+            assert hasattr(cls, method), (
+                f"{path.name} calls {cls_name}(...).{method}(), which does not exist"
+            )
+    assert checked, "no documented method call was found to check"
+
+
 def test_the_beginner_page_covers_the_mistakes_the_framework_detects() -> None:
     page = (DOCS / "BEGINNER-MISTAKES.md").read_text(encoding="utf-8")
     for name in ("super().__init__()", "on_press=self.save()", "refresh()", "WidgetTypeError"):

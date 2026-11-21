@@ -18,7 +18,7 @@ Build it with ``pymobile build``.
 
 from __future__ import annotations
 
-__version__ = "0.15.0"
+__version__ = "0.15.1"
 __author__ = "MAKSYM KHLYSTUN"
 __license__ = "MIT"
 
@@ -41,11 +41,14 @@ from .core.events import Event, EventBus
 from .core.i18n import (
     device_language,
     flatten_catalogue,
+    format_bytes,
     format_currency,
     format_date,
     format_datetime,
+    format_list,
     format_number,
     format_percent,
+    format_relative_time,
     format_time,
     plural_category,
     t,
@@ -282,6 +285,9 @@ __all__ = [
     "format_date",
     "format_time",
     "format_datetime",
+    "format_bytes",
+    "format_relative_time",
+    "format_list",
     "t",
     "translations",
     # widget registry (custom widgets)

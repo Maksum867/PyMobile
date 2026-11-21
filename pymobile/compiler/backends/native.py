@@ -30,7 +30,7 @@ from ...core.config import ProjectConfig
 from ...errors import PyMobileError, ResourceError
 from ...log import get_logger
 from ...resources import resource_path
-from ..icon import round_icon_xml, write_adaptive_icon
+from ..icon import IconSet, round_icon_xml, write_adaptive_icon
 from ..manifest import build_manifest, network_security_config
 from ..packager import FIXED_TIMESTAMP
 from ..toolchain import Toolchain
@@ -846,10 +846,10 @@ else:
         return dex_dir / "classes.dex"
 
     # -- 4. resources ------------------------------------------------------
-    def link_resources(self, workdir: Path, icons: dict[str, Path]) -> Path:
+    def link_resources(self, workdir: Path, icons: IconSet) -> Path:
         """Compile resources and link the base APK with a binary manifest."""
         res = workdir / "res"
-        for density, icon in icons.items():
+        for density, icon in icons.files.items():
             target = res / f"mipmap-{density}" / "ic_launcher.png"
             target.parent.mkdir(parents=True, exist_ok=True)
             # The icon stage may already have written straight into res/.
@@ -858,13 +858,14 @@ else:
 
         # Adaptive icon (Android 8+): legacy squares alone are shrunk into a
         # white tile by launchers that mask icons, and Android 13+ has nothing
-        # to tint without a monochrome layer.
-        source = next(iter(icons.values()), None)
-        if source is not None:
-            write_adaptive_icon(source, res)
-            anydpi = res / "mipmap-anydpi-v26"
-            anydpi.mkdir(parents=True, exist_ok=True)
-            (anydpi / "ic_launcher_round.xml").write_text(round_icon_xml(), encoding="utf-8")
+        # to tint without a monochrome layer. The layers are drawn from the
+        # original artwork, never from a prepared density: those are already
+        # downscaled (mdpi is 48px) and upscaling one made the foreground a
+        # blurry 48px bitmap on high-density screens.
+        write_adaptive_icon(icons.source, res)
+        anydpi = res / "mipmap-anydpi-v26"
+        anydpi.mkdir(parents=True, exist_ok=True)
+        (anydpi / "ic_launcher_round.xml").write_text(round_icon_xml(), encoding="utf-8")
 
         values = res / "values"
         values.mkdir(parents=True, exist_ok=True)

@@ -30,9 +30,10 @@ specs, so a catalogue entry decides where the number goes::
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import math
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Any
 
@@ -45,6 +46,9 @@ __all__ = [
     "format_date",
     "format_time",
     "format_datetime",
+    "format_bytes",
+    "format_relative_time",
+    "format_list",
     "supported_format_languages",
 ]
 
@@ -1132,9 +1136,314 @@ def format_datetime(
 
 
 # ---------------------------------------------------------------------------
+# bytes, relative time and lists
+# ---------------------------------------------------------------------------
+#: ``{n}`` is the amount, ``{u}`` the unit. ``{n}`` is always grouped and
+#: rounded to at most ``decimals`` fraction digits.
+_BYTES = {
+    "en": ("B", "KB", "MB", "GB", "TB", "PB"),
+    "en-GB": ("B", "kB", "MB", "GB", "TB", "PB"),
+    "en-AU": ("B", "kB", "MB", "GB", "TB", "PB"),
+    "en-CA": ("B", "kB", "MB", "GB", "TB", "PB"),
+    "en-IE": ("B", "kB", "MB", "GB", "TB", "PB"),
+    "uk": ("Б", "КБ", "МБ", "ГБ", "ТБ", "ПБ"),
+    "ru": ("Б", "КБ", "МБ", "ГБ", "ТБ", "ПБ"),
+    # The IEC names are the same in every language, so the binary spellings
+    # are derived from the decimal ones (KB → KiB, КБ → КіБ).
+    "pl": ("B", "kB", "MB", "GB", "TB", "PB"),
+    "cs": ("B", "kB", "MB", "GB", "TB", "PB"),
+    "de": ("B", "KB", "MB", "GB", "TB", "PB"),
+    "de-AT": ("B", "KB", "MB", "GB", "TB", "PB"),
+    "de-CH": ("B", "KB", "MB", "GB", "TB", "PB"),
+    "fr": ("o", "Ko", "Mo", "Go", "To", "Po"),
+    "fr-CA": ("o", "Ko", "Mo", "Go", "To", "Po"),
+    "fr-CH": ("o", "Ko", "Mo", "Go", "To", "Po"),
+    "es": ("B", "KB", "MB", "GB", "TB", "PB"),
+    "es-MX": ("B", "KB", "MB", "GB", "TB", "PB"),
+    "es-US": ("B", "KB", "MB", "GB", "TB", "PB"),
+    "it": ("B", "kB", "MB", "GB", "TB", "PB"),
+    "pt": ("B", "kB", "MB", "GB", "TB", "PB"),
+    "pt-PT": ("B", "kB", "MB", "GB", "TB", "PB"),
+    "nl": ("B", "kB", "MB", "GB", "TB", "PB"),
+    "ro": ("B", "kB", "MB", "GB", "TB", "PB"),
+    "tr": ("B", "kB", "MB", "GB", "TB", "PB"),
+}
+
+
+def _bytes_units(language: str | None) -> tuple[str, ...]:
+    """The unit names of ``language`` (English when it has no table)."""
+    from .i18n import normalise_language
+
+    tag = normalise_language(language or _current_language())
+    return _BYTES.get(tag) or _BYTES.get(tag.split("-")[0]) or _BYTES["en"]
+
+
+def format_bytes(
+    value: float | int | Decimal,
+    *,
+    language: str | None = None,
+    locale: str | None = None,
+    decimals: int | None = None,
+    binary: bool = False,
+) -> str:
+    """A file or storage size the way ``language`` writes it: ``1536`` → ``1.5 KB``.
+
+    ``decimals`` fixes the fraction digits; by default one is shown and
+    ``1023``/``1024`` both read as a whole number of kilobytes. ``binary=True``
+    uses 1024 bytes per step and the IEC names (``1024 B`` → ``1 KiB``), where
+    the decimal units differ. ``0`` stays ``"0 B"``; a negative size keeps its
+    sign.
+    """
+    language = _language_argument(language, locale)
+    if decimals is not None and decimals < 0:
+        raise ValueError("decimals must not be negative")
+    units = _bytes_units(language)
+    base = 1024 if binary else 1000
+    number = _to_decimal(value)
+    if number.is_nan():
+        raise ValueError(f"cannot format {value!r} as a size")
+    if number.is_infinite():
+        raise ValueError("cannot format an infinite size")
+    negative, magnitude = number < 0, abs(number)
+    step = Decimal(base)
+    index = 0
+    while magnitude >= step and index < len(units) - 1:
+        magnitude /= step
+        index += 1
+    if index:
+        places = decimals if decimals is not None else min(1, max(0, 3 - len(str(int(magnitude)))))
+        scaled = magnitude.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_EVEN)
+        text = format_number(scaled, places, language=language)
+    else:
+        scaled = magnitude.quantize(Decimal(1), rounding=ROUND_HALF_EVEN)
+        text = format_number(scaled, decimals or 0, language=language)
+    if not binary:
+        name = units[index]
+    elif not index:
+        name = units[0]
+    else:
+        # KB → KiB, КБ → КіБ: the IEC names keep the language's own letters.
+        cyrillic = units[index].endswith("Б")
+        name = units[index][:-1] + ("іБ" if cyrillic else "iB")
+    return ("-" if negative else "") + text + " " + name
+
+
+#: ``{n}`` the count, ``{u}`` the unit (minute/day/hour). ``past`` and ``future``
+#: are the words that follow the phrase: Ukrainian ``"5 хвилин тому"`` /
+#: ``"через 5 хвилин"``, English ``"5 minutes ago"`` / ``"in 5 minutes"``.
+#: Every quantity a language distinguishes needs a plural form map, exactly as
+#: in a catalogue: ``{"one": "хвилина", "few": "хвилини", "many": "хвилин"}``.
+_RELATIVE: dict[str, dict[str, tuple[Mapping[str, str], str, str]]] = {
+    "en": {
+        "minute": ({"one": "minute", "other": "minutes"}, "{n} minutes ago", "in {n} minutes"),
+        "hour": ({"one": "hour", "other": "hours"}, "{n} hours ago", "in {n} hours"),
+        "day": ({"one": "day", "other": "days"}, "{n} days ago", "in {n} days"),
+        "week": ({"one": "week", "other": "weeks"}, "{n} weeks ago", "in {n} weeks"),
+        "month": ({"one": "month", "other": "months"}, "{n} months ago", "in {n} months"),
+        "year": ({"one": "year", "other": "years"}, "{n} years ago", "in {n} years"),
+    },
+    "uk": {
+        "minute": (
+            {"one": "хвилина", "few": "хвилини", "many": "хвилин"},
+            "{n} {u} тому",
+            "через {n} {u}",
+        ),
+        "hour": (
+            {"one": "година", "few": "години", "many": "годин"},
+            "{n} {u} тому",
+            "через {n} {u}",
+        ),
+        "day": ({"one": "день", "few": "дні", "many": "днів"}, "{n} {u} тому", "через {n} {u}"),
+        "week": (
+            {"one": "тиждень", "few": "тижні", "many": "тижнів"},
+            "{n} {u} тому",
+            "через {n} {u}",
+        ),
+        "month": (
+            {"one": "місяць", "few": "місяці", "many": "місяців"},
+            "{n} {u} тому",
+            "через {n} {u}",
+        ),
+        "year": ({"one": "рік", "few": "роки", "many": "років"}, "{n} {u} тому", "через {n} {u}"),
+    },
+    "ru": {
+        "minute": (
+            {"one": "минута", "few": "минуты", "many": "минут"},
+            "{n} {u} назад",
+            "через {n} {u}",
+        ),
+        "hour": ({"one": "час", "few": "часа", "many": "часов"}, "{n} {u} назад", "через {n} {u}"),
+        "day": ({"one": "день", "few": "дня", "many": "дней"}, "{n} {u} назад", "через {n} {u}"),
+        "week": (
+            {"one": "неделя", "few": "недели", "many": "недель"},
+            "{n} {u} назад",
+            "через {n} {u}",
+        ),
+        "month": (
+            {"one": "месяц", "few": "месяца", "many": "месяцев"},
+            "{n} {u} назад",
+            "через {n} {u}",
+        ),
+        "year": ({"one": "год", "few": "года", "many": "лет"}, "{n} {u} назад", "через {n} {u}"),
+    },
+}
+
+#: Unit order and the seconds each step covers, biggest first. The final entry
+#: is what the seconds under an hour fall back to.
+_RELATIVE_STEPS = (
+    ("year", 31_536_000),
+    ("month", 2_592_000),
+    ("week", 604_800),
+    ("day", 86_400),
+    ("hour", 3600),
+    ("minute", 60),
+)
+
+#: A unit is used once the value is at least this much of the step above it,
+#: which is what keeps a single unit from being spelled with the next one up:
+#: "60 minutes" rather than "1 hour". The last row always applies, so a
+#: 30-second difference reads "1 minute ago"/"in 1 minute".
+_RELATIVE_MIN_FRACTION = 1.0
+
+
+def _relative_forms(language: str | None) -> dict[str, tuple[Mapping[str, str], str, str]]:
+    """The phrases of ``language``, with English as the fallback."""
+    from .i18n import normalise_language
+
+    tag = normalise_language(language or _current_language())
+    return _RELATIVE.get(tag) or _RELATIVE.get(tag.split("-")[0]) or _RELATIVE["en"]
+
+
+def format_relative_time(
+    moment: datetime | str,
+    *,
+    now: datetime | None = None,
+    language: str | None = None,
+    locale: str | None = None,
+) -> str:
+    """How long ago ``moment`` was, or how long until it: ``5 хвилин тому`` / ``in 5 minutes``.
+
+    Accepts a :class:`~datetime.datetime` or an ISO-8601 string (what a JSON
+    API returns), and a number, which counts seconds from ``now``. ``now`` is
+    the reference point — pass one to keep the result testable, otherwise the
+    current time is used. A difference under a minute reads ``"1 minute ago"``
+    (English) / ``"1 хвилина тому"``.
+    """
+    language = _language_argument(language, locale)
+    tag = language or _current_language()
+    if isinstance(moment, (int, float)) and not isinstance(moment, bool):
+        if not math.isfinite(moment):
+            raise ValueError(f"cannot read {moment!r} as a number of seconds")
+        reference = now or datetime.now()
+        moment = reference - timedelta(seconds=moment)
+    elif isinstance(moment, str):
+        try:
+            moment = datetime.fromisoformat(moment)
+        except ValueError as exc:
+            raise ValueError(
+                f"cannot read {moment!r} as an ISO-8601 date-time (e.g. '2026-11-20T14:05:00')"
+            ) from exc
+    if not isinstance(moment, datetime):
+        raise TypeError(
+            f"format_relative_time needs a datetime or ISO-8601 string, got {type(moment).__name__}"
+        )
+    reference = now or datetime.now(moment.tzinfo)
+    if moment.tzinfo is None and reference.tzinfo is not None:
+        raise ValueError("moment has no time zone but now does; pass both naive or both aware")
+    if moment.tzinfo is not None and reference.tzinfo is None:
+        raise ValueError("now has no time zone but moment does; pass both naive or both aware")
+    seconds = (reference - moment).total_seconds()
+    forms = _relative_forms(language)
+    from .i18n import plural_category
+
+    for unit, length in _RELATIVE_STEPS:
+        # A future moment is rounded *up* (a countdown must not claim less
+        # time than is left), a past one *down* — 3 minutes and 10 seconds
+        # ago is still "3 minutes ago". A step is used only once the value
+        # reaches its second whole unit, so "in 60 minutes" is never spelled
+        # "in 1 hour"; the last row always applies, which covers everything
+        # under a minute.
+        count = math.ceil(abs(seconds) / length) if seconds < 0 else int(abs(seconds) // length)
+        if length != 60 and abs(seconds) < length:
+            continue
+        unit_forms, past, future = forms[unit]
+        name = (
+            unit_forms.get(plural_category(count, tag))
+            or unit_forms.get("other")
+            or next(iter(unit_forms.values()))
+        )
+        return (past if seconds >= 0 else future).format(
+            n=format_number(count, language=language), u=name
+        )
+    unit_forms, past, future = forms["minute"]
+    name = unit_forms.get(plural_category(1, tag)) or next(iter(unit_forms.values()))
+    return (past if seconds >= 0 else future).format(n="1", u=name)
+
+
+#: The joining words and separators of ``format_list``.
+_LISTS = {
+    "en": ("and", ", "),
+    "en-GB": ("and", ", "),
+    "en-AU": ("and", ", "),
+    "en-CA": ("and", ", "),
+    "en-IE": ("and", ", "),
+    "uk": ("та", ", "),
+    "ru": ("и", ", "),
+    "pl": ("i", ", "),
+    "cs": ("a", ", "),
+    "de": ("und", ", "),
+    "de-AT": ("und", ", "),
+    "de-CH": ("und", ", "),
+    "fr": ("et", ", "),
+    "fr-CA": ("et", ", "),
+    "fr-CH": ("et", ", "),
+    "es": ("y", ", "),
+    "es-MX": ("y", ", "),
+    "es-US": ("y", ", "),
+    "it": ("e", ", "),
+    "pt": ("e", ", "),
+    "pt-PT": ("e", ", "),
+    "nl": ("en", ", "),
+    "ro": ("și", ", "),
+    "tr": ("ve", ", "),
+}
+
+
+def _list_words(language: str | None) -> tuple[str, str]:
+    """``(conjunction, separator)`` for ``language`` (English when unknown)."""
+    from .i18n import normalise_language
+
+    tag = normalise_language(language or _current_language())
+    return _LISTS.get(tag) or _LISTS.get(tag.split("-")[0]) or _LISTS["en"]
+
+
+def format_list(
+    items: Iterable[str],
+    *,
+    language: str | None = None,
+    locale: str | None = None,
+) -> str:
+    """A readable list: ``["a", "b", "c"]`` → ``"a, b and c"`` (en), ``"a, b та c"`` (uk).
+
+    One item is that item, two are joined with the conjunction alone, and an
+    empty list is the empty string. Items are ``str()``-ed, so numbers and
+    other values work; the conjunction and separator follow ``language``.
+    """
+    language = _language_argument(language, locale)
+    words = [str(item) for item in items]
+    if not words:
+        return ""
+    if len(words) == 1:
+        return words[0]
+    conjunction, separator = _list_words(language)
+    head = separator.join(words[:-1])
+    return head + separator + conjunction + " " + words[-1]
+
+
+# ---------------------------------------------------------------------------
 # format specs inside translated strings
 # ---------------------------------------------------------------------------
-_SPECS = ("number", "percent", "currency", "date", "time", "datetime")
+_SPECS = ("number", "percent", "currency", "date", "time", "datetime", "bytes", "relative", "list")
 
 
 def format_spec(value: Any, spec: str, language: str) -> str | None:
@@ -1158,6 +1467,14 @@ def format_spec(value: Any, spec: str, language: str) -> str | None:
         return format_date(value, argument or "medium", language=language)
     if name == "time":
         return format_time(value, argument or "short", language=language)
+    if name == "bytes":
+        return format_bytes(value, language=language)
+    if name == "relative":
+        return format_relative_time(value, language=language)
+    if name == "list":
+        if isinstance(value, str):
+            raise ValueError("the list spec needs a sequence of items, not a string")
+        return format_list(value, language=language)  # type: ignore[arg-type]
     date_style, _, time_style = argument.partition(",")
     return format_datetime(value, date_style or "medium", time_style or "short", language=language)
 

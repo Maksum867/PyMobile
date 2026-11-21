@@ -34,11 +34,15 @@ from typing import Any, Generic, TypeVar
 
 from ...log import get_logger
 
-__all__ = ["Value", "Computed"]
+__all__ = ["Value", "Computed", "RateLimited"]
 
 T = TypeVar("T")
 
 _log = get_logger("ui.state")
+
+#: How a :class:`RateLimited` spreads the values it publishes.
+DEBOUNCE = "debounce"
+THROTTLE = "throttle"
 
 #: The Computed whose function is running, so the Values it reads can be
 #: recorded as its sources. One ContextVar keeps concurrent builds apart.
@@ -229,6 +233,98 @@ class Value(_Trackable, Generic[T]):
         if value is not None:
             self.set(transform(value) if transform else value)
         return self
+
+    def debounce(self, delay_ms: int = 300) -> Value[T]:
+        """Publish each change only once typing has stopped for ``delay_ms``.
+
+        A search box should not fire a request per keystroke::
+
+            self.query = Value("")
+            self.query.debounce(300).subscribe(self.search)
+
+        The returned value is the one to subscribe to (or bind); it starts out
+        holding this value's current content and follows it ``delay_ms`` after
+        the last change. Timers come from :meth:`App.set_timeout` and are
+        cancelled by ``App.stop()``, so nothing outlives the application.
+        """
+        return RateLimited(self, delay_ms, DEBOUNCE)
+
+    def throttle(self, interval_ms: int = 300) -> Value[T]:
+        """Publish at most once every ``interval_ms``; the first change is now.
+
+        The opposite trade of :meth:`debounce`: a scroll handler or a ``Slider``
+        wants a steady stream of updates, not one after the gesture ends::
+
+            self.zoom.value = 2
+            self.zoom.throttle(100).bind(self.label, "text", transform=str)
+
+        The returned value starts holding this value's current content, publishes
+        the first change immediately and then at most once per ``interval_ms``.
+        """
+        return RateLimited(self, interval_ms, THROTTLE)
+
+
+class RateLimited(Value[T]):
+    """A :class:`Value` that republishes another value at a limited rate.
+
+    Created by :meth:`Value.debounce` and :meth:`Value.throttle`; the base
+    class is public so type checkers see the value, but the two helpers are
+    the way to get one. Reading and writing it is deliberately *not* wired to
+    the source: it is an output, not a second input.
+    """
+
+    __slots__ = ("_source", "_delay_ms", "_mode", "_timer")
+
+    def __init__(self, source: Value[T], delay_ms: int, mode: str) -> None:
+        if not isinstance(delay_ms, (int, float)) or isinstance(delay_ms, bool):
+            raise TypeError(f"delay must be a number of milliseconds, got {delay_ms!r}")
+        if delay_ms < 0:
+            raise ValueError(f"delay must be >= 0, got {delay_ms}")
+        if mode not in (DEBOUNCE, THROTTLE):
+            raise ValueError(f"mode must be {DEBOUNCE!r} or {THROTTLE!r}, got {mode!r}")
+        super().__init__(source.value, name=f"{source._name}.{mode}" if source._name else mode)
+        self._source = source
+        self._delay_ms = delay_ms
+        self._mode = mode
+        self._timer: Any = None
+        source.subscribe(self._changed)
+
+    def _app(self) -> Any:
+        """The running application, or ``None`` when there is none."""
+        try:
+            from ...core.app import App
+        except Exception:  # pragma: no cover - a broken import must not break a value
+            _log.debug("no application module for a rate-limited value", exc_info=True)
+            return None
+        try:
+            return App.current()
+        except Exception:  # pragma: no cover - a broken global must not break a value
+            _log.debug("could not read the running application", exc_info=True)
+            return None
+
+    def _changed(self, value: T) -> None:
+        app = self._app()
+        if app is None:
+            # No application (a unit test, a script): there is no event loop to
+            # republish on, so follow immediately — the limit is about timing.
+            self.set(value)
+            return
+        if self._mode == DEBOUNCE:
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = app.set_timeout(self._delay_ms, lambda: self.set(value))
+            return
+        # throttle: publish now, then hold for the interval
+        if self._timer is not None and not self._timer.cancelled:
+            return
+        self.set(value)
+        self._timer = app.set_timeout(self._delay_ms, lambda: setattr(self, "_timer", None))
+
+    def cancel(self) -> None:
+        """Stop following the source and drop any pending publish."""
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
 
 
 class Computed(_Trackable, Generic[T]):

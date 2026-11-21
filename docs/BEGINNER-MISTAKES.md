@@ -74,10 +74,11 @@ If several things change together, change them all, then call `refresh()` once.
 For values you want to watch automatically, use `Value`:
 
 ```python
-from pymobile import Value
+from pymobile import Label, Value
 
 self.count = Value(0)
-Label(self.count).bind()             # re-renders on every change
+self.label = Label("0")
+self.count.bind(self.label, "text")  # re-renders on every change
 self.count.set(self.count.get() + 1)
 ```
 
